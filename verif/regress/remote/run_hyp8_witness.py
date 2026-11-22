@@ -43,6 +43,8 @@ def main():
     model = intdir / 'model' / 'Variane_testharness'
     assert model.is_file(), f'model missing: {model}'
     results = json.loads((intdir / 'results.json').read_text())
+    if sha(model) != results['build']['modelSha256']:
+        raise ValueError('witness model does not match build identity')
     elf = None
     for cand in sorted(RUNS.glob('*/output/**/fw_payload.elf')):
         if sha(cand) == want:
@@ -65,6 +67,7 @@ def main():
                          cwd=out, start_new_session=True)
     (out / 'witness.json').write_text(json.dumps({
         'intTag': tag, 'modelSha256': results['build'].get('modelSha256'),
+        'nativeTuning': results['build'].get('nativeTuning'),
         'elf': str(elf), 'elfSha256': want, 'argv': cmd, 'pid': p.pid,
         'budget': budget, 'waitPids': wait}, indent=2))
     print(f'launched pid={p.pid} model={results["build"].get("modelSha256")} elf={elf}')

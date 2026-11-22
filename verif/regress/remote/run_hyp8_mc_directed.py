@@ -184,6 +184,7 @@ def main():
     assert not missing, f'unknown tests: {missing}'
 
     summary = {'intTag': tag, 'modelSha256': model_sha,
+               'nativeTuning': results['build'].get('nativeTuning'),
                'srcDir': str(src_dir), 'tests': {}}
     rc_all = 0
     for entry0 in selected:

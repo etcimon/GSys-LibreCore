@@ -28,9 +28,10 @@
 #                                 (cross-module debug traces out) unless 1
 #
 # Generated C++ (same recipe as soft-ladder-build-harness.sh, guide §4b.1):
+#   HYP8_BUILD_TUNING=auto|off|packed-tiled    native MC policy, see guide §64
 #   HYP8_BUILD_OPT=-O2            OPT_FAST/OPT_GLOBAL (verilated.mk default -Os)
 #   HYP8_BUILD_OPT_SLOW=-O1       OPT_SLOW (__Syms/init: not hot, -O2 costs hours)
-#   HYP8_BUILD_MARCH=<isa>|none   default x86-64-v3 on an AVX2+BMI2 host
+#   HYP8_BUILD_MARCH=native|<isa>|none   prefer native on AVX-512 + BMI2 fork hosts
 #   HYP8_BUILD_PGO=0|1            simulation PGO, default 1 and enforced: an
 #                                 explicit 0 is refused unless
 #                                 HYP8_BUILD_ALLOW_NOPGO=1 opts out. instrumented
@@ -327,26 +328,45 @@ else
   log "split-loops .vlt: off"
 fi
 
+# Resolve the native profile before selecting ISA or starting expensive stages.
+TUNING="${HYP8_BUILD_TUNING:-auto}"
+TUNED_DIR="$VERLIB_DIR/hyp8-packed-tiled"
+eligible=0
+if [[ "$TARGET" == g6lc64_hyp8_mc && "$VTHREADS" == 2 && "$VLT_FLAVOUR" == g6lc ]]; then
+  eligible=1
+fi
+case "$TUNING" in
+  auto)
+    TUNING=off
+    # Do not retrofit legacy native builds or silently change a compiler A/B.
+    if [[ "$eligible" == 1 && "$SPLIT_VLT_ON" == 1 && -z "$BUILD_VLT_ARGS" &&
+          "${HYP8_BUILD_HIER_TRACE:-0}" == 0 ]] &&
+       { [[ -d "$TUNED_DIR" ]] || { [[ "${HYP8_BUILD_PGO_STAGE:-full}" != use &&
+           ! -e "$VERLIB_DIR/Variane_testharness" ]] && ! compgen -G "$VERLIB_DIR/*.o" >/dev/null; }; }; then
+      TUNING=packed-tiled
+    fi ;;
+  packed-tiled) [[ "$eligible" == 1 ]] || { log "packed-tiled requires two-lane g6lc Hyp8 MC"; exit 2; } ;;
+  off) ;;
+  *) log "bad HYP8_BUILD_TUNING=$TUNING"; exit 2 ;;
+esac
+if [[ "$TUNING" == off && -e "$TUNED_DIR" ]]; then
+  log "refusing to reuse tuned objects with tuning off; select a fresh Mdir"; exit 2
+fi
+
 # --- generated C++: optimisation level, host ISA, simulation PGO -------------
 BUILD_OPT="${HYP8_BUILD_OPT:--O2}"
 BUILD_OPT_SLOW="${HYP8_BUILD_OPT_SLOW:--O1}"
+ISA_HEADER="$ROOT/verif/regress/remote/hyp8/g6lc_native_isa.h"
+read -ra CXX_CMD <<<"$CXX"
+native_isa_ok() {
+  "${CXX_CMD[@]}" -march=native -DVL_SIMD_PREFER_512 -include "$ISA_HEADER" \
+    -E -x c++ /dev/null >/dev/null
+}
 if [[ -z "${HYP8_BUILD_MARCH:-}" ]]; then
-  if [[ "$VLT_FLAVOUR" == g6lc && "$(uname -m)" == x86_64 ]] \
-     && grep -qw avx512f /proc/cpuinfo 2>/dev/null && grep -qw avx512vl /proc/cpuinfo 2>/dev/null \
-     && grep -qw avx512bw /proc/cpuinfo 2>/dev/null && grep -qw avx512dq /proc/cpuinfo 2>/dev/null; then
-    # Full x86-64-v4 AVX-512 baseline: the wide word-vector helpers widen to the
-    # 16-word SIMD tier (VL_SIMD_PREFER_512) and native codegen improved measurably.
-    BUILD_MARCH="x86-64-v4"
-    # _VL_HW_FUNNEL (verilated_types.h) needs __AVX512VBMI2__ — the vpshrdvd
-    # funnel that collapses each wide shift/insert chunk from 3 insns to 1 on
-    # ~4.8k sites. x86-64-v4 omits VBMI2, so opt in explicitly when the host
-    # exposes it (cpuinfo spells it avx512_vbmi2 on AMD/Intel; verified
-    # -march=x86-64-v4 alone leaves __AVX512VBMI2__ undefined on gcc-16).
-    if grep -qwE 'avx512_?vbmi2' /proc/cpuinfo 2>/dev/null; then
-      BUILD_MARCH="$BUILD_MARCH -mavx512vbmi2"
-    fi
-  elif [[ "$VLT_FLAVOUR" == g6lc && "$(uname -m)" == x86_64 ]] \
-     && grep -qw avx2 /proc/cpuinfo 2>/dev/null && grep -qw bmi2 /proc/cpuinfo 2>/dev/null; then
+  if [[ "$VLT_FLAVOUR" == g6lc && "$(uname -m)" == x86_64 ]] && native_isa_ok 2>/dev/null; then
+    BUILD_MARCH=native
+  elif [[ "$VLT_FLAVOUR" == g6lc && -x /lib64/ld-linux-x86-64.so.2 ]] &&
+       /lib64/ld-linux-x86-64.so.2 --help | grep 'x86-64-v3 (supported' >/dev/null; then
     BUILD_MARCH="x86-64-v3"
   else
     BUILD_MARCH="none"
@@ -359,6 +379,10 @@ fi
 # separately from __AVX512F__ so non-512 targets keep the 8/4-word tiers).
 [[ "$BUILD_MARCH" == x86-64-v4 || "$BUILD_MARCH" == *avx512* || "$BUILD_MARCH" == native ]] \
   && BUILD_CXXFLAGS="$BUILD_CXXFLAGS -DVL_SIMD_PREFER_512"
+if [[ "$BUILD_MARCH" == native ]]; then
+  native_isa_ok || { log "native ISA unavailable; use HYP8_BUILD_MARCH=x86-64-v3 or none"; exit 2; }
+  BUILD_CXXFLAGS="$BUILD_CXXFLAGS -include $ISA_HEADER"
+fi
 PGO="${HYP8_BUILD_PGO:-1}"
 [[ "${HYP8_BUILD_VERILATE_ONLY:-0}" == "1" ]] && PGO=0
 PGO_DIR="$VERLIB_DIR/pgo"
@@ -382,6 +406,17 @@ if [[ "$RESUME" == "1" && -f "$VERLIB_DIR/Vg6lc_testharness.mk" && -f "$VERLIB_D
 fi
 if [[ "$PGO_STAGE" == "use" && "$VER_DONE" != "1" ]]; then
   log "HYP8_BUILD_PGO_STAGE=use needs HYP8_BUILD_RESUME=1 and a verilated model in $VERLIB_DIR"; exit 2
+fi
+if [[ "$VER_DONE" == 1 && "$BUILD_MARCH" == native ]] &&
+   { ! grep -Fqw -- "-march=native" "$VERLIB_DIR/Vg6lc_testharness.mk" ||
+     ! grep -Fq -- "-include $ISA_HEADER" "$VERLIB_DIR/Vg6lc_testharness.mk"; }; then
+  log "resume FAIL: native ISA was not verified in this build; use its original march or a fresh Mdir"
+  exit 2
+fi
+if [[ "$VER_DONE" == 1 && "$BUILD_MARCH" != native ]] &&
+   grep -Fqw -- "-march=native" "$VERLIB_DIR/Vg6lc_testharness.mk"; then
+  log "resume FAIL: generated model uses native ISA; use a fresh Mdir for the portable control"
+  exit 2
 fi
 BASE_CXXFLAGS="$BUILD_CXXFLAGS"; BASE_LDFLAGS="$BUILD_LDFLAGS"
 PGO_GEN="-fprofile-generate=$PGO_DIR -fprofile-update=atomic"
@@ -469,6 +504,21 @@ if [[ "$PGO_STAGE" == "verilate" ]]; then
 fi
 
 MK_OPT=("OPT_FAST=$BUILD_OPT" "OPT_SLOW=$BUILD_OPT_SLOW" "OPT_GLOBAL=$BUILD_OPT")
+TUNING_MAKE=()
+if [[ "$TUNING" == packed-tiled ]]; then
+  if [[ "$PGO_STAGE" == use && ! -d "$TUNED_DIR" ]]; then
+    log "cannot use profiles from an untuned stage 1; start a fresh build"; exit 2
+  fi
+  if python3 "$ROOT/verif/regress/remote/g6lc_hyp8_tuning.py" "$VERLIB_DIR" >>"$BUILD_LOG" 2>&1; then
+    TUNING_MAKE=(-f hyp8-packed-tiled/rules.mk)
+  else
+    rc=$?
+    tail -5 "$BUILD_LOG"
+    if [[ $rc != 3 || "${HYP8_BUILD_TUNING:-auto}" != auto || -e "$TUNED_DIR" ]]; then exit "$rc"; fi
+    TUNING=off
+  fi
+fi
+log "native tuning=$TUNING (requested ${HYP8_BUILD_TUNING:-auto}); no experimental DFG flags added"
 if [[ "$PGO" == "1" && "$PGO_STAGE" == "use" ]]; then
   # phase 1 was a previous invocation (HYP8_BUILD_PGO_STAGE=instrumented)
   [[ -x "$VERLIB_DIR/Variane_testharness" ]] || cp -a "$VERLIB_DIR/pgo-train/Variane_testharness.instrumented" "$VERLIB_DIR/Variane_testharness" 2>/dev/null || true
@@ -477,6 +527,7 @@ if [[ "$PGO" == "1" && "$PGO_STAGE" == "use" ]]; then
 else
 set +e
 make -C "$VERLIB_DIR" -j"$JOBS" -f Vg6lc_testharness.mk \
+  "${TUNING_MAKE[@]}" \
   CXX="$CXX" CC="$CC" LINK="$CXX" "${MK_OPT[@]}" \
   >>"$BUILD_LOG" 2>&1
 rc=$?
@@ -493,6 +544,8 @@ if [[ $rc -ne 0 || ! -x "$VERLIB_DIR/Variane_testharness" ]]; then
   tail -n 60 "$BUILD_LOG"
   exit 1
 fi
+
+printf 'native_tuning=%s\nverilator: %s\n' "$TUNING" "$("$VERILATOR" --version)" >>"$BUILD_LOG"
 
 if [[ "$PGO" == "1" && "$PGO_STAGE" == "instrumented" ]]; then
   log "BUILD OK (PGO stage 1 of 2): $VERLIB_DIR/Variane_testharness is the instrumented model; runs on it train the profile in $PGO_DIR"
@@ -542,6 +595,7 @@ if [[ "$PGO" == "1" ]]; then
   rm -f "$VERLIB_DIR"/*.o "$VERLIB_DIR"/*.a "$VERLIB_DIR/Variane_testharness"
   set +e
   make -C "$VERLIB_DIR" -j"$JOBS" -f Vg6lc_testharness.mk CXX="$CXX" CC="$CC" LINK="$CXX" \
+    "${TUNING_MAKE[@]}" \
     "OPT_FAST=$BUILD_OPT $PGO_USE" "OPT_SLOW=$BUILD_OPT_SLOW $PGO_USE" "OPT_GLOBAL=$BUILD_OPT $PGO_USE" \
     > "$VERLIB_DIR/pgo-phase2.log" 2>&1
   rc=$?

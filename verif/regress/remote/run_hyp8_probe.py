@@ -59,7 +59,12 @@ def main():
     assert model.is_file(), f'model missing: {model}'
     gcc = f'{RISCV}/bin/riscv-none-elf-gcc'
     nm = f'{RISCV}/bin/riscv-none-elf-nm'
-    summary = {'intTag': tag, 'modelSha256': digest(model), 'tests': {}}
+    summary = {'intTag': tag, 'modelSha256': digest(model), 'nativeTuning': None, 'tests': {}}
+    results = model.parent.parent / 'results.json'
+    if results.is_file():
+        build = json.loads(results.read_text()).get('build', {})
+        if build.get('modelSha256') == summary['modelSha256']:
+            summary['nativeTuning'] = build.get('nativeTuning')
     rc_all = 0
     for name in probes:
         src = data / f'{name}.S'

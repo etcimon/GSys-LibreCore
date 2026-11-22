@@ -440,6 +440,14 @@ def main():
                 if build_env.get('HYP8_BUILD_PGO_STAGE', 'full') in ('full', 'use')
                 else build_env.get('HYP8_BUILD_PGO_STAGE', 'full') == 'instrumented'),
         }
+        if rc == 0 and model.is_file() and build_env.get('HYP8_BUILD_PGO_STAGE') != 'verilate':
+            receipt = out / 'model/hyp8-packed-tiled/manifest.json'
+            build_log = out / 'model/build.log'
+            if receipt.is_file():
+                results['build']['nativeTuning'] = dict(
+                    json.loads(receipt.read_text())['summary'], receiptSha256=digest(receipt))
+            elif build_log.is_file() and 'native_tuning=off' in build_log.read_text(errors='replace'):
+                results['build']['nativeTuning'] = {'profile': 'off'}
         results['status'] = 'build_complete' if (rc == 0 and model.is_file()) \
             else 'build_failed'
         if (rc == 0 and build_env.get('HYP8_BUILD_PGO_STAGE') == 'verilate'

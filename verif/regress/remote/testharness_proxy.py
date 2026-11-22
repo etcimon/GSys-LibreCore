@@ -1010,6 +1010,11 @@ def _git_tracked_files(root: Path, patterns: list[str]) -> list[Path]:
         return []
 
 
+HYP8_NATIVE_INPUTS = tuple("verif/regress/remote/" + name for name in (
+    "g6lc_hyp8_tuning.py", "g6lc_pack_generated_rows.py", "g6lc_pack_columns.py",
+    "g6lc_column_tile.h", "hyp8/g6lc_native_isa.h", "hyp8/Flist.hyp8_mc_sim"))
+
+
 def build_cache_key(root: Path, flavour: str, target: str) -> str:
     """Content hash of the build inputs for a (flavour, target) pair.
 
@@ -1030,6 +1035,8 @@ def build_cache_key(root: Path, flavour: str, target: str) -> str:
         "core/Flist.fetch_B",
         "core/Flist.smt_legacy",
     ]
+    if flavour == "hyp8":
+        seed_files.extend(HYP8_NATIVE_INPUTS)
     for rel in seed_files:
         p = root / rel
         if p.is_file():
@@ -1084,7 +1091,7 @@ def build_cache_key(root: Path, flavour: str, target: str) -> str:
 # spaces == json.dumps(..., sort_keys=True, separators=(",", ":")).
 
 
-def _manifest_sources(root: Path) -> dict[str, str]:
+def _manifest_sources(root: Path, extra=()) -> dict[str, str]:
     """sha256 of every build input, keyed by repo-relative POSIX path.
 
     Same input set as build_cache_key: seed files plus tracked (or scanned)
@@ -1110,6 +1117,7 @@ def _manifest_sources(root: Path) -> dict[str, str]:
         "core/Flist.cva6",
         "core/Flist.fetch_B",
         "core/Flist.smt_legacy",
+        *extra,
     ):
         p = root / rel
         if p.is_file():
@@ -1167,9 +1175,8 @@ def build_recipe_record(rem: Remote, root: Path, args, verlib: str) -> dict:
     omitted control visible without a soak.
     """
     verlib_dir = f"{REMOTE_ROOT}/work/{verlib}"
-    verfiles = rem.out(
-        f"cat {shlex.quote(verlib_dir + '/Variane_testharness__verFiles.dat')}"
-    )
+    prefix = "Vg6lc_testharness" if args.flavour == "hyp8" else "Variane_testharness"
+    verfiles = rem.out(f"cat {shlex.quote(verlib_dir + '/' + prefix + '__verFiles.dat')}")
     commands = re.findall(r'^C "(.*)"$', verfiles, re.M)
     inputs = re.findall(r'^S\s+[^\n]*"([^"\n]+)"$', verfiles, re.M)
     if len(commands) != 1 or not commands[0].strip() or not inputs:
@@ -1198,7 +1205,8 @@ def build_recipe_record(rem: Remote, root: Path, args, verlib: str) -> dict:
         key, _, value = kv.partition("=")
         if key == "SOFT_LADDER_BUILD_VLT_ARGS":
             extra_args = value
-        elif key in ("SOFT_LADDER_ISOLATED", "SOFT_LADDER_OVERLAY", "G6LC_STORAMIC_DEFINES"):
+        elif key in ("SOFT_LADDER_ISOLATED", "SOFT_LADDER_OVERLAY", "G6LC_STORAMIC_DEFINES",
+                     "HYP8_BUILD_TUNING"):
             build_env[key] = value
     version = rem.out(
         f"sed -n 's/^.*verilator: *//p' {shlex.quote(verlib_dir + '/build.log')} | head -1"
@@ -1242,7 +1250,8 @@ def write_build_manifest(rem: Remote, root: Path, args, verlib: str) -> None:
     ).strip()
     if not re.fullmatch(r"[0-9a-f]{64}", exe_sha):
         die(f"could not hash remote harness {harness} (got '{exe_sha}')")
-    sources = _manifest_sources(root)
+    sources = (_manifest_sources(root, HYP8_NATIVE_INPUTS) if args.flavour == "hyp8"
+               else _manifest_sources(root))
     configuration = {
         "flavour": args.flavour,
         "target": args.target,
@@ -1255,6 +1264,18 @@ def write_build_manifest(rem: Remote, root: Path, args, verlib: str) -> None:
         # value is recorded separately in build.log/.vthreads after the build.
         "vthreads": str(getattr(args, "vthreads", None) or "harness"),
     }
+    if args.flavour == "hyp8":
+        build_log = shlex.quote(f"{REMOTE_ROOT}/work/{verlib}/build.log")
+        mode = rem.out(f"sed -n 's/^native_tuning=//p' {build_log} | tail -1").strip()
+        if mode not in ("off", "packed-tiled"):
+            die("missing effective Hyp8 native tuning in build log")
+        configuration["nativeTuning"] = mode
+        if mode == "packed-tiled":
+            receipt = REMOTE_ROOT + "/work/" + verlib + "/hyp8-packed-tiled/manifest.json"
+            sha = rem.out(f"sha256sum {shlex.quote(receipt)} | cut -d' ' -f1").strip()
+            if not re.fullmatch(r"[0-9a-f]{64}", sha):
+                die("could not attest Hyp8 tuning receipt")
+            configuration["nativeTuningSha256"] = sha
     for kv in getattr(args, "env", None) or []:
         key, _, value = kv.partition("=")
         if key in ("SOFT_LADDER_ISOLATED", "SOFT_LADDER_OVERLAY"):
@@ -1262,7 +1283,7 @@ def write_build_manifest(rem: Remote, root: Path, args, verlib: str) -> None:
     manifest = {
         "schemaVersion": 1,
         "target": args.target,
-        "top": "ariane_testharness",
+        "top": "g6lc_testharness" if args.flavour == "hyp8" else "ariane_testharness",
         "execution": "remote-proxy",
         "sources": sources,
         "sourceSha256": _canon_sha256([[k, v] for k, v in sources.items()]),
@@ -1386,6 +1407,16 @@ def cmd_build(rem: Remote, args) -> int:
     cache_dir = None
     if args.output_cache:
         cache_key = build_cache_key(root, args.flavour, args.target)
+        if args.flavour == "hyp8":
+            # Seeds carry native objects/PGO data. Never share them between
+            # different requested recipes, including defaults from remote env.sh.
+            defaults = rem.out(f"{env_prefix()} env | grep -E '^(HYP8_BUILD_|SOFT_LADDER_BUILD_|"
+                               "SOFT_LADDER_VERILATOR_|VERILATOR_FLAVOUR=|VLT_HOME=|CC=|CXX=)' "
+                               "| LC_ALL=C sort | sha256sum")
+            host_isa = rem.out("LC_ALL=C lscpu | grep -E '^(Architecture|Vendor ID|Model name|Flags):' "
+                               "| sha256sum")
+            cache_key = _canon_sha256([cache_key, defaults, host_isa, args.env,
+                                       getattr(args, "vthreads", None)])[:24]
         cache_dir = f"{REMOTE_ROOT}/cache/builds/{cache_key}"
         if rem.check(
             f"test -x {shlex.quote(cache_dir)}/Variane_testharness",

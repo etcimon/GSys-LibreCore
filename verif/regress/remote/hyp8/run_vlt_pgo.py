@@ -16,7 +16,7 @@ channel can close; poll TH_OUT_DIR/install.log and TH_OUT_DIR/exit-code.
 
 VLT_PGO_MODE=verilate instead runs one synchronous verilate-only harness
 build with an existing prefix (VLT_HOME, default the qualified fork) at
-HYP8_THREADS (4) for HYP8_TARGET (g6lc64_hyp8_mc) and prints the split /
+HYP8_THREADS (2) for HYP8_TARGET (g6lc64_hyp8_mc) and prints the split /
 unroll / MTask census -- the check that the threaded build really gets
 unroll-before-split with split_var targets."""
 import hashlib
@@ -89,6 +89,7 @@ def build(root, out):
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             start_new_session=True)
     record = {'pid': proc.pid, 'mode': 'build', 'vltHome': home,
+              'nativeTuningRequested': env.get('HYP8_BUILD_TUNING', 'auto'),
               'verilatorBinSha256': digest(f'{home}/bin/verilator_bin'),
               'target': env['SOFT_LADDER_BUILD_TARGET'],
               'threads': env['SOFT_LADDER_VERILATOR_THREADS'],

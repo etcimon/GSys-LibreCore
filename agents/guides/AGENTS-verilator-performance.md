@@ -3684,3 +3684,60 @@ latency tax per edge that no amount of saved spin insns repays.
 Lesson: retired-instruction reduction that adds latency to a sync
 critical path is anti-productive. The spin overhead can only shrink via
 fewer/coarser barrier edges (partition-level work), not wait mechanics.
+
+### 64. Remote Hyp8 build policy
+
+For a fresh, two-lane `g6lc64_hyp8_mc` throughput build, use packed rows +
+tiled columns. The evidence is the four-core 64-iteration writer: 282.38 vs
+168.25 simulated cycles/s in the original/tiled series; in a *different*,
+fresh-build series, 322.80 without transpose fusion vs 290.28 with fusion.
+Do not combine the two speedups. The empty-mask guard did not help this guest
+either. Do not add fusion, guard, predicate packing, a task reorder, or a
+fixed runtime affinity to general test jobs based on these results.
+
+The common `hyp8-build-harness.sh` resolves `HYP8_BUILD_TUNING` for direct
+proxy builds, the isolated integration build, and detached/staged native
+PGO builds. `auto` (default) selects packed/tiled on fresh two-lane MC g6lc
+split builds without explicit extra Verilator arguments or hierarchical
+trace diagnostics. It keeps existing unmarked native seeds on the old path.
+Use `off` for a control or `packed-tiled` to explicitly request the lowering
+on a compatible MC build. Use distinct clean Mdirs, not a profile switch
+inside an existing native build. For example, after proxy sync:
+
+```sh
+python verif/regress/remote/testharness_proxy.py build hyp8 --target g6lc64_hyp8_mc --vthreads 2 --jobs 2 --verlib work-ver-hyp8-mc-tuned
+```
+
+The g6lc builder prefers `-march=native` when the host compiler enables
+AVX-512F/BW/CD/DQ/VL and BMI2; it also sets `VL_SIMD_PREFER_512`. A forced
+include verifies those macros on each native compile, including PGO use.
+`HYP8_BUILD_MARCH=native` requires them; automatic selection on other hosts
+falls back to glibc-supported `x86-64-v3` or the compiler default.
+`HYP8_BUILD_MARCH=x86-64-v3` reproduces the ISA of the timed control.
+Native ELFs are host-specific: do not distribute them as portable v3 builds.
+Native feature enablement is not a measured speedup over the v3 control.
+For performance qualification, use matched ELF/traces/counters and CPUs 2,4
+on the measured host, not that literal CPU list on arbitrary workers.
+
+The native make overlay uses the active core TUs and their own class headers,
+without editing the originals. Both PGO phases use the same overlay. Its
+`hyp8-packed-tiled/manifest.json` carries source, tool, helper, and output
+digests and per-file counts. A mismatched resume is rejected. On a fresh
+unrecognized layout, automatic mode keeps the original C++; explicit mode
+fails rather than reporting a tuned build. Isolated closures include the
+tools. The build report/manifest records the effective policy; prebuilt
+directed, smoke, probe and witness runs retain their selected model. Old
+artifacts without a tuning record are unknown, not retrospectively qualified.
+
+Scalar, SMT2, L3, single-thread leaves, compiler-only training, and archived
+A/B/replay scripts keep their own contracts. No evidence here establishes
+an optimum for those workloads or for Linux boot. On the archived fusion-off
+elaboration the overlay matched all 553 qualified TUs, 3,420 row assignments
+and 13,388 column projections. After removing only the added tile-temporary
+scope and its indentation, all 553 sources matched the qualified overlay.
+Representative row and column objects compiled through the generated make
+rules. On `ovh_calltorch`, GCC 13 also compiled a tuned core TU with
+`-march=native` and the ISA header; disabling either BMI2 or AVX-512F failed
+the header check. The native preprocessor defined `__AVX512VBMI2__` as well
+(not mandatory). This integration check is not a new simulation timing or
+an end-to-end PGO qualification.

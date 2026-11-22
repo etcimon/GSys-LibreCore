@@ -41,6 +41,7 @@ def main():
     model_sha = digest(model)
     assert model_sha == results['build']['modelSha256'], 'model identity changed'
     summary = {'intTag': tag, 'modelSha256': model_sha,
+               'nativeTuning': results['build'].get('nativeTuning'),
                'tests': {}}
     rc_all = 0
     only = os.environ.get('HYP8_ONLY')
