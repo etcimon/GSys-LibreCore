@@ -30,7 +30,15 @@ module aes
   import aes_pkg::*;
 #(
     parameter config_pkg::g6lc_cfg_t G6LCCfg = config_pkg::g6lc_cfg_empty,
-    parameter type fu_data_t = logic
+    parameter type fu_data_t = logic,
+    // r127 AesStages: 0/1 = current 2-stage (stage-1 regs + comb stage-2 ->
+    // result_o). 3 = insert a stage-2 register capturing every result-mux
+    // candidate, then a shallow stage-3 opcode mux -> result_o. This is a
+    // LATENCY contract change: result_o lands one cycle later, so it must only
+    // be enabled together with the matching ex_stage AES-lane delay (the
+    // aes_vld_q/aes_tid_q capture window) and the g6lc_hyp_pkg AesStages field.
+    // Default 0 is bit- and cycle-identical to the pre-change module.
+    parameter bit AesPipe3 = 1'b0
 ) (
     // Subsystem Clock - SUBSYSTEM
     input  logic                        clk_i,
@@ -83,6 +91,21 @@ module aes
   logic [31:0]           sh512sig0h_q, sh512sig0l_q, sh512sig1h_q, sh512sig1l_q;
   logic [31:0]           sh512sum0r_q, sh512sum1r_q;
   logic [63:0]           sha512sig0_q, sha512sig1_q, sha512sum0_q, sha512sum1_q;
+
+  // r127 AesPipe3 stage-2 registers: capture every signal the result mux can
+  // select so the stage-3 opcode mux is shallow. Each _s2 mirrors its stage-1
+  // (_q passthrough) or stage-2-comb (_gen) source one edge later; under
+  // AesPipe3=0 the result mux ignores them and they are synthesized away.
+  logic [31:0]           aes32esi_s2, aes32esmi_s2, aes32dsi_s2, aes32dsmi_s2;
+  logic [63:0]           aes64es_s2, aes64esm_s2, aes64ds_s2, aes64dsm_s2;
+  logic [63:0]           aes64im_s2, aes64ks1i_s2, aes64ks2_s2;
+  logic [31:0]           sha256sig0_s2, sha256sig1_s2, sha256sum0_s2, sha256sum1_s2;
+  logic [31:0]           sh512sig0h_s2, sh512sig0l_s2, sh512sig1h_s2, sh512sig1l_s2;
+  logic [31:0]           sh512sum0r_s2, sh512sum1r_s2;
+  logic [63:0]           sha512sig0_s2, sha512sig1_s2, sha512sum0_s2, sha512sum1_s2;
+  // The result mux selects on the operation; under AesPipe3 the select must be
+  // the stage-2-delayed op or it would read the NEXT issue's opcode.
+  fu_op                  op_s2;
 
   if (G6LCCfg.ZKN && G6LCCfg.RVB) begin : aes_gen_block
     // SHA256 sigma0 transformation function by rotating, shifting and XORing rs1
@@ -313,49 +336,153 @@ module aes
   assign aes64ks2_gen  = {(a_q[63:32] ^ b_q[31:0] ^ b_q[63:32]),
                           (a_q[63:32] ^ b_q[31:0])};
 
-  // -----------
-  // Result MUX
-  // -----------
+  // ---------------------------------------------------------
+  // r127 AesPipe3 stage-2 (registered): capture every result-mux candidate
+  // one edge after stage-1, so the stage-3 opcode mux below is shallow. Under
+  // AesPipe3=0 these flops are dead (mux selects the comb/_q sources) and are
+  // removed by synthesis; the module is then bit- and cycle-identical.
+  // ---------------------------------------------------------
+  always_ff @(posedge clk_i or negedge rst_ni) begin : aes_s2_regs
+    if (!rst_ni) begin
+      aes32esi_s2    <= '0;
+      aes32esmi_s2   <= '0;
+      aes32dsi_s2    <= '0;
+      aes32dsmi_s2   <= '0;
+      aes64es_s2     <= '0;
+      aes64esm_s2    <= '0;
+      aes64ds_s2     <= '0;
+      aes64dsm_s2    <= '0;
+      aes64im_s2     <= '0;
+      aes64ks1i_s2   <= '0;
+      aes64ks2_s2    <= '0;
+      sha256sig0_s2  <= '0;
+      sha256sig1_s2  <= '0;
+      sha256sum0_s2  <= '0;
+      sha256sum1_s2  <= '0;
+      sh512sig0h_s2  <= '0;
+      sh512sig0l_s2  <= '0;
+      sh512sig1h_s2  <= '0;
+      sh512sig1l_s2  <= '0;
+      sh512sum0r_s2  <= '0;
+      sh512sum1r_s2  <= '0;
+      sha512sig0_s2  <= '0;
+      sha512sig1_s2  <= '0;
+      sha512sum0_s2  <= '0;
+      sha512sum1_s2  <= '0;
+      op_s2          <= ADD;
+    end else begin
+      op_s2          <= op_q;
+      aes32esi_s2    <= aes32esi_gen;
+      aes32esmi_s2   <= aes32esmi_gen;
+      aes32dsi_s2    <= aes32dsi_gen;
+      aes32dsmi_s2   <= aes32dsmi_gen;
+      aes64es_s2     <= aes64es_q;
+      aes64esm_s2    <= aes64esm_gen;
+      aes64ds_s2     <= aes64ds_q;
+      aes64dsm_s2    <= aes64dsm_gen;
+      aes64im_s2     <= aes64im_gen;
+      aes64ks1i_s2   <= aes64ks1i_gen;
+      aes64ks2_s2    <= aes64ks2_gen;
+      sha256sig0_s2  <= sha256sig0_q;
+      sha256sig1_s2  <= sha256sig1_q;
+      sha256sum0_s2  <= sha256sum0_q;
+      sha256sum1_s2  <= sha256sum1_q;
+      sh512sig0h_s2  <= sh512sig0h_q;
+      sh512sig0l_s2  <= sh512sig0l_q;
+      sh512sig1h_s2  <= sh512sig1h_q;
+      sh512sig1l_s2  <= sh512sig1l_q;
+      sh512sum0r_s2  <= sh512sum0r_q;
+      sh512sum1r_s2  <= sh512sum1r_q;
+      sha512sig0_s2  <= sha512sig0_q;
+      sha512sig1_s2  <= sha512sig1_q;
+      sha512sum0_s2  <= sha512sum0_q;
+      sha512sum1_s2  <= sha512sum1_q;
+    end
+  end
+
+  // ---------------------------------------------------------
+  // Result MUX (stage-3 when AesPipe3, else stage-2 combinational)
+  // ---------------------------------------------------------
+  // r127 AesPipe3 stage-3 select: each candidate resolves to its registered
+  // stage-2 value when enabled, else the original stage-1/comb source, so the
+  // default (AesPipe3=0) mux is bit-identical. op_mux likewise delays the
+  // opcode select by one stage.
+  logic [31:0] m_aes32esi, m_aes32esmi, m_aes32dsi, m_aes32dsmi;
+  logic [63:0] m_aes64es, m_aes64esm, m_aes64ds, m_aes64dsm;
+  logic [63:0] m_aes64im, m_aes64ks1i, m_aes64ks2;
+  logic [31:0] m_sha256sig0, m_sha256sig1, m_sha256sum0, m_sha256sum1;
+  logic [31:0] m_sh512sig0h, m_sh512sig0l, m_sh512sig1h, m_sh512sig1l;
+  logic [31:0] m_sh512sum0r, m_sh512sum1r;
+  logic [63:0] m_sha512sig0, m_sha512sig1, m_sha512sum0, m_sha512sum1;
+  fu_op        op_mux;
+
+  assign m_aes32esi   = AesPipe3 ? aes32esi_s2   : aes32esi_gen;
+  assign m_aes32esmi  = AesPipe3 ? aes32esmi_s2  : aes32esmi_gen;
+  assign m_aes32dsi   = AesPipe3 ? aes32dsi_s2   : aes32dsi_gen;
+  assign m_aes32dsmi  = AesPipe3 ? aes32dsmi_s2  : aes32dsmi_gen;
+  assign m_aes64es    = AesPipe3 ? aes64es_s2    : aes64es_q;
+  assign m_aes64esm   = AesPipe3 ? aes64esm_s2   : aes64esm_gen;
+  assign m_aes64ds    = AesPipe3 ? aes64ds_s2    : aes64ds_q;
+  assign m_aes64dsm   = AesPipe3 ? aes64dsm_s2   : aes64dsm_gen;
+  assign m_aes64im    = AesPipe3 ? aes64im_s2    : aes64im_gen;
+  assign m_aes64ks1i  = AesPipe3 ? aes64ks1i_s2  : aes64ks1i_gen;
+  assign m_aes64ks2   = AesPipe3 ? aes64ks2_s2   : aes64ks2_gen;
+  assign m_sha256sig0 = AesPipe3 ? sha256sig0_s2 : sha256sig0_q;
+  assign m_sha256sig1 = AesPipe3 ? sha256sig1_s2 : sha256sig1_q;
+  assign m_sha256sum0 = AesPipe3 ? sha256sum0_s2 : sha256sum0_q;
+  assign m_sha256sum1 = AesPipe3 ? sha256sum1_s2 : sha256sum1_q;
+  assign m_sh512sig0h = AesPipe3 ? sh512sig0h_s2 : sh512sig0h_q;
+  assign m_sh512sig0l = AesPipe3 ? sh512sig0l_s2 : sh512sig0l_q;
+  assign m_sh512sig1h = AesPipe3 ? sh512sig1h_s2 : sh512sig1h_q;
+  assign m_sh512sig1l = AesPipe3 ? sh512sig1l_s2 : sh512sig1l_q;
+  assign m_sh512sum0r = AesPipe3 ? sh512sum0r_s2 : sh512sum0r_q;
+  assign m_sh512sum1r = AesPipe3 ? sh512sum1r_s2 : sh512sum1r_q;
+  assign m_sha512sig0 = AesPipe3 ? sha512sig0_s2 : sha512sig0_q;
+  assign m_sha512sig1 = AesPipe3 ? sha512sig1_s2 : sha512sig1_q;
+  assign m_sha512sum0 = AesPipe3 ? sha512sum0_s2 : sha512sum0_q;
+  assign m_sha512sum1 = AesPipe3 ? sha512sum1_s2 : sha512sum1_q;
+  assign op_mux        = AesPipe3 ? op_s2 : op_q;
+
   always_comb begin
     result_o = '0;
     // AES instructions
     if (G6LCCfg.ZKN && G6LCCfg.RVB) begin
       if (G6LCCfg.IS_XLEN32) begin
-        unique case (op_q)
-          AES32ESI: result_o = G6LCCfg.XLEN'(aes32esi_gen);
-          AES32ESMI: result_o = G6LCCfg.XLEN'(aes32esmi_gen);
-          AES32DSI: result_o = G6LCCfg.XLEN'(aes32dsi_gen);
-          AES32DSMI: result_o = G6LCCfg.XLEN'(aes32dsmi_gen);
-          SHA256SIG0: result_o = G6LCCfg.XLEN'(sha256sig0_q);
-          SHA256SIG1: result_o = G6LCCfg.XLEN'(sha256sig1_q);
-          SHA256SUM0: result_o = G6LCCfg.XLEN'(sha256sum0_q);
-          SHA256SUM1: result_o = G6LCCfg.XLEN'(sha256sum1_q);
-          SHA512SIG0H: result_o = G6LCCfg.XLEN'(sh512sig0h_q);
-          SHA512SIG0L: result_o = G6LCCfg.XLEN'(sh512sig0l_q);
-          SHA512SIG1H: result_o = G6LCCfg.XLEN'(sh512sig1h_q);
-          SHA512SIG1L: result_o = G6LCCfg.XLEN'(sh512sig1l_q);
-          SHA512SUM0R: result_o = G6LCCfg.XLEN'(sh512sum0r_q);
-          SHA512SUM1R: result_o = G6LCCfg.XLEN'(sh512sum1r_q);
+        unique case (op_mux)
+          AES32ESI: result_o = G6LCCfg.XLEN'(m_aes32esi);
+          AES32ESMI: result_o = G6LCCfg.XLEN'(m_aes32esmi);
+          AES32DSI: result_o = G6LCCfg.XLEN'(m_aes32dsi);
+          AES32DSMI: result_o = G6LCCfg.XLEN'(m_aes32dsmi);
+          SHA256SIG0: result_o = G6LCCfg.XLEN'(m_sha256sig0);
+          SHA256SIG1: result_o = G6LCCfg.XLEN'(m_sha256sig1);
+          SHA256SUM0: result_o = G6LCCfg.XLEN'(m_sha256sum0);
+          SHA256SUM1: result_o = G6LCCfg.XLEN'(m_sha256sum1);
+          SHA512SIG0H: result_o = G6LCCfg.XLEN'(m_sh512sig0h);
+          SHA512SIG0L: result_o = G6LCCfg.XLEN'(m_sh512sig0l);
+          SHA512SIG1H: result_o = G6LCCfg.XLEN'(m_sh512sig1h);
+          SHA512SIG1L: result_o = G6LCCfg.XLEN'(m_sh512sig1l);
+          SHA512SUM0R: result_o = G6LCCfg.XLEN'(m_sh512sum0r);
+          SHA512SUM1R: result_o = G6LCCfg.XLEN'(m_sh512sum1r);
           default: ;
         endcase
       end
       if (G6LCCfg.IS_XLEN64) begin
-        unique case (op_q)
-          AES64ES: result_o = aes64es_q;
-          AES64ESM: result_o = aes64esm_gen;
-          AES64DS: result_o = aes64ds_q;
-          AES64DSM: result_o = aes64dsm_gen;
-          AES64IM: result_o = aes64im_gen;
-          AES64KS1I: result_o = aes64ks1i_gen;
-          AES64KS2: result_o = aes64ks2_gen;
-          SHA256SIG0: result_o = {{32{sha256sig0_q[31]}}, sha256sig0_q};
-          SHA256SIG1: result_o = {{32{sha256sig1_q[31]}}, sha256sig1_q};
-          SHA256SUM0: result_o = {{32{sha256sum0_q[31]}}, sha256sum0_q};
-          SHA256SUM1: result_o = {{32{sha256sum1_q[31]}}, sha256sum1_q};
-          SHA512SIG0: result_o = sha512sig0_q;
-          SHA512SIG1: result_o = sha512sig1_q;
-          SHA512SUM0: result_o = sha512sum0_q;
-          SHA512SUM1: result_o = sha512sum1_q;
+        unique case (op_mux)
+          AES64ES: result_o = m_aes64es;
+          AES64ESM: result_o = m_aes64esm;
+          AES64DS: result_o = m_aes64ds;
+          AES64DSM: result_o = m_aes64dsm;
+          AES64IM: result_o = m_aes64im;
+          AES64KS1I: result_o = m_aes64ks1i;
+          AES64KS2: result_o = m_aes64ks2;
+          SHA256SIG0: result_o = {{32{m_sha256sig0[31]}}, m_sha256sig0};
+          SHA256SIG1: result_o = {{32{m_sha256sig1[31]}}, m_sha256sig1};
+          SHA256SUM0: result_o = {{32{m_sha256sum0[31]}}, m_sha256sum0};
+          SHA256SUM1: result_o = {{32{m_sha256sum1[31]}}, m_sha256sum1};
+          SHA512SIG0: result_o = m_sha512sig0;
+          SHA512SIG1: result_o = m_sha512sig1;
+          SHA512SUM0: result_o = m_sha512sum0;
+          SHA512SUM1: result_o = m_sha512sum1;
           default: ;
         endcase
       end

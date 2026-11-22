@@ -113,7 +113,7 @@ module g6lc_zicclsm
     assign n0 = 4'(W) - {1'b0, off};
     assign n1 = 4'(1 << unsigned'(sz)) - n0;
     assign split_now = ctrl_i.valid && zicclsm_eligible(ctrl_i.operation, ctrl_i.fu) &&
-                       wraps(off, sz);
+                       !ctrl_i.is_speculative_load_miss && wraps(off, sz);
     assign is_load = orig_q.fu == LOAD;
 
     always_comb begin
@@ -291,6 +291,25 @@ module g6lc_zicclsm
         ld_result_o = hold_r_q;
         ld_tid_o    = hold_tid_q;
         ld_ex_o     = '0;
+      end
+
+      // OoO wrong-path recovery for an in-flight split: a cancelled_mask
+      // squash does not raise flush_i, so the held op's beats never produce
+      // the awaited result and the WAIT arms would pin the bypass head
+      // forever (the load/store unit drops the beat on the same mask). In
+      // the WAIT arms every issued beat has already popped (the ACTIVE->WAIT
+      // edge consumed its pop_ld/st_fu_i), so no beat completion is still
+      // outstanding: releasing the head here cannot double-pop. ctrl_i is
+      // still the held op (pop_*_byp_o is 0 while split), so its
+      // is_speculative_load_miss tracks orig_q.trans_id's cancel.
+      if (((state_q == B0_WAIT) || (state_q == B1_WAIT)) &&
+          ctrl_i.is_speculative_load_miss) begin
+        state_d        = IDLE;
+        ctrl_o.valid   = 1'b0;
+        ld_valid_o     = 1'b0;
+        st_valid_o     = 1'b0;
+        pop_ld_byp_o   = is_load;
+        pop_st_byp_o   = !is_load;
       end
 
       if (flush_i) begin

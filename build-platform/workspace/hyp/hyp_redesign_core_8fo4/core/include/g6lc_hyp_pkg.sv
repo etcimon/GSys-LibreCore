@@ -325,6 +325,17 @@ package g6lc_hyp_pkg;
     return r;
   endfunction
 
+  // r127 AES: the profile with the 3-stage AES/SHA pipe (AesStages=3 ->
+  // aes.sv AesPipe3 + the matching ex_stage lane / ooo_flu_cycles /
+  // g6lc_flu_reserve contract). Selected with -DG6LC_HYP8_AES3; not the
+  // default until a boot witness passes -- same seam style as hyp_iq_steer2.
+  function automatic g6lc_hyp_cfg_t hyp_aes3(input g6lc_hyp_cfg_t h);
+    g6lc_hyp_cfg_t r;
+    r = h;
+    r.AesStages = 3;
+    return r;
+  endfunction
+
   // Wakeup/contract latency classes used by scoreboard + functional units.
   typedef enum logic [2:0] {
     LAT_NONSPEC   = 0,  // non-speculative: wake on real writeback only

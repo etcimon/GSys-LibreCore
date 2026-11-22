@@ -71,6 +71,12 @@ module g6lc_flu_reserve #(
     localparam logic [RES_WIN-1:0] MUL_MASK = RES_WIN'(1) << (1 + MUL_CYC);
     localparam logic [RES_WIN-1:0] BR_MASK = RES_WIN'(1) << (3 + WBC);
     localparam logic [RES_WIN-1:0] ONE_MASK = RES_WIN'(1) << (2 + WBC);
+    // hyp8 r127 AesStages==3: aes AesPipe3 adds one pipeline stage, moving the
+    // AES writeback offset from 2+WBC to 3+WBC -- it can no longer share CSR's
+    // ONE_MASK slot or the reservation would free the writeback port a cycle
+    // early and a younger fixed-latency op would collide on it.
+    localparam int unsigned AES_CYC = ((HypCfg.AesStages == 3) ? 2 : 1) + WBC;
+    localparam logic [RES_WIN-1:0] AES_MASK = RES_WIN'(1) << (1 + AES_CYC);
     // Shifted occupancy window: bit k means "an accepted op's result is
     // due k cycles from now". One ownership bit for the divider.
     logic [RES_WIN-1:0]                      reserved_q;
@@ -108,7 +114,8 @@ module g6lc_flu_reserve #(
       assign lane_mask[p] =
           ({RES_WIN{fu_i[p] == g6lc_core_pkg::ALU}} & alu_mask) |
           ({RES_WIN{fu_i[p] == g6lc_core_pkg::CTRL_FLOW}} & BR_MASK) |
-          ({RES_WIN{fu_i[p] == g6lc_core_pkg::CSR || fu_i[p] == g6lc_core_pkg::AES}} & ONE_MASK) |
+          ({RES_WIN{fu_i[p] == g6lc_core_pkg::CSR}} & ONE_MASK) |
+          ({RES_WIN{fu_i[p] == g6lc_core_pkg::AES}} & AES_MASK) |
           ({RES_WIN{fu_i[p] == g6lc_core_pkg::MULT && mul_fixed && MUL_CYC != 0}} & MUL_MASK);
       assign lane_div[p] = fu_i[p] == g6lc_core_pkg::MULT && (!mul_fixed || MUL_CYC == 0);
       assign fixed_eligible[p] = offer_i[p] && (|lane_mask[p]) && !div_live_q && !(|(lane_mask[p] & reserved_q));

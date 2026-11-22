@@ -152,8 +152,12 @@ package g6lc_ooo_pkg;
         return 1 + wbc;
       end
       g6lc_core_pkg::CTRL_FLOW: return 2 + wbc;  // B2 resolve record
-      g6lc_core_pkg::CSR,
-      g6lc_core_pkg::AES:       return 1 + wbc;  // one-edge completion
+      g6lc_core_pkg::CSR:       return 1 + wbc;  // one-edge completion
+      // hyp8 r127 AesStages==3: aes.sv AesPipe3 adds one pipeline stage, so the
+      // AES result reaches the FLU lane one cycle later -- the WB reservation
+      // must hold the writeback slot for 2+wbc or it frees a cycle early and a
+      // younger fixed-latency op collides on the writeback port.
+      g6lc_core_pkg::AES:       return ((h.AesStages == 3) ? 2 : 1) + wbc;
       g6lc_core_pkg::MULT:
         return (ooo_lat_class(fu, op) == g6lc_hyp_pkg::LAT_MUL)
                ? g6lc_hyp_pkg::hyp_mult_stages(h, int'(cfg.MultStages)) + wbc

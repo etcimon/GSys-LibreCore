@@ -174,6 +174,33 @@ module tb_g6lc_zicclsm
     @(posedge clk);
     idle_bus();
     ctrl_i.valid = 1'b0;
+
+    // Squash landing mid-split (B0_WAIT): OoO cancelled_mask recovery is not
+    // a flush_i, so the held bypass head must be released, not pinned. With
+    // the fix the module returns to IDLE and re-presents the still-flagged
+    // head unsplit; without it ctrl_o.valid stays 0 in B0_WAIT forever.
+    ctrl_i.valid = 1'b1;
+    ctrl_i.fu = LOAD;
+    ctrl_i.operation = LH;
+    ctrl_i.vaddr = 64'h7;
+    ctrl_i.trans_id = 4'd5;
+    ctrl_i.is_speculative_load_miss = 1'b0;
+    @(posedge clk);                 // split_now -> B0_ACTIVE, beat0 driven
+    pop_ld_fu = 1'b1;               // beat0 squashed: FU pops, no result
+    @(posedge clk);                 // B0_ACTIVE -> B0_WAIT
+    pop_ld_fu = 1'b0;
+    ctrl_i.is_speculative_load_miss = 1'b1;   // cancel lands while held
+    @(posedge clk);                 // B0_WAIT + miss -> abort -> IDLE + pop
+    // IDLE now passes the still-cancelled head through unsplit (split_now
+    // guard). Buggy behaviour: ctrl_o.valid==0 held in B0_WAIT.
+    if (ctrl_on.valid !== 1'b1 || ctrl_on.operation !== LH ||
+        ctrl_on.is_speculative_load_miss !== 1'b1)
+      $fatal(1, "ZICCLSM_ON cancel-in-B0_WAIT did not release head: v=%0d op=%0d miss=%0d",
+             ctrl_on.valid, ctrl_on.operation, ctrl_on.is_speculative_load_miss);
+    ctrl_i.valid = 1'b0;
+    ctrl_i.is_speculative_load_miss = 1'b0;
+    @(posedge clk);
+    idle_bus();
     $display("PASS tb_g6lc_zicclsm");
     $finish;
   end

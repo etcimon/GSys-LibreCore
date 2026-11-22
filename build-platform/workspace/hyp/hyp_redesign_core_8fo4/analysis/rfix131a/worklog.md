@@ -6676,3 +6676,36 @@ Census `detail` carries per-opcode retired/notissued/inflight/held breakdown = t
   FO4/timing-relevant stall profile for later worst-path work (alu/br/ld dominate
   retire; st_sb held counts show store-buffer pressure points).
 CONCLUSION reconfirmed: healthy serial boot, no RTL bug; frontier = duration.
+
+cont.84 — zicclsm fix VALIDATED (unit+negctl); witnesses in flight; observability limit found
+
+zicclsm cancel-livelock fix (core/g6lc_zicclsm.sv) is now unit-validated:
+  * tb_g6lc_zicclsm extended w/ cancel-in-B0_WAIT regression. Fixed RTL: PASS.
+    Pre-fix RTL (git HEAD negctl): Assertion "cancel-in-B0_WAIT did not release head:
+    v=0" — reproduces exact production wedge (stuck B0_WAIT, valid=0, head pinned).
+  * load_unit.sv + store_unit.sv already handle cancelled_mask in ALL WAIT states
+    (T35 drops) -> g6lc_zicclsm was the SOLE head-holding layer lacking cancel escape.
+    Fix closes the complete bug class for the ~265k wedge.
+
+Model hyp8-zicclsmfix-aggregate-t1 = build_complete (lint scalar+smt2 0 err, sha a8761434).
+Witnesses launched on fw_payload.elf (tohost 0x80041730):
+  * cycprog13  : +max-cycles=3e9  +smt_cyc_progress=500000  (long validation, DAYS)
+  * bounded1m  : +max-cycles=2e6  +smt_cyc_progress=250000  (near-term wedge check)
+
+OBSERVABILITY LIMIT (important for future runs): all diagnostics ([cycprog],[hang],
+[stall-census]) go through $display->$display->printf->stdout -> block-buffered to
+run-hyp8.log (4KB+). NOTHING flushes until buffer fills or process exits. With 8-hart
+heartbeats ~720B/250k-cyc, first flush needs ~1.5M cycles -> we are BLIND on progress
+for the first ~1-1.5M cycles of every witness. mc model throughput under 4-way
+contention ~500-800 cyc/sec -> 2M bounded ~45-60min, 3B main ~60+ DAYS (impractical
+for iteration). FIX for future launches: wrap model in `stdbuf -oL` (line-buffered)
+so heartbeats stream in real time; or add periodic fflush. Do NOT rely on live logs.
+
+STRATEGY consequence: full OpenWrt boot (~1.5G cyc to shell) is a ONE-SHOT long
+validation, not an iteration loop. Iterate on BOUNDED witnesses (2M->20M->50M
+bisect) + directed/coverage tests to find+fix each blocker, then let the long
+witness confirm end-to-end once blockers are cleared.
+
+Coverage: mc-coverage-t2 4 done (3 pass + mini_l2_hot_scan wedged@1Mcap progExit=0
+bus_err=0 -> budget-marginal L2 stress, NOT confirmed bug); t1 running
+mc_shared_line_resident; mc_chase running. 4 sims total on host -> heavy contention.

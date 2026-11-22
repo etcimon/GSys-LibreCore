@@ -33,6 +33,11 @@ module g6lc_cluster
     parameter logic [63:0] GuardRamBytes = 64'h0,
     parameter logic [63:0] GuardCtrlBase = 64'h0,
     parameter logic [63:0] GuardCtrlBytes = 64'h0,
+    // Secondary-core boot-hold length in cycles before the IPI/timeout
+    // release (the `rel` term below). Default preserves the historical
+    // 200000; directed benches may override (e.g. -G...BootHoldCyc) to
+    // shorten the held-secondary wait without touching the release logic.
+    parameter logic [17:0] BootHoldCyc = 18'd200000,
     parameter int unsigned AXI_ADDR_WIDTH = 64,
     parameter int unsigned AXI_DATA_WIDTH = 64,
     parameter int unsigned AXI_ID_WIDTH   = 4,
@@ -203,12 +208,11 @@ module g6lc_cluster
 
   // S4: multi-core SMT (N>1,T>1) secondary cores race OpenSBI's shared
   // lottery/stack (G1dg class *across cores*, not SMT). Hold c>0 clock-gated
-  // until IPI (HSM) or BOOT_HOLD_CYC (same 200000 as SMT_COLD_EXCL).
+  // until IPI (HSM) or BootHoldCyc (parameter; default 200000 = SMT_COLD_EXCL).
   // stream8 is T=1 so this localparam is 0. Core 0 always runs.
   // ICG IS_FUNCTIONAL: correctness, not power. test_en tied 0 until
   // testmode_i is threaded (DFT). Same clk; en_i is registered.
   localparam bit BOOT_HOLD = (NC > 1) && (G6LCCfg.NrHarts > 1);
-  localparam logic [17:0] BOOT_HOLD_CYC = 18'd200000;
   logic [17:0] boot_hold_q;
   logic [NC-1:0] ipi_seen_q;
   logic [NC-1:0] core_clk;
@@ -302,7 +306,7 @@ module g6lc_cluster
     if (SLEEP_GATE || (BOOT_HOLD && (c != 0))) begin : gen_boot_icg
       logic rel;
       if (BOOT_HOLD && (c != 0)) begin : gen_boot_rel
-        assign rel = (boot_hold_q >= BOOT_HOLD_CYC) || ipi_seen_q[c];
+        assign rel = (boot_hold_q >= BootHoldCyc) || ipi_seen_q[c];
       end else begin : gen_boot_norel
         assign rel = 1'b1;
       end

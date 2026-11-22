@@ -807,13 +807,18 @@ def env_prefix() -> str:
 
 
 def _di_max_workers(rem: Remote, verlib: str, requested: int, n_tests: int) -> int:
-    """Compute DI worker count so each running test can saturate the remote
-    host while the next test starts as soon as a worker frees up.
+    """Upper-bound the DI worker count for an opt-in parallel run.
 
-    The build script pins Verilator vthreads to nproc, so one Variane_testharness
-    already uses all cores. Running more than one in parallel oversubscribes and
-    slows every test. We therefore run one test at a time unless the remote has
-    many more cores than the compiled vthreads count.
+    Verilator --threads is partition granularity, not the runtime worker
+    count; the tuned builds use a small vthreads (2 for the ~2x-parallelism
+    soft-ladder/hyp8 cores, 4 for AI units — perf guide §30), so one
+    Variane_testharness uses only a few cores at run. This returns the
+    nproc//vthreads ceiling — that many instances x ~vthreads runtime workers
+    fills the host without oversubscribing — further capped by the caller's
+    --threads and the test count. It does NOT decide to parallelize: DI stays
+    serial by default because concurrent harnesses caused observed flakes
+    (mini_fdt_lenp_sw). When .vthreads is absent (legacy/foreign verlib) we
+    conservatively assume vthreads=nproc -> a single worker.
     """
     # Probe the host and, if the build recorded its vthreads, use that.
     nproc = 0
@@ -830,7 +835,9 @@ def _di_max_workers(rem: Remote, verlib: str, requested: int, n_tests: int) -> i
     except Exception:
         pass
     if vthreads <= 0:
-        # Fall back to nproc; the build uses vthreads=nproc by default.
+        # No .vthreads recorded (legacy/foreign verlib). Assume the build
+        # saturated the host (vthreads=nproc) so workers=1 and we never
+        # oversubscribe; current harnesses always record their tuned value.
         vthreads = nproc if nproc > 0 else 12
     if nproc <= 0:
         nproc = vthreads
@@ -1242,7 +1249,11 @@ def write_build_manifest(rem: Remote, root: Path, args, verlib: str) -> None:
         "verlib": verlib,
         "defines": AI_FLAVOURS.get(args.flavour, {}).get("defines", ""),
         "jobs": str(args.jobs or ("1" if args.flavour in AI_FLAVOURS else "nproc")),
-        "vthreads": str(getattr(args, "vthreads", None) or ("nproc" if args.flavour in AI_FLAVOURS else "harness")),
+        # vthreads: the explicit --vthreads override, else "harness" meaning the
+        # build harness's own tuned default applies (2 for ~2x-parallelism
+        # soft-ladder/hyp8 cores, 4 for AI units — perf guide §30). The resolved
+        # value is recorded separately in build.log/.vthreads after the build.
+        "vthreads": str(getattr(args, "vthreads", None) or "harness"),
     }
     for kv in getattr(args, "env", None) or []:
         key, _, value = kv.partition("=")
@@ -1308,10 +1319,14 @@ def cmd_build(rem: Remote, args) -> int:
             _no_overlap_guard(rem, f"build {args.flavour}")
 
     # AI C++ compile (make -j / cc1plus) OOMs at -j2 on 30 Gi. Keep jobs=1.
-    # Model --threads (vthreads) defaults to remote nproc in the harness so
-    # one Variane_testharness saturates the host at run. Override:
+    # Model --threads (vthreads) is partition granularity, not runtime workers;
+    # the harnesses default to the measured optimum (2 for ~2x-parallelism
+    # soft-ladder/hyp8 cores, 4 for AI units — perf guide §30), so a single
+    # Variane_testharness uses only a few cores. The recorded vthreads lets the
+    # DI pool bound an opt-in --threads N parallel run to nproc//vthreads.
+    # Override:
     #   --jobs N                 C++ make -j (still capped unless ALLOW_HIGH_JOBS)
-    #   --vthreads N             verilator --threads (default nproc)
+    #   --vthreads N             verilator --threads (harness default: 2 non-AI, 4 AI)
     jobs = args.jobs or ("1" if ai_meta else "$(nproc)")
     clean = "1" if args.clean else "0"
     root = repo_root()
@@ -1600,13 +1615,18 @@ def cmd_soak(rem: Remote, args) -> int:
 
 def cmd_di(rem: Remote, args) -> int:
     """Compile the directed mini (DI) suite locally and run it on the remote
-    harness consecutively. Each test gets its own remote log; logs can be pulled
-    back with --pull.
+    harness. Each test gets its own remote log; logs can be pulled back with
+    --pull.
 
-    This mirrors verif/regress/soft-ladder-di-regress.sh, but keeps exactly one
-    Variane_testharness running at a time. Verilator already pins vthreads to the
-    remote host's nproc, so a single harness saturates the machine; running more
-    in parallel oversubscribes cores and makes tests flaky.
+    This mirrors verif/regress/soft-ladder-di-regress.sh. Concurrency is
+    serial by default: --threads 1 keeps the documented flake-safe mode
+    (concurrent Variane_testharness runs caused observed failures like
+    mini_fdt_lenp_sw; the overlap guard exists because of it). --threads N>=2
+    opts into parallel, bounded by nproc//vthreads — the build's recorded
+    --threads partition count (tuned to 2 for the ~2x-parallelism cores,
+    perf guide §30) — and the test count. Use parallel only on hosts/suites
+    confirmed to tolerate concurrent harnesses; it may be shared-state, not
+    CPU, that makes overlap flaky.
 
     H3 (Oracle Validity First): the two oracle controls run before the suite.
     mini_must_pass must PASS and mini_must_fail must FAIL; if either verdict is
@@ -1841,11 +1861,16 @@ def cmd_di(rem: Remote, args) -> int:
         log("[di] oracle preflight DISABLED (--no-oracle-check) - H3 unmet")
 
     t0_all = time.time()
-    # DI is intentionally single-threaded on the remote: one Variane_testharness
-    # with vthreads=nproc already saturates the builder; overlapping harnesses
-    # oversubscribe and cause flaky fails (e.g. mini_fdt_lenp_sw).
-    max_workers = 1
-    log(f"di workers: {max_workers} (consecutive mode)")
+    # Worker count: --threads is the cap passed to _di_max_workers, which bounds
+    # it by nproc//vthreads (the build's recorded --threads partition count;
+    # tuned to 2 for the ~2x-parallelism cores, perf guide §30). Default 1 keeps
+    # the documented serial mode: concurrent Variane_testharness runs caused
+    # observed flakiness (mini_fdt_lenp_sw) that the overlap guard exists to
+    # prevent, and it may be shared-state rather than CPU oversubscription, so
+    # vthreads=2 does not guarantee safety. N>=2 is an explicit opt-in for
+    # hosts/suites confirmed to tolerate concurrent harnesses.
+    max_workers = _di_max_workers(rem, verlib, args.threads, len(tests))
+    log(f"di workers: {max_workers} (--threads={args.threads} tests={len(tests)})")
     results: dict[str, tuple[str, bool, str, float]] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
         # Controls are a gate, not suite members: never submitted here.
@@ -2965,10 +2990,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--jobs", default=None,
                     help="C++ make -j. AI default 1 (cc1plus OOM at -j2 on 30Gi).")
     sp.add_argument("--vthreads", default=None, type=int,
-                    help="Verilator --threads for the model (AI: AI_MATRIX_VERILATOR_THREADS, "
-                         "default remote nproc; non-AI: SOFT_LADDER_VERILATOR_THREADS, "
-                         "default 4). One Variane_testharness then saturates the host. "
-                         "Does not raise C++ make -j.")
+                    help="Verilator --threads for the model. NOTE: this is the "
+                         "V3Partition granularity knob (cpLimit -> MTask coarsening), "
+                         "NOT the runtime worker count — oversubscribing over-fragments "
+                         "low-parallelism designs and pays a sync tax (perf guide §30). "
+                         "AI: AI_MATRIX_VERILATOR_THREADS (default 4); non-AI: "
+                         "SOFT_LADDER_VERILATOR_THREADS (default 2, the measured optimum "
+                         "for ~2x-parallelism cores). Does not raise C++ make -j.")
     sp.add_argument("--clean", action="store_true",
                     help="wipe the flavour Mdir and rebuild from scratch")
     sp.add_argument("--cache", default=True, action=argparse.BooleanOptionalAction,
@@ -3042,7 +3070,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--time-out", dest="time_out", default="400000",
                     help="per-test +time_out/+max-cycles (default 400000)")
     sp.add_argument("--threads", type=int, default=1,
-                    help="kept for compatibility; DI now runs one Variane at a time")
+                    help="DI worker cap. Default 1 = serial, the documented "
+                         "flake-safe mode: concurrent Variane_testharness runs "
+                         "caused observed failures (mini_fdt_lenp_sw) and the "
+                         "overlap guard exists because of it. N>=2 opts into "
+                         "parallel, bounded by nproc//vthreads (the build's "
+                         "recorded --threads partition count, perf guide §30) "
+                         "and the test count — use only after confirming the "
+                         "suite tolerates concurrent harnesses on this host.")
     sp.add_argument("--plusarg", action="append", default=[],
                     help="extra +plusarg for every test (repeatable)")
     sp.add_argument("--tail", type=int, default=30,

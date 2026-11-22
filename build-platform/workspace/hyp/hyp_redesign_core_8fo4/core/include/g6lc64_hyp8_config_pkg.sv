@@ -408,9 +408,17 @@ package g6lc_config_pkg;
   // r127 B2: -DG6LC_HYP8_IQSTEER2 selects the early IQ bank steer
   // (IqSteerStages=2); the default keeps the same-cycle steer.
 `ifdef G6LC_HYP8_IQSTEER2
-  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfg = g6lc_hyp_pkg::hyp_iq_steer2(HypCfgMmu);
+  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfgPre = g6lc_hyp_pkg::hyp_iq_steer2(HypCfgMmu);
 `else
-  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfg = HypCfgMmu;
+  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfgPre = HypCfgMmu;
+`endif
+  // r127 AES: -DG6LC_HYP8_AES3 selects the 3-stage AES/SHA pipe (AesStages=3);
+  // composes with the IQSTEER2/MMU seams above. Default AesStages==1 is
+  // bit/cycle-identical to the pre-change netlist.
+`ifdef G6LC_HYP8_AES3
+  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfg = g6lc_hyp_pkg::hyp_aes3(HypCfgPre);
+`else
+  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfg = HypCfgPre;
 `endif
 
   // hyp8 bring-up: `initial` is illegal at package scope (a package body

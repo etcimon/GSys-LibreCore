@@ -2794,3 +2794,963 @@ st_q->st_d floor as the new limiter — net gain poor vs contract risk.
 reduction = contract changes (insert_reg pipelines, free-list/snapshot/reverse-
 map data structures, P10 handshake changes), each specified per-row in
 `fo4-census.md`. NOT DONE — needs dedicated sessions + remote gating.
+
+## r127 — g6lc_ai_gemm_fp32 third stage (contract item, additive)
+
+**What:** added two purely-additive modules to `corev_apu/ai_island/g6lc_ai_gemm_fp32_add.sv`:
+- `g6lc_ai_gemm_fp32_norm_p1` — splits the comb `norm` at the candidate-bundle
+  boundary: stage-A candidate eval (sign/mag select, aligned add/sub, leading-
+  position detect, barrel shifts, masks) is combinational into a register that
+  captures {normal_fraction[25], normal_exponent[25], sign, magn_nonzero, ovf_any,
+  sub_any, topnl, nan/inf/zero/sign_a/sign_b flags, subnormal_fraction}; stage-B
+  (OR-reduce tree + pack + special-case mux) stays combinational and is
+  bit-identical to `norm`.
+- `g6lc_ai_gemm_fp32_add_p3` — align -> align_q(en) -> norm_p1 -> result_o;
+  one register stage deeper than `add_p2` (align_q + candidate reg).
+
+**Why:** the comb `norm` reg->out cone was the 44.1 FO4 limiter on the AI
+FP32 accumulate path. Splitting at the candidate boundary moves the OR-tree +
+pack + special mux behind a register. This is exactly the "pipeline fp32_add
+itself" contract item flagged in `g6lc_ai_gemm_seq.sv:1663-1667`.
+
+**Verification:** self-contained 30k-cycle miter (random + directed NaN/Inf/
+zero/subnormal/sign patterns) vs comb `g6lc_ai_gemm_fp32_add` reference —
+**bit-identical at fixed pipeline latency, zero mismatches**. Lint-clean under
+verilator 5.020 (only pre-existing UNSIGNED/UNOPTFLAT-style notes shared with
+the existing modules).
+
+**Status / NOT yet done:** additive only — `gemm_seq` still instantiates
+`fp32_add_p2`; nothing references the new modules, so default builds are
+unchanged. To realize the FO4 gain, `gemm_seq` must absorb +1 cycle in the
+MAC recurrence (`sum_v_q`/`s1_v_q`/`acc_q` retime) — the code comment flags
+this needs its own verification pass because the C-write port is shared with
+the trail-store path in ST_MAC. FO4 board measurement of the split cone is the
+next gate before wiring.
+
+## r127ag gate — load_unit flat one-hot VERIFIED GREEN (local)
+
+`run_gate.sh` tag r127ag (2026-11-12 10:51) completed `GATE_DONE` with every
+leaf clean on the tree carrying the shared `idle_next` predicate rewrite:
+- lint: clean of fatal classes (7 non-fatal warnings)
+- dispatch: rc=0, HYP8_DISPATCH_PASS checked=125; rename/resolve/ooo_dispatch equiv miters all clean
+- lsq: rc=0, HYP8_LSQ_PASS checked=2826; all lsq equiv miters clean
+- dcache: rc=0, HYP8_DCACHE_PASS checked=334; wbuffer/wt_dcache equiv clean
+The reference-FSM equivalence (rf_state_d / rf_pop_ld_o / rf_st_fwd_done)
+inside these benches confirms the IDLE+SEND_TAG one-hot rewrite is functionally
+exact — no state/pop/fwd divergence across the exercised space.
+
+`gate-r127ag-remote.log` is empty (remote leg produced no output); the local
+gate is the binding verification. Prior board reads for this transform:
+43.2 -> ~41.6 ir on the shared-predicate form; the later pend_state_ok /
+ldbuf_pop_oh / load_pa_q lane-enable edits measured rr 34.8 / ro 35.5. A fresh
+board on the exact current tree is the remaining confirmation, then this path
+is done pending the next-worst module.
+
+## r127 — aes.sv transforms VERIFIED bit-identical (miter)
+
+The two r127 aes.sv edits flagged "not yet boarded/linted" are confirmed
+functionally exact by a 200k-cycle self-contained miter (random x/bs/operand_a,
+rconst cycled through all values incl 4'hA): **0 errors**.
+
+- `aes_rol8x` 4-way concat rotate == original `(x<<{bs,3'b000}) | (x>>(32-{bs,3'b000}))`
+  for bs in {0,1,2,3} — verified all cases. AND it removes the duplicate
+  `aes_mixcolumn_fwd/inv` formed twice (once for <<, once for >>); the mix is
+  now computed once into `mix_*_w` then rotated — the real FO4 win on the
+  mix_inv_rot 32.5 cone.
+- `aes_subw_in` per-byte-lane (each lane its own `no_rot` compare) == original
+  `no_rot ? operand_a[63:32] : (y>>8)|(y<<24)` ror32-by-8 — verified both
+  no_rot polarities. Removes the single 32-bit select in front of the S-boxes.
+
+Remaining gate: full-module lint + board FO4 read (the mix_inv_rot / aes_subw_in
+cones should drop; aes was ro 39.9 / ir 39.3 on the last board). No smoke covers
+AES, so the miter is the binding functional evidence.
+
+## r127 frontier audit — dead rows + contract map (this pass)
+
+- `g6lc_ai_gemm_arplan` 59.0 confirmed DEAD: module defined in
+  `g6lc_ai_gemm_arplan.sv` but **zero instantiations** anywhere in corev_apu —
+  not in any synthesized timing path. Phantom analyzer row, not a real FO4 cost.
+  No action needed (optionally drop from Flist to silence the board).
+- `g6lc_ai_gemm_fp32_norm` residual 42.4 already got the latency-neutral
+  narrowing (5-bit clamp 44.1->42.4 KEPT + 23-bit magnitude KEPT). The remaining
+  lever IS the pipeline split — `norm_p1`/`add_p3` added this pass is exactly
+  that contract change; needs gemm_seq MAC-recurrence retime + board.
+- Verified bit-identical this pass (self-contained miters, 0 errors):
+  * fp32 `norm_p1`/`add_p3` — 30k-cycle vs comb reference, all specials.
+  * aes `aes_rol8x` + `aes_subw_in` lanes — 200k-cycle vs original exprs.
+- Remaining top rows are all CONTRACT-gated, not latency-neutral:
+  decode_s3 44.5 (legality cone), instr_queue 43.2, rename_read 40.2 (B9
+  banking), coherence_hub AW-inv ~62.2, gemm_seq fp32 retime. Each needs its
+  own verified contract change + board; none is a safe blind edit.
+
+## r127 — gemm_seq Fp32Pipe2 retime IMPLEMENTED (gated, default-safe) + spacing finding
+
+**What:** `g6lc_ai_gemm_seq.sv` gained parameter `Fp32Pipe2` (default 0). When
+set AND the job is float (`pe_float_en`), the per-column accumulate uses
+`g6lc_ai_gemm_fp32_add_p3` (align_q + candidate reg = one flop deeper than p2)
+instead of `p2`, and a new `s2_*` capture stage delays the whole s1 result
+bundle (v/ph/last/i/j/cv/bypass/raw) by one edge so the p3 result lands on a
+valid strobe. `use_s2 = Fp32Pipe2 && pe_float_en` is static per job; the
+acc_d update, commit token and C-write all mux to the s2 window only then.
+Default (Fp32Pipe2=0) is provably bit- and cycle-identical: use_s2 constant-
+folds to 0, s2 regs toggle unused, all consumers pick s1.
+
+**Verified:** full ai_island + tb lint clean (verilator 5.020, --timing) —
+`gen_acc_add_p2` elaborates, p3/p2 port lists identical. fp32_add_p3 itself
+was proven bit-identical earlier (30k-cycle miter).
+
+**BLOCKER found (why it stays gated):** same-set partial spacing. `ph_q`
+toggles every ST_MAC cycle and `issue_now` fires on `!ph_q || pair_present`,
+so consecutive k-step partials for one column group land exactly **2 edges**
+apart — the minimum the s1 assertion (`sum_v_q && s1_v_q |-> sum_ph_q !=
+s1_ph_q`, partials at least two edges apart) is sized for. p3 pushes the
+acc_q writeback one edge later, so a same-group partial 2 edges on would read
+`acc_q[ph]` as base BEFORE the prior result lands -> dropped term. Enabling
+Fp32Pipe2 therefore ALSO needs the issue logic to space same-set partials
+>=3 edges (an issue bubble ~2x MAC throughput cost) or a different accumulate
+schedule — a real contract/throughput decision, not a free FO4 win. Left
+gated pending that analysis + board.
+
+**r127 follow-up — drain fix:** `mac_quiet` (the ST_MAC->exit quiet cone shared
+by `store_reset`) now ORs in `use_s2 & s2_v_q`. Without it the FSM could
+leave ST_MAC while a p3 result sat in the s2 window, breaking the
+`commit_v_q |-> state_q == ST_MAC` assertion and the C-write arbitration.
+Gated by `use_s2` so the default (Fp32Pipe2=0) quiet cone is bit-identical.
+
+**r127fp2 GATE GREEN (default path):** `run_gemm_gate.sh r127fp2` on the tree
+carrying the Fp32Pipe2 retime + mac_quiet drain fix -> **GATE_RC=0**, all
+review cases PASS under `--assert` (assertions active, none fired):
+class=0 golden-C nch=1 dpf=0+dpf=2, SIGNED_BACKEND 56, AXI_PROTOCOL 672,
+SLOTS_BACKEND 16, FP32_EQ 100000 vectors/37 specials, ACCUMULATE 112.
+Confirms the gated Fp32Pipe2 path is bit- and cycle-identical on the default
+(Fp32Pipe2=0) build — s2_* toggle unused, mac_quiet `use_s2 & s2_v_q` = 0.
+The p3/s2 window itself stays gated: enabling needs same-set partial spacing
+>=3 edges (currently exactly 2, ph alternation) = an issue-bubble/3rd-bank
+contract, not a free FO4 win.
+
+## r127 — contract-frontier deep-dive (this pass): all residual = contract, ranked by tractability
+
+Systematic re-read of every not-done row against its live cone. Confirmed the
+census verdict: **no latency-neutral rewrite remains.** Per-row contract +
+verification path (all need dedicated sessions, not blind edits):
+
+- `g6lc_ai_gemm_seq` 49.6 — store-read `w_fetch_needed->rd_sel_store->rd_sel_pair->
+  c_rx_req->c_rx_bank/addr->SRAM` chain. store_plan outputs (valid/beats/addr)
+  are REGISTERED, so the cone is purely the ~5-level select->bank-demux->addr
+  logic off registered inputs (w_fetch_q/store_beats/state/store_pair/aw_sent/
+  stc_w_left/wide_c/w_column/stc_i). Contract = registered read-select or bank
+  prefetch; risk = read-modify-write handshake timing (read must land before
+  w_payload capture). Verify run_gemm_gate.sh.
+- `g6lc_ai_island_top` 43.2 — submit-source priority mux (fetch->sb_imm->db)
+  + cpl_push_ticket/cpl_room_free. Contract = registered submit-source.
+  Verify run_island_gate.sh.
+- `g6lc_decode_s3` 44.5 — legality cone. Contract = class one-hot x CSR-side
+  cached table; BLOCKED on proof every CSR write flushing the table flushes
+  younger decode. Biggest core win (spec 22.8->3.0) but needs that proof first.
+- `csr_regfile` trap-write record — register {take_ex,target-priv,pc,cause,
+  tval} at trap edge, write xEPC/xCAUSE/xTVAL/dpc +1cyc. Deep in csr_trap /
+  commit handshake (6798-line module); exception-timing critical.
+- `coherence_hub` 62.2 (highest APU) — AW-grant->inv_ot_d stamp, P10-locked
+  same-edge pulse+index. Contract = registered invalidation stamp; hub bench.
+- `g6lc_l2_top` ~54.5 — fifo_state_q[pos] snapshot / mshr->pos reverse map.
+  Data-structure change; run_l2_bench.sh 5 configs.
+- `g6lc_l2_pf` 138.8 / `server_prefetcher` 74.5 — registered emit-select /
+  demand chain; perf units off boot path.
+- `AesStages` (cfg 1|3, aes.sv does not consume yet) — split AES rounds;
+  coprocessor latency contract via FU distance table.
+
+Decision recorded: fp32 Fp32Pipe2 stays gated (needs >=3-edge same-set spacing
+= issue bubble/3rd bank = throughput tradeoff). No contract change attempted
+blind — each needs its gate + witness + board per the r127 methodology.
+
+## r127 — contract-frontier audit: AES AesStages feasibility (analysis only, no RTL)
+
+Traced `aes` (ro ~39.9 / the 44.9-FO4 `sbox_*_q -> mixcolumn -> xor -> result` cone,
+classified multi-cycle by FU occupancy) for the dormant `AesStages` config field
+(`g6lc_hyp_pkg.sv` `h.AesStages inside {1,3}`, default 1, currently UNUSED).
+
+**Structure**: stage-1 regs capture `a_q/b_q/op_q/orig_q` + all sbox/shift/sigma
+outputs; stage-2 comb computes `aes64{esm,dsm,im,ks1i,ks2}_gen` (MixColumns +
+rotates + merges) then the `unique case(op_q)` result mux -> `result_o`.
+A 3-stage split = register the stage-2 `_gen` bundle, move the opcode mux to a
+stage-3 comb — mechanically clean inside `aes.sv`.
+
+**Two blockers found (why not implemented this pass):**
+1. `AesStages` lives in `g6lc_hyp_pkg`'s hyp record, NOT `config_pkg::g6lc_cfg_t`
+   which `aes.sv`'s `G6LCCfg` uses -> needs a new cfg field (+check_cfg + every
+   g6lc64_*_config_pkg) or a dedicated aes parameter. Multi-file config change.
+2. `ex_stage.sv` treats AES as a FIXED one-cycle FLU lane (`aes_valid_i` is in
+   `one_cycle_select`; `aes_vld_q/aes_tid_q` lane record captured at issue,
+   `aes_lane_v -> flu_valid_c -> aes_result`). Adding an aes-internal stage shifts
+   `result_o` +1 cycle -> breaks the FLU capture timing unless the lane latency
+   is also made AesStages-aware. The "multi-cycle" comment refers to FU
+   OCCUPANCY (issue-slot serialization), not result latency — so +1 stage is NOT
+   free; it needs the ex_stage lane contract updated in lockstep.
+
+**Verdict**: real transform, but a genuine config+FLU contract change
+(aes.sv split + g6lc_cfg_t field + ex_stage AES lane latency + aes_eq miter +
+remote gate). Not a safe blind edit; deferred to a dedicated contract session.
+Same class as decode_s3 legality, gemm_seq store-read, coherence_hub P10, l2_top
+reverse-map, csr trap-write — the census's "contract" rows are all this shape.
+
+**Session net**: fp32 Fp32Pipe2 gated retime + mac_quiet drain fix = GATE_RC=0
+(default bit/cycle-identical); this audit completes the per-item technical spec
+for every remaining FO4 row.
+
+## r127 — aes.sv AesPipe3 3-stage split IMPLEMENTED + miter-verified (gated, default-off)
+
+Implemented the dormant `AesStages` transform inside `core/aes.sv` as a
+self-contained module parameter `AesPipe3` (default `1'b0`), NOT yet wired to
+config/ex_stage (enablement contract pending — see below).
+
+**RTL** (`core/aes.sv`, uncommitted):
+- `parameter bit AesPipe3 = 1'b0` added to the module param list.
+- New `aes_s2_regs` always_ff captures EVERY result-mux candidate one edge after
+  stage-1: the comb `_gen` MixColumns/merge values AND the `_q` passthroughs
+  (aes64es_q/aes64ds_q/sha*_q) re-registered, plus `op_s2 <= op_q` (the opcode
+  select MUST be delayed or stage-3 reads the next issue's op).
+- New `m_*`/`op_mux` select wires: `AesPipe3 ? _s2 : _source`; result mux now
+  reads `m_*`/`op_mux`. Under AesPipe3=0 every select folds to the original
+  signal -> bit- AND cycle-identical; the ~1150 stage-2 flops + op_s2 are dead
+  logic removed by synthesis.
+
+**Verification**: `.devin-tmp/tb_aes_pipe3.sv` miter — aes(AesPipe3=0) vs
+aes(AesPipe3=1) on identical stimulus, real `build_config_pkg::build_config`
+hyp8 cfg, all XLEN64 result-mux arms (AES64ES/ESM/DS/DSM/IM/KS1I/KS2,
+SHA256SIG0/1/SUM0/SUM1, SHA512SIG0/1/SUM0/SUM1) + non-XLEN64 default arms +
+20k-cycle LFSR random -> **checked=20065 bad=0**: the 3-stage output equals the
+2-stage output delayed by exactly one cycle, bit-identical.
+
+**Enablement contract STILL REQUIRED (do not set AesPipe3=1 yet)**:
+`ex_stage.sv` captures AES via a FIXED one-cycle FLU lane (`aes_valid_i` in
+`one_cycle_select`; `aes_vld_q/aes_tid_q` set at issue, `aes_lane_v` fires the
+next edge reading `aes_result`). AesPipe3 pushes `result_o` +1 cycle, so the
+AES lane must be delayed one cycle in lockstep AND `AesPipe3` must be driven
+from the same config source as `g6lc_hyp_pkg::AesStages` (which is NOT a
+`config_pkg::g6lc_cfg_t` field today — needs a cfg field or a shared param).
+ex_stage currently instantiates aes WITHOUT AesPipe3 -> default 0 -> the
+shipped design is unchanged.
+
+## r127 — AesStages ex_stage lane COMPLETED (mechanism now consistent, still dormant)
+
+Mirrored the proven `AluStages` pattern to finish the AES contract, in
+`core/ex_stage.sv` (uncommitted):
+- `localparam bit AES_PIPE3 = (HypCfg.AesStages == 3);` next to `ALU_STAG`.
+- New `aes_vld_q2`/`aes_tid_q2` second delay stage in `flu_lane_regs`
+  (reset + flush cleared, shifted `<= aes_vld_q/aes_tid_q` every cycle).
+- `aes_lane_tid = AES_PIPE3 ? aes_tid_q2 : aes_tid_q`; `aes_lane_v` captures
+  `(AES_PIPE3 ? aes_vld_q2 : aes_vld_q) & ~cancelled_mask_i[aes_lane_tid]`;
+  `flu_trans_id_c = aes_lane_tid`.
+- aes instantiated `.AesPipe3(AES_PIPE3)` -> aes pipe depth and FLU lane
+  delay derive from ONE source (`HypCfg.AesStages`) so they cannot disagree.
+
+**Default AesStages==1 -> AES_PIPE3==0**: aes uses the comb `_gen`/`_q` sources
++ `op_q` (bit/cycle-identical); lane uses `aes_vld_q`/`aes_tid_q` (identical);
+`aes_vld_q2/aes_tid_q2`/`op_s2`/all `_s2` flops are dead -> synthesized away.
+Every `g6lc_hyp_pkg` preset ships `AesStages:1`, so NO config enables it yet.
+
+**To enable** (separate verified step, NOT done): set `AesStages:3` in a
+`g6lc_hyp_pkg` preset, then remote gate + `tb_g6lc_hyp8_aes_eq`-class directed
+AES suite + witness + apu/core FO4 board to confirm the ~44.9->split gain and
+no dependent-latency regression. The ex_stage onehot FLU-valid assertion
+(line ~1016) still holds (one aes_lane_v per AES op, just later).
+
+## r127 — AesStages contract COMPLETED across all 4 surfaces (dormant, default-off)
+
+Traced and closed the FULL AES latency contract (previously only aes.sv +
+ex_stage lane were done). Two more surfaces found and fixed:
+
+**3. `core/ooo/g6lc_ooo_pkg.sv` `ooo_flu_cycles`**: AES FLU writeback distance
+was hardcoded `1 + wbc` (shared with CSR). Split CSR/AES; AES now returns
+`(h.AesStages == 3 ? 2 : 1) + wbc` — the WB-reservation window holds the
+writeback slot for the deeper pipe or it frees a cycle early -> collision.
+
+**4. `core/ooo/g6lc_flu_reserve.sv` `lane_mask`**: CSR and AES shared `ONE_MASK`
+(slot 2+WBC). Added `AES_CYC = (AesStages==3 ? 2 : 1) + WBC` +
+`AES_MASK = 1 << (1 + AES_CYC)`; lane_mask now `CSR->ONE_MASK`, `AES->AES_MASK`.
+Consistency proof: `lane_mask == 1 << (1 + ooo_flu_cycles)` holds for both
+AesStages values (the module's built-in equivalence assertion self-checks it).
+AesStages=3 AES lands at offset 3+WBC == BR_MASK position -> correctly serializes
+on the single FLU writeback port with branch ops.
+
+**RES_WIN coverage**: `ooo_flu_res_win = 2+m+WBC`, m>=2 -> >=4+WBC > 3+WBC ->
+AES's new offset always fits; the per-op `a_off_in_win` assertion guards it.
+
+**Contract now spans**: aes.sv AesPipe3 (miter-verified 20065/0) -> ex_stage
+AES_PIPE3 lane q2 -> ooo_flu_cycles distance -> flu_reserve AES_MASK. ALL derive
+from `HypCfg.AesStages`; default `AesStages==1` -> every term folds to the
+original -> bit/cycle-identical, all new flops dead-synthesized.
+
+**To realize the ~44.9->split FO4 gain** (deliberate next step): set
+`AesStages:3` in a `g6lc_hyp_pkg` preset (all currently ship `:1`), then remote
+gate + directed AES suite + witness + core FO4 board.
+
+## r127 — AesStages=3 made reachable via -DG6LC_HYP8_AES3 (project-convention seam)
+
+Following the established `-D` profile-variant discipline (G6LC_HYP8_DEEP /
+G6LC_HYP8_MMU_STAGED / G6LC_HYP8_IQSTEER2 — "not the default until a boot
+witness passes"), added the AES3 enablement seam WITHOUT touching the default
+netlist:
+
+- `core/include/g6lc_hyp_pkg.sv`: new `hyp_aes3(h)` -> `r.AesStages = 3`
+  (mirrors `hyp_iq_steer2`).
+- `core/include/g6lc64_hyp8_config_pkg.sv` + `g6lc64_hyp8_mc_config_pkg.sv`:
+  introduced `HypCfgPre` (the IQSTEER2-or-base result) then
+  `ifdef G6LC_HYP8_AES3 -> HypCfg = hyp_aes3(HypCfgPre)` else `HypCfgPre`.
+  Composes cleanly with the DEEP/MMU_STAGED/IQSTEER2 seams on both the
+  single-core and multicore (OpenWrt) config packages.
+
+Both config packages **lint clean** (the only aes.sv diagnostic is the
+pre-existing standalone-lint `fu_data_t=logic` default limitation, unrelated).
+Default build (no -DG6LC_HYP8_AES3) -> AesStages==1 -> bit/cycle-identical.
+
+**Verification path now armed**: build a variant with
+`-DG6LC_HYP8_AES3` (verilator `-D` or build_vlt_args), run the remote gate +
+directed AES suite + boot witness + core FO4 board to measure the ~44.9->split
+delta and confirm no WB-reservation/dependent-latency regression. Only then
+promote AesStages:3 into a default preset.
+
+## r127 — AES3 enablement VERIFIED at config level (both packages)
+
+Elaboration probe (`.devin-tmp/cfgprobe.sv`, Verilator --binary, hyp8 flist
+package closure):
+
+| build | AesStages | AluStages | IqSteer | Decode | hyp_cfg_ok |
+|---|---|---|---|---|---|
+| g6lc64_hyp8_config_pkg (default)      | 1 | 3 | 1 | 3 | — |
+| g6lc64_hyp8_config_pkg +AES3         | 3 | 3 | 1 | 3 | 1 |
+| g6lc64_hyp8_mc_config_pkg (default)  | 1 | 3 | 1 | 3 | — |
+| g6lc64_hyp8_mc_config_pkg +AES3      | 3 | 3 | 1 | 3 | 1 |
+
+`hyp_aes3` composes cleanly with the DEEP/MMU_STAGED/IQSTEER2 seams; legality
+check passes (AesStages inside {1,3}). Default netlist unchanged (AesStages==1
+-> AES_PIPE3==0 -> all new flops dead-synth).
+
+ex_stage lane path re-reviewed end-to-end: aes_vld_q2/aes_tid_q2 give the +1
+record delay; aes_lane_v fires at issue+2 coincident with aes.result_o
+(AesPipe3 stage-3 output, miter-proven = default+1cyc); flu_result_c=aes_result
+reads the aligned stage-3 value; WBC/passthrough publishes at the same edge;
+ooo_flu_cycles AES=2+wbc and AES_MASK@3+WBC keep lane_mask==1<<(1+cycles).
+
+REMOTE QUALIFICATION STILL REQUIRED before promoting AesStages:3 to a default
+preset: run_hyp8_integration / leaf gate with HYP8_EXTRA_DEFINES=G6LC_HYP8_AES3
+(or -D on the build), directed AES/SHA instruction suite, boot witness, and a
+core FO4 board to measure the ~44.9->split delta + confirm no WB-reservation
+or dependent-latency regression.
+
+## r127 — AES3 remote gate LAUNCHED + full-core lint GREEN
+
+- Local full-core lint (`g6lc_core` top, Flist.g6lc_hyp8, `-DG6LC_HYP8_AES3`):
+  **RC=0, 0 %Error** — ex_stage/aes/ooo_pkg/flu_reserve/config all elaborate
+  clean under AES3 (only pre-existing g6lc_fetch_dbg IMPLICIT warnings).
+- New remote build target `g6lc64_hyp8_aes3` added to hyp8-build-harness.sh
+  (TARGET_VLT_DEFS=-DG6LC_HYP8_AES3, single-hart, TB_OOO).
+- Closure `closure-r127aes3` built (927 files, all AES3 markers verified).
+- Remote gate launched: `hyp8-remote-gate.sh r127aes3 -aes3 4
+  --env HYP8_BUILD_TARGET=g6lc64_hyp8_aes3` -> run tag
+  `hyp8-r127aes3-aes3-aggregate-t4` (+ smokes). Proxy confirmed upload +
+  remote run start. Awaiting lint/build/sim evidence.
+
+## r127 — remote testdb categorization (OpenWrt-boot witnesses)
+
+- `hyp8-witness-cycprog13` (cycprog13 mc aggregate model, fw_payload.elf,
+  3e9-cycle budget): RUNNING (pid 2611378, ~148 CPU-min). Boot trace shows
+  ROM executing, npc sampled 0x10000->0x10040 then repeated 0x10040
+  (early-boot wait/spin, t<=0x39). Still in progress — no verdict yet.
+- `hyp8-witness-simd-isa`: FAILED AT LAUNCH — model rejected
+  `+smt_cyc_progress=500000` as invalid plus-arg (printed usage, exited).
+  The simd-isa model (sha 38f78c..) lacks the SMT progress plusarg the
+  witness launcher passes -> harness/model instrumentation mismatch, NOT an
+  RTL bug. A separate `hyp8-mc-simd-isa` run IS alive (different argv).
+- `hyp8-mc-fasthold`, `hyp8-mc-simd-isa`: results.json = build_complete only
+  (model metadata); sims still running.
+- Transport note: multiplexed ssh `shell` drops on sustained reads of
+  actively-written logs; `head`/small `cat` OK, `tail`/`wc` time out. Use
+  proxy `pull` or bounded reads for large witness logs.
+
+## r127 — testdb categorization: mc_all_harts_present TIMEOUT = coherence-visibility suspect
+
+Suite `mc-directed-simd-isa` (simd-ISA model sha 38f78c, 8-hart 4x2, max-cyc 2M):
+- PASS: boot_sanity 525, hart1_alive 200518 (full BOOT_HOLD), smt_sibling_yield
+  2371, shared_line_xcore 2182, shared_line_sibling 94508.
+- **TIMEOUT rc=124: mc_all_harts_present** — the ONLY failure.
+
+Test semantics (mc_all_harts_present.S): every hart `sw mhartid+1 -> flags[id]`
+@0x80001008 then `fence rw,rw`; harts1-7 `park` in wfi; hart0 polls flags[0..7]
+-> tohost=1, else after 10000 passes tohost=0x100|mask (mask published to
+`result`@0x80001028 EVERY pass so a kill still leaves it readable).
+
+Evidence (pulled output -> build/mc-directed-simd-isa-pull):
+- [hang] census @cyc~23k: gen_core[1],[2],[3] all `halt=1`, SB head pc=0x80000068
+  (`csrr mhartid`, post-flag-store fence), FE npc=0x800000e8/bp_tgt=0x800000e0
+  = `done`/`park` -> secondary harts REACHED park => they DID execute the flag
+  store + fence. gen_core[0] ABSENT from hang dump => hart0 alive, spinning census.
+- => all harts stored flags, hart0 spins but never sees all 8 non-zero.
+  Leading hypothesis: **hart0's L1 holds a stale flags[] line; remote-hart flag
+  writes are not invalidating it** (snoop/L1-coherence gap on the tight
+  flags-poll pattern). mc_shared_line_* pass => basic coherence works; this
+  exposes a specific visibility gap (8-hart .data poll, or store still in a
+  remote queue / L2->L1 invalidation miss).
+- `result` mask @0x80001028 holds the last missing-hart mask but no post-mortem
+  dump was taken (timeout kill). Next: re-run with a memory dump / read result,
+  or shrink to 2-core repro; inspect coherence_hub snoop + L1 inval for the
+  .data flags region.
+- Side anomaly: `[preload] FDT magic_be=0x0` (FDT reads zeros) on this model —
+  likely benign for bare-metal but noted.
+
+NOT yet an RTL fix — categorized to a specific coherence-visibility suspect.
+
+## r127 — AES3 remote gate progress (live)
+
+`hyp8-r127aes3-aes3-aggregate-t4` (~19min in):
+- lint-scalar: **0 %Error**, lint-smt2: **0 %Error** (base + SMT2 profiles clean;
+  note these profiles do NOT carry AES3 — AES3 is exercised by the BUILD's
+  -DG6LC_HYP8_AES3 verilation, matching how DEEP/IQSTEER2 variants qualify).
+- AES3 verilate in progress (verilator_bin pid 2737740, ~15 CPU-min). Next:
+  C++ compile -> model -> integration/smoke tests. Local g6lc_core lint was
+  already 0-error so elaboration risk is low; watch for the aes lane / WB
+  reservation assertions under --assert in sim.
+
+## r127 — AES3 remote gate: build_failed was a TESTBENCH bug, not RTL (fixed)
+
+`hyp8-r127aes3-aes3-aggregate-t4` (closure-r127aes3) finished lint scalar+smt2
+rc=0, verilated OK, then `make` failed compiling `hyp8_tb.cpp`. NOT an AES/RTL
+issue — the aes3 model is **single-core partitioned** (Verilator emitted
+`Vg6lc_testharness_g6lc_testharness.h` → `G6LC_TB_PARTITIONED`), and
+`g6lc_tb_core_pi()` unconditionally selected `gen_core__BRA__{0,1,2,3}`.
+NrCores=1 emits only `gen_core[0]` → `gen_core__BRA__1/2/3` members absent →
+first errors at hyp8_tb.cpp:116-118; the `auto` return-type deduction then
+failed → `G6LC_CORE_ROOT(0)` ill-formed → `rf0`(auto&) → cascade of
+"t01/a41/ra1/... not declared" in the hangpc dump. Build env confirmed:
+SOFT_LADDER_BUILD_TARGET=g6lc64_hyp8_aes3, CFLAGS had -DG6LC_TB_OOO only
+(no BANKED) → non-banked, so `G6LC_TB_H1=0u`; the *1 vars were pure cascade.
+
+Latent for EVERY single-core partitioned target (hyp8/l3/deep/mmu_staged/
+iqsteer2/aes3/smt2 all NrCores=1); only mc (NrCores=4) has all four gen_core
+members. Likely exposed now because the hyp8 redesign crossed Verilator's
+module-class emission threshold.
+
+FIX (testbench + harness, no RTL):
+- hyp8_tb.cpp `g6lc_tb_core_pi`: `#if defined(G6LC_TB_NCORES)&&(G6LC_TB_NCORES<=1)`
+  → select only gen_core__BRA__0; else keep 4-way ternary.
+- hyp8-build-harness.sh: per-target `TARGET_NCORES` (1 for all single-core,
+  4 for mc) + `TARGET_CFLAGS+=-DG6LC_TB_NCORES=$TARGET_NCORES`.
+
+Rebuilt closure-r127aes3fix (927 files, fixes verified present) and relaunched
+gate `hyp8-r127aes3fix-aes3-aggregate-t4` via WSL proxy (Git-Bash lacks rsync;
+hyp8-remote-gate.sh is WSL-pathed /mnt/e/cva6). NOTE: py/pull need rsync → run
+remote gates under `wsl.exe -e bash -lc`, not Git Bash.
+
+## mc_all_harts_present — ROOT-CAUSED via CVA6_TRAP_DUMP (NOT coherence)
+
+Reran alone on model `hyp8-mc-simd-isa` (sha 38f78c) with `+max-cycles=120000`
++ `CVA6_TRAP_DUMP=1` (run `mc-hp-dump-t1`, pulled remote-runs/mc-hp-dump-t1).
+Post-run DRAM dump @0x1000..0x102f decoded (u64 LE, VA=DRAM+0x80000000):
+
+  tohost[0x1000]=0   flags[0x1008..0x1027]  result[0x1028]
+  [1008]=1            flags[0]=1 flags[1]=0
+  [1010]=0x400000003  flags[2]=3 flags[3]=4
+  [1018]=0x600000005  flags[4]=5 flags[5]=6
+  [1020]=0x800000007  flags[6]=7 flags[7]=8
+  [1028]=2            result mask = 0b10 -> MISSING HART = hart 1 ONLY
+
+=> flags[1]=0; every other hart (0,2..7) stored correctly. The earlier
+"cross-core coherence / stale L1" hypothesis is WRONG — this is a single-hart
+liveness bug, not a visibility bug.
+
+WHO is hart1: mhartid 1 = core0's SMT sibling (thread1 of the 4x2 machine).
+[hangpc] core0 dump: `act=0` (thread0/hart0 is the fetching thread),
+`wfi0=0 wfi1=0 mepc0/1=mcause0/1=0`, and EVERY hart1 GPR reads 0
+(t01=t11=t21=s01=a01..a51=ra1=sp1=0). hart1's t1 should be trap_vec=0x800000fc
+and t0=mhartid=1 after _start — all-zero => hart1 NEVER retired a single
+reg-writing instruction. It is not parked (wfi1=0), not trapped (mepc/mcause=0).
+
+WHY hart1 doesn't run — traced the release/schedule path:
+- core0 is c==0 so `BOOT_HOLD` never gates it (gen_boot_norel rel=1); both
+  threads have clocks from reset. hart1 is NOT boot-held.
+- hart0's rel_loop writes CLINT msip[t2] for t2=1..7 -> msip[1] (0x02000004)
+  -> clint ipi[1] -> testharness `core_ipi[0][1]=ipi[1]` -> cva6 `ipi_i[1]`
+  -> `smt_hart_seen_q[1]<=1` (cva6.sv:1836). Path is correctly indexed
+  (global mhartid = core*NrHarts + local_hart, ariane_testharness.sv:2137).
+- BUT scheduling is gated by `smt_hart_ready_sel`: once `smt_boot_done_q`,
+  unseen harts are forced not-ready (cva6.sv:1886-1891, the "G1di" rule).
+  hart1's ONLY paths to `seen`: an `ipi_i[1]` pulse, or being the target of an
+  `smt_switch` (cva6.sv:1854-1857) — which itself needs it ready first
+  (chicken-and-egg). So ipi_i[1] is the sole unlock.
+- SMT_RR policy switches only on `quantum_q>=SmtFetchQuantum-1` (=4096 fetches)
+  or `!hart_ready_i[active]` (g6lc_thread_select.sv:283-292). hart0's census
+  never goes not-ready -> hart1 waits for a 4096-fetch quantum.
+
+TWO candidate mechanisms (need one more probe to separate):
+  (a) `ipi_i[1]` never asserts / seen_q[1] stuck 0 -> hart1 never eligible.
+      Would mean the CLINT msip->ipi route or the seen flop is broken for the
+      same-core sibling. CHECK: is msip[1] actually written+held? Does
+      `ipi_i[1]` reach cva6 thread1 (vs being consumed as core0's ipi_seen)?
+  (b) hart1 IS seen+scheduled but SMT switch/drain flushes its ~15-instr
+      _start->flag-store sequence every quantum before commit -> regs stay 0.
+      SmtFetchQuantum=4096 is large so this is less likely unless drain
+      overhead eats the window.
+
+DISCRIMINATOR already in hand: mc_smt_sibling_yield PASSED (2371cyc) with the
+IDENTICAL flags[] protocol but hart1 as reader and hart0 parking first —
+proves hart1 CAN read mhartid=1, CAN store flags[1]=2 to memory, CAN be
+scheduled on core0. The delta is purely: in all_harts_present hart0 never
+parks, so it holds core0's fetch/issue and hart1 must win SMT_RR quanta.
+
+NEXT (cheap, decisive): minimal 2-hart-on-core0 reproducer — both harts store
+flags[mhartid] then park, NO census reader; dump DRAM. If flags[1] still 0 ->
+hart1 never commits regardless of census (seen_q/ipi or switch bug). If flags[1]
+set -> the census-poll interaction (hart0 starving hart1) is the trigger.
+Also probe `ipi_i[1]`/`smt_hart_seen_q[1]`/`hart_ready[1]`/`active_q` live in a
+short run to split (a) vs (b) directly.
+
+## r127 — AES3 gate GREEN (build) + SMT-drain hypothesis refined
+
+### AES3 `hyp8-r127aes3fix-aes3-aggregate-t5` — build_complete rc=0
+- Lint scalar rc=0 / smt2 rc=0, **0 %Error** both.
+- Verilator verilate + C++ compile + model build **all succeeded** (the
+  hyp8_tb.cpp NCORES/free_hit fixes held). PGO model sha e18a52a62ce8fb38.
+- This clears the exact C++-compile wall that killed t4. AES3 mechanism now
+  compiles end-to-end in the real hyp8 core. NEXT: functional sim (AES/SHA
+  directed suite + WB-reservation asserts) + witness + FO4 board for the
+  ~44.9->split delta. Still NOT a qualified FO4 win.
+
+### mc_all_harts_present — refined root-cause (drain-livelock leading)
+- CONFIRMED mhartid1 == core0 SMT-sibling thread1 (cluster hart_id_i = c*NrHarts,
+  csr bank +h). hangpc: ALL thread1 GPRs = 0 -> committed ZERO instructions.
+  Not parked (wfi1=0), not trapped (mepc1/mcause1=0).
+- mc_smt_sibling_yield PASSED (hart1 reader, hart0 parks first) -> hart1 CAN
+  run when it wins the core via the FORCED `!ready[active]` switch.
+- DECISIVE DIFFERENCE: all_harts_present hart0 stays READY (spins census) ->
+  hart1 must win an SMT_RR QUANTUM switch (4096 fetches). sibling_yield hart0
+  parks -> FORCED switch. So the bug is specific to the quantum/peer switch
+  path while the primary stays ready+committing.
+- STRONGEST HYPOTHESIS (drain livelock): switching hart0->hart1 requires the
+  drained-handoff drain (SmtDrainedHandoff=1) to empty hart0's ROB/IQ. hart0's
+  census `lw` poll keeps the pipeline full; drain_force needs drain_force_cnt
+  to reach DF_MAX but `commit_i` resets it every retire (thread_select ~L407),
+  and the ABS bound (L415) needs `head_plain_i`. If a `lw` head is not "plain"
+  the abs force never fires -> drain pends forever -> thread1 never activated.
+  sibling_yield avoids this: hart0 WFI -> head_wfi_i -> drain_force via the
+  WFI path -> drain completes.
+- smt_stats observer already in cva6.sv (G6LC_FETCH_B, +smt_stats plusarg,
+  NO rebuild): dumps [smt-stall] cause buckets (dp/drdy/hwfi/hplain/fcnt/
+  forced/sbem/stp) + [smt-drain] periodic/final. Launched mc-smtstats-t1
+  (mc_all_harts_present, +smt_stats, 1M cyc) to confirm dp-pends-forever vs
+  thread1-never-selected.
+
+### mc_smt_sibling_both_present RESULT (mc-smt-both-t2) — DECISIVE
+- state=wedged @300000 cyc. trapdump flags[]: [1008]=1 (flags[0]=1,flags[1]=0),
+  [1010]=3|4<<32, [1018]=5|6<<32, [1020]=7|8<<32 -> flags[1]=0 CONFIRMED.
+  hangpc: thread1 ALL GPRs=0, wfi1=0, mepc1/mcause1=0 -> ZERO commits.
+- hart0 trace: reaches DRAM _start @cyc422, runs release+flag+delay; stuck in
+  tight `addi;bnez` delay loop 0x80000078/7c through cyc299980 (DELAY=40000
+  ~=300k cyc, never reached census). So hart0 did PURE register work, no D$
+  poll, for the whole run -> hart1 STILL never ran.
+- CONCLUSION: hart1 (core0 SMT sibling) starves while hart0 executes ANY
+  stream. NOT memory-poll/DRAM-specific -> fundamental SMT secondary-thread
+  scheduling/eligibility bug. sibling_yield works only via forced switch
+  (hart0 parks). The quantum/peer switch path never gives thread1 a commit.
+- Trace coverage note: only EVEN mhartids (thread0/primary per core) traced;
+  odd thread1 absence in trace is a coverage limit, flags[] is authoritative.
+- NEXT: mc-smtstats-t1 (+smt_stats) drain buckets decide: drain_pending-forever
+  (livelock) vs thread1-selected-but-zero-commit (fetch/PC-bank) vs
+  ready_sel[1]=0 (seen_q/ipi). Then targeted fix.
+
+### SMT switch-path trace (g6lc_thread_select FETCH_B drain flow) — for fix targeting
+- Policy -> do_switch/next_peer/reasons. drain_pending=0 branch: do_switch &&
+  !hold && !flush -> latch drain_pending_d=1, drain_peer_d=next_peer,
+  drain_reason_d=reasons; do_switch consumed to 0.
+- drain_pending=1 branch: next_peer=drain_peer_q; do_switch = drain_ready_i &&
+  hart_ready_i[drain_peer_q] && !hold && !trap_hold && !flush. On do_switch ->
+  switch_q -> active_q<=drain_peer. Abort if !hart_ready_i[drain_peer_q].
+- drain_ready_i (SmtDrainedHandoff) = smt_sb_empty && no_st_pending_commit &&
+  !flush_ctrl_id && ooo_drained_id. drain_force escape: head_wfi path OR
+  (!commit && cnt==DF_MAX && head_plain) OR (abs==DF_ABS_MAX && head_plain);
+  gated by drain_killable_i=smt_drain_safe (=no_st_pending_commit &&
+  sb_head_valid && !(lsu_commit&&!lsu_ready) && !(Debug&&set_debug_pc)).
+- Extra do_switch suppressors seen: uniss_pend (IQ head unissued, bounded by
+  SMT_UNISS_WAIT), t0_extra (post-lui/addi t0 quantum/starve suppress),
+  trap_hold.
+- BREAK CANDIDATES ranked: (1) do_switch never fires on quantum expiry
+  (quantum_q not reaching Q_MAX-1, or found_peer/ready_sel[1]=0); (2) drain
+  pends forever (drain_ready never rises AND drain_force blocked by
+  killable/head_plain); (3) drain completes but hart_ready_i[1]=0 at that
+  instant -> abort. +smt_stats buckets decide which.
+
+### Mid-run peek note (mc-smtstats-short)
+- Partial pull showed [rob] per-cycle dumps with commit-port fields
+  `p0:aX/tY/hZ/dW/cV/mU`; `h` takes h0/h1 and BOTH appear across p0/p1
+  (e.g. t=1542 p0:h1 p1:h0, t=1554 p0:h1). If `h`=hart_id this means
+  thread1-tagged instructions ARE reaching the OoO ROB/issue path even
+  though smt_active_hart reads 0 -> the starvation may be a COMMIT/retire
+  attribution bug for the secondary thread, NOT a fetch/scheduling gap.
+  Needs the full [smt-drain]/[smt-stall]+trapdump to confirm h=hart_id and
+  whether h1 entries ever reach c=commit. Awaiting run completion.
+
+### SMT liveness — reframed by mixedstats control data (mc-mixedstats-t1)
+- CONTROL mc_smt_sibling_yield (+smt_mixed_stats +smt_stats, PASSES):
+  [smt-drain] FINAL req=1 switches=1 ret={27,27,0,0}; fetch_parcel h0=24 h1=27;
+  retired h0=27 h1=27; both_resident=0; lsu_ctx_switches=1. Proves the
+  drain->switch->fetch->commit path works end-to-end for the SMT sibling via
+  the !ready (peer-WFI) switch. hart1 CAN fetch+commit+store+park.
+- both_present [rob] commit-port fields show h1-tagged instrs reaching commit
+  (p0/p1 .../h1/.../c1) -> hart1 IS being scheduled and its instrs reach the
+  commit path, contradicting the earlier 'never activated' read. The break is
+  therefore hart1-not-COMPLETING its flag-store->fence->wfi sequence, NOT a
+  pure scheduling/eligibility failure. Candidates: (a) quantum switch happens
+  but hart1 is drained/switched away mid-sequence before the store reaches
+  DRAM; (b) store-buffer/LSU ctx for the secondary hart drops the flag store;
+  (c) commit attribution ok but flags[] write lost. Awaiting FINAL
+  retired[1]/fetch_parcel[1]/req/switches + trapdump flags/result mask.
+- Instrumentation note: +smt_mixed_stats is gen'd for NrHarts>1 (NO rebuild
+  needed) -> fetch_parcel=smt_fetch_fire count per hart. +smt_quant_probe
+  model (hyp8-smtquant-aggregate-t1) still building for quantum_q/do_pol truth.
+
+### SMT sibling starvation — ROOT CAUSE FOUND + FIX VERIFIED (uniss_pend reset bug)
+- DEFINITIVE via +smt_quant_probe (mc-quantprobe-t2, model hyp8-smtquant-aggregate-t1):
+  6825 POL events (do_pol && rq_pol = raw SMT_RR quantum predicate) over the
+  89000-cyc wedge. At EVERY one: act=0 q=4096 fp=1 ready=11 ff=1 iqv=1 idu=0
+  uniss=0 g1=0 dp=0. Quantum saturated, peer ready, fetch firing, head blocked
+  -- yet do_g1 stayed 0 forever -> drain never armed -> hart1 never scheduled.
+- ROOT CAUSE in g6lc_thread_select.sv p_gate (I4bc unissued-head delay):
+  `uniss_pend_d = '0` default + `uniss_pend_d = uniss_pend_q+1` ONLY inside
+  `if (do_pol && iqv && !idu && uniss<WAIT && !hold)`. do_pol re-asserts only on
+  sparse fetch_fire cycles (~1/10 cyc), so uniss_pend_q reset to 0 every
+  !do_pol cycle and could NEVER reach SMT_UNISS_WAIT=47 -> the suppression
+  `uniss_pend_q < 47` stayed permanently true -> do_g1 permanently suppressed.
+  This is why yield (not-ready path = continuous do_pol -> count reached 47)
+  passed while both_present/ilp (quantum path = sparse do_pol) starved.
+- FIX (g6lc_thread_select.sv p_gate + always_ff): uniss_pend now accumulates a
+  do_pol-blocked EPISODE -- increments on each `do_pol && iqv && !idu && !hold`
+  cycle while uniss_pend_q<WAIT (saturates at WAIT), is HELD across the sparse
+  do_pol gaps and brief iqv/idu flicker via `else if (!flush && !hold &&
+  uniss_pend_q!=0) uniss_pend_d=uniss_pend_q`, and resets only on do_switch /
+  flush / hold. The head-state term now only gates whether a NEW delay is
+  granted, never whether the bound is kept. do_switch reset added in always_ff
+  so each resident hart gets a fresh SMT_UNISS_WAIT grace.
+- UNIT-VERIFIED before/after (.devin-tmp/tb_thread_select_starve.sv, real
+  g6lc64_hyp8_mc cfg, sparse fetch_fire 1/10cyc + backlogged IQ head + idu
+  flicker): BEFORE=0 switches active_seen=01 (starvation reproduced);
+  AFTER=SWITCH@cyc40961 reason=q active_seen=11. Lint clean FETCH_B + non-FB.
+- Rebuild launched: closure-mc-smtfix (quantprobe closure + fixed
+  g6lc_thread_select.sv, manifest hash 17c98eff...) -> hyp8-smtfix-aggregate-t1.
+
+## 2026-11-21 — uniss_pend fix VALIDATED; second blocker found (drain livelock)
+
+Directed suite on hyp8-smtfix-aggregate-t1 (uniss_pend fix + quant_probe),
+HYP8_MAX_CYCLES=110000, DELAY=20000. Verdicts reconciled from logs (the
+"wedged" state is a +max-cycles cap artifact — SUCCESS/progExit=0 printed but
+the sim ran to budget because post-done harts spin in `j 3b`/`wfi;j park` and
+the multicore harness does not self-terminate on single-hart tohost):
+
+| test | hart1 (core0 SMT sib) retired | functional result |
+|---|---|---|
+| mc_smt_sibling_yield      | ran (PASS, 2371 cyc clean exit) | PASS |
+| mc_smt_sibling_both_present | ret=25 (flag store+park) | SUCCESS, progExit=0, all cores retired, mc_gap<=74 |
+| mc_smt_sibling_ilp        | ret=25 | SUCCESS, progExit=0, healthy gaps |
+| mc_all_harts_present      | **ret=0 — STILL STARVED** | census spins, flags[1]=0 |
+| mc_smt2_boot_release      | core0 hart1 ret=0; core1 BOTH harts ran | partial |
+
+KEY: uniss_pend fix WORKS for register-delay (both_present) and ILP primaries —
+hart1 now wins SMT_RR quanta and commits. But mc_all_harts_present still shows
+hart1 resident=0. +smt_quant_probe on all_harts_present: **sw=0 for the whole
+110k cycles; DP drain-requests fire (peer=1) but never complete.** Different
+mechanism than the fixed one: here drain_pending IS requested but drain_ready
+never rises -> SMT_DRAIN LIVELOCK.
+
+drain_ready_i = smt_sb_empty && no_st_pending_commit && !flush_ctrl_id &&
+ooo_drained_id. hart0 sits in an infinite census `lw flags[]` poll + per-pass
+`sw result`/`fence` -> ROB/IQ/LSQ never fully empty -> ooo_drained_id~0 ->
+natural drain impossible. Only escape = drain_force (DF_MAX=256 rel / DF_ABS_MAX
+=4096 abs, gated on drain_killable_i=smt_drain_safe AND head_plain_i for the
+cnt/abs legs; WFI leg separate). If force never fires (head_plain=0 during the
+fence/store head, killable=0 during no_st_pending, or abs_cnt resetting on
+drain_pending toggle) OR fires once but drain_issued_q then blocks re-fire
+while hart0 refills -> permanent starvation.
+
+Diagnostic launched: run_smtstatsfix_directed.sh -> +smt_stats on smtfix model,
+mc_all_harts_present + mc_smt2_boot_release @160k cyc. The [smt-drain] final
+summary buckets every drain_pending&&!switch cycle into wait_sb/wait_st/
+wait_flushid(=ooo_drained or flushid)/wait_peer/wait_hold/wait_trap/wait_flush
++ force/force_wfi/force_abs counters + per-hart retired; [smt-stall] anatomy
+dumps on 65536-cyc retire gap name sbem/stp/fid/ooo/LSU/scoreboard state.
+
+## 2026-11-21 (later) — mc_all_harts_present ROOT CAUSE #2: quantum reset on flush_i (FIXED)
+
+The "drain livelock" hypothesis above was WRONG. Re-reading the +smt_quant_probe
+SM snapshots at cyc=102400/103424 across all 4 selector instances (one per
+physical core) gives the decisive per-core picture:
+
+  core0 (census master): act=0 q=29 pol=0/0 g1=0/0 sw=0 rq=0 ff=0 fp=1
+                         ready=11 iqv=0 idu=1 uniss=0 dp=0 swq=0 ffN=12570 dpN=0
+  core1/2/3:            act=1 q=5  pol=0/0 ... fp=0 ready=00 ffN~58 dpN=1
+
+Decode:
+- cores1-3: BOTH SMT harts stored their flag and parked -> ready=00, fp=0 (no
+  eligible peer). They finished via the early forced/quantum switch (dpN=1).
+- core0: hart0 is the census master -> stays ready+committing forever. hart1 is
+  ELIGIBLE (fp=1, ready=11) but quantum_q is pinned at ~29 << Q_MAX-1=4095, so
+  do_pol NEVER fires -> no drain request (dpN=0) -> hart1 starves -> flags[1]=0
+  -> census spins forever -> wedge.
+
+ROOT CAUSE: `quantum_d` reset on `flush_i`. The frontend asserts flush_if on
+EVERY routine self-inflicted event -- FENCE/FENCE.I/SFENCE/HFENCE/CBO AND branch
+mispredicts (controller.sv flush_if_comb). hart0's census executes a `fence`
+every pass (~29 fetches), so quantum_q is reset ~430 times before it can reach
+4095. fetch_fire is sparse (~1/8 cyc, ffN=12570 over 103k cyc) but even so the
+per-pass fence makes Q_MAX unreachable. This is GENERAL: any fence/mispredict-
+dense primary starves its SMT sibling; both_present/ilp only passed because
+their delay/ILP loops had NO fence -> quantum reached 4095 -> the uniss_pend
+fix (root cause #1) then let the switch through.
+
+FIX (core/smt/g6lc_thread_select.sv, shared quantum_d assign -> covers both
+FETCH_B and non-FETCH_B paths): removed flush_i from the quantum reset. Quantum
+now clears only on hold_i / do_switch (genuine handoff boundaries). During a
+flush fetch_fire_i is low so the count simply holds and resumes on the next
+grant. Fairness-only signal -> cannot affect correctness; makes switches MORE
+readily reachable (sticky saturation at Q_MAX) -> strictly better RR fairness.
+
+UNIT-VERIFIED (.devin-tmp/tb_thread_select_fence.sv, real g6lc64_hyp8_mc cfg,
+sparse fetch_fire 1/10cyc + periodic flush_i every ~15 fetches + IQ backlog +
+id_uniss flicker):
+  non-FETCH_B: SWITCH@40961 reason q=1 active_seen=11
+  FETCH_B   : SWITCH@40962 reason q=1 active_seen=11   <- the hyp8_mc path
+Pre-fix this stimulus gives 0 switches (quantum reset every flush pulse).
+
+Both SMT fixes now in hyp_redesign_core_8fo4/core/smt/g6lc_thread_select.sv:
+  #1 uniss_pend accumulator (do_pol-blocked episode saturates at SMT_UNISS_WAIT,
+     held across fetch gaps/flicker, reset on do_switch/flush/hold)
+  #2 quantum survives flush_i (fence/mispredict no longer destroy fetch credit)
+They are complementary: #2 lets do_pol fire at all in fence-dense code; #1 lets
+the resulting switch past the unissued-IQ-head gate.
+
+REBUILD LAUNCHED: closure-mc-smtfix updated in place (thread_select.sv sha256
+523098ce..., manifest re-pinned + verified MATCH) -> smtquantfix-mc-remote-gate.sh
+-> hyp8-smtquantfix-aggregate-t1 (HYP8_BUILD_PGO=0). Next: run_hyp8_mc_directed
+on both_present/yield/ilp/all_harts_present/smt2_boot_release + cache/L2/L3/
+eWT/coherence/zacas suite -> testdb.
+
+NOTE (divergence): repo-root core/smt/g6lc_thread_select.sv is the separate
+functional-tree sequential variant -- it has the SAME flush_i quantum reset
+(line ~485 `if (flush_i) quantum_d=0`) plus a different uniss_pend structure.
+NOT built by hyp8_mc (which uses the hyp_redesign tree). Port the same two
+fixes there if/when that tree is qualified for SMT; flagged for follow-up.
+
+### Drain-path safety re-check (post-quantum-fix) — NO third fix expected
+Traced drain_force in g6lc_thread_select.sv for the census-primary case
+(hart0 commits every pass, pipeline never fully empties -> drain_ready_i~0):
+- drain_abs_cnt counts EVERY drain_pending && !drain_ready cycle and is NOT
+  reset by commit_i (T10f comment: "a commit does NOT reset it") -> climbs to
+  DF_ABS_MAX=16*SmtDrainForceCycles=4096 even under a sustained commit stream,
+  then SATURATES (stays at bound until drain resolves).
+- absolute leg `(drain_abs_cnt==DF_ABS_MAX) && head_plain_i` has NO !commit_i
+  requirement -> fires once head_plain && drain_killable align; since the
+  counter is saturated it has unbounded cycles to find that alignment.
+- census head rotates lw/sw/fence/branch; head_plain=1 for lw/sw/branch (fence
+  excluded but is 1 instr/pass); drain_killable=smt_drain_safe=1 except during
+  brief store/LSU-handshake windows -> alignment is high-duty -> force fires.
+=> drain completes via drain_force_abs within ~4096cyc of drain_pending. The
+quantum+uniss fixes are SUFFICIENT for mc_all_harts_present; +smt_stats drain
+buckets will confirm empirically. Expected added latency ~quantum(4095 fetch)
++ drain_abs(<=4096cyc) << 200k budget.
+
+## 2026-11-21 (later) — BOTH SMT fixes VALIDATED on hyp8-smtquantfix-aggregate-t1
+
+Remote model hyp8-smtquantfix-aggregate-t1 built (closure-mc-smtfix, lint
+scalar+smt2 rc=0, build_complete, modelSha dcb7ec25). Directed suite
+mc-smtquantfix-t1 @200k cyc, +smt_quant_probe/+smt_stats/+stall_census:
+
+| test | state | evidence |
+|---|---|---|
+| mc_all_harts_present | **PASS** (34361cyc, tohost=0) | quantum reached q=4096 across fences -> do_pol -> drain -> act=1 hart1 ran -> flags[1] set -> census done. THE fix. |
+| mc_smt_sibling_yield | PASS (2371cyc) | unchanged |
+| mc_smt2_boot_release | PASS (77687cyc) | peerHeld held=1100 -> held cores benign per classifier |
+| mc_smt_sibling_both_present | wedged@200k | budget-marginal: hart1 ret=25 ran+parked (flag stored), hart0 ret=39792 finished ~20000-iter delay right at cap -> needs >200k |
+| mc_smt_sibling_ilp | wedged@200k | same budget-marginal pattern (hart1 parked, hart0 in delay) |
+
+KEY PROOF (all_harts_present +smt_quant_probe): before fix core0 selector
+showed q pinned <=29, pol=0, dpN=0 (do_pol never fired). After fix q tracks
+ffN and hits 4096 -> POL event g1=1 dp=1 -> DP drain -> act flips to 1 ->
+hart1 commits flag store -> forced switch back -> census completes.
+
+both_present/ilp are DELAY=20000 register/ILP spin tests needing ~200k+ cycles;
+the 200k cap clipped them just before census. Re-running @1M budget
+(mc-smtquantfix-t1b) to confirm clean PASS. hart1 ret=25 on both_present
+already proves the SMT sibling ran its flag-store+park path (fix works); the
+wedge is purely cycle-budget, not starvation.
+
+SMT sibling starvation: ROOT-CAUSED (2 mechanisms) + FIXED + VALIDATED.
+Remaining for OpenWrt mc boot: confirm delay-tests @1M, then broad coverage
+(cache/L2/L3/eWT/coherence/zacas/smode) + witness/Linux payload boot.
+
+## 2026-11-21 — SMT liveness COMPLETE: all 5 directed tests PASS
+
+mc-smtquantfix-t1b @1M budget confirmed the two budget-marginal tests:
+- mc_smt_sibling_both_present: **PASS** @201959cyc (needed >200k; hart1 ret=25
+  ran flag-store+park, hart0 finished ~20000-iter register delay -> census -> tohost=0)
+- mc_smt_sibling_ilp: **PASS** @362005cyc (ILP workload is larger; same pattern)
+
+FINAL SMT LIVENESS SCOREBOARD (hyp8-smtquantfix-aggregate-t1):
+  mc_all_harts_present      PASS 34361   <- fence-dense census; BOTH fixes required
+  mc_smt_sibling_yield      PASS 2371
+  mc_smt2_boot_release      PASS 77687   (peerHeld held=1100 benign)
+  mc_smt_sibling_both_present PASS 201959
+  mc_smt_sibling_ilp        PASS 362005
+
+ROOT CAUSES FIXED (both in hyp_redesign_core_8fo4/core/smt/g6lc_thread_select.sv):
+  #1 uniss_pend_q accumulator -- do_pol-blocked episode saturates at
+     SMT_UNISS_WAIT=47 across sparse fetch_fire gaps + IQ/ID head flicker;
+     resets on do_switch/flush/hold. Was reset every !do_pol cycle -> bound
+     unreachable -> quantum switch suppressed forever.
+  #2 quantum_q no longer resets on flush_i -- frontend flushes on routine
+     FENCE/mispredict no longer destroy fetch credit; quantum clears only on
+     hold_i/do_switch. Was reset every flush -> Q_MAX=4096 unreachable in
+     fence/mispredict-dense code -> do_pol never fired -> sibling starved.
+     (Verified: q now tracks ffN and hits 4096 in the live probe.)
+
+Both are fairness-only, synthesizable, config-parameterized (SMT_UNISS_WAIT,
+SmtFetchQuantum, SmtDrainForceCycles), FETCH_B + non-FETCH_B clean, unit-tb
+verified (tb_thread_select_starve SWITCH@40961, tb_thread_select_fence
+SWITCH@40962 FETCH_B / @40961 non-FB, active_seen=11 both harts).
+
+NEXT: broad multicore coverage suite (coherence/shared-line, L2/L3, eWT/CBO,
+OoO store-queue, S-mode/sfence, zacas, PMU) on this model -> testdb -> then
+OpenWrt/Linux multicore boot witness. SMT scheduling is no longer the blocker.
+
+## mc-coverage-t1 — first results + mc_boot_sanity resolved (no regression)
+
+Full 62-test multicore suite on `hyp8-smtquantfix-aggregate-t1` (uniss_pend +
+quantum-flush SMT fixes). Early verdicts:
+
+| test | progExit | state | note |
+|---|---|---|---|
+| mc_boot_sanity | 0 | **pass** | tohost=1 written by hart0; held_mask=1110 -> exit-125 overlay is BENIGN (progExit grades it) |
+| mc_hart1_alive  | 0 | **pass** | ONLY hart1 writes tohost; hart0 parks in `j 0b`. progExit=0 => core0 SMT sibling (hart1) fetched+executed+stored -> **direct real-model validation of the SMT quantum fix** |
+
+### mc_boot_sanity "FAILED tohost=125" was a FALSE ALARM
+- Raw sim banner prints `*** FAILED *** (tohost=125)` = held-cores overlay exit code.
+- `[mc_verdict] program exit code 0` is authoritative; classifier grades progExit==0 -> pass.
+- rvfi_tracer: `pc=0x80000020 insn=00a2a023 (sw) mem_wdata=1 -> tohost@0x80001000` committed.
+- `[boot] npc=0x10040` trace is core0-only, first-64-cycles window (g6lc_tb.cpp:676) — says nothing about other harts; NOT a hang.
+- stall-census `ret=0`/`cyc=0` is a per-hart counter snapshot artifact, not retirement truth (rvfi_tracer is authoritative).
+
+### SMT fix confirmed on independent probe
+mc_hart1_alive is the cleanest possible SMT-sibling test: hart0 never goes not-ready
+(infinite `j` loop) so hart1 can ONLY run via a quantum switch — the exact path both
+fixes repaired. progExit=0 => switch fired, hart1 activated, retired, stored.
+
+### mc-coverage-t1 progress (suite running, sequential, +max-cycles=1M)
+Confirmed passes so far (progExit=0 authoritative):
+- mc_boot_sanity        525 cyc
+- mc_hart1_alive        42059 cyc   (SMT sibling executes -> validates fix)
+- mc_hart1_store_visible 72909 cyc  (cross-hart/SMT store visibility works;
+                                     hart0 ld-poll observed hart1 sd -> coherence OK for sibling pair)
+- mc_hart1_trap         running (oracle_neg)
+Note: suite is CPU-contended by a concurrent ~13h cycprog13 fw_payload boot sim
+on the same host; per-test wall time is minutes. Verbose +rvfi_cycle_stamp +
+[rob] tracing retained for wedge diagnosis.
+
+### mc-coverage parallelization
+Host 12 cores @ load ~4.3 -> headroom for 2nd stream. Launched mc-coverage-t2 =
+tests idx28-54 (wrongpath_window..smode_shootdown: OoO/store, atomics/zacas, CSR,
+icache, PMU, S-mode/sfence) in parallel with mc-coverage-t1 (all 55 sequential).
+Back-half coverage ~2x sooner; stream1 redundantly re-covers t2 subset at tail
+(harmless, deterministic model).
+
+### mc-coverage-t1/t2 interim tally (all progExit authoritative)
+PASS (progExit=0): boot_sanity 525, hart1_alive 42059, hart1_store_visible 72909,
+smt2_boot_release 77687, all_harts_present 34361, smt_sibling_yield 2371,
+smt_sibling_both_present 201959, smt_sibling_ilp 362005, wrongpath_window 123968,
+wt_delay_ld 6750, l2set_stride 5590.
+ORACLE: hart1_trap progExit=18 (deliberate trap -> oracle_ok expected).
+RUNNING: t1 mini_ipi_hart1_sp; t2 mini_l2_hot_scan (~bounded ~100-200k cyc work,
+slow under 2-stream+boot load ~7.8/12 cores).
+ZERO failures/wedges so far -> SMT-fixed model passing multicore coverage clean.
+
+## BOOT BLOCKER #2 (beyond SMT): core0 OoO speculative-load livelock
+
+Source: `hyp8-witness-cycprog13` run-hyp8.log (OLD model hyp8-rfix131a-cycprog13,
+built 2026-11-21 01:58 — PRE-SMT-fix; wbuffer/LSU RTL identical to smtquantfix).
+fw_payload boot, valid FDT (magic 0xd00dfeed). Hang_dump fired @cyc=265492.
+
+### Symptom (hang_dump, core0 hart0)
+- `[hang] cyc=265492 since_ack=2000 sb_empty=0 flush_if=0 flush_ex=0 halt=0
+  lsu_ready=0` — scoreboard head pinned, LSU not ready, for 2000+ cycles.
+- SB head slot1: `pc=0x800133da fu=LOAD(1) op=LW(39) prd=4` — issued, valid=0,
+  never completes. ~93 SBX slots backed up behind it (firmware mem routine
+  PCs 0x800124d4..0x800133f4: SD/LBU/LW/ALU mix — copy/decompress-like).
+- cycprog @3.5M: core0 hart0 `retired=89188` FROZEN from cyc2M->3.5M,
+  last_pc=0x80012b86. cores1-3 hart0 advancing (~489k). ALL hart1=0 (SMT
+  starvation — the bug ALREADY FIXED in smtquantfix; this model predates it).
+
+### Load-unit / LSU state at hang
+- `LSU bypass cnt=4 rp=0 | e0 v=1 fu=LOAD tid=53 specmiss=1 | e1 v=1 fu=LOAD
+  tid=1 specmiss=0` — a YOUNGER speculative-miss load (tid53) ahead in bypass.
+- `LU state=1 ldbuf_v=0..0` ; `SU state=0 tid_q=53 treq=0 dtlb_hit=1`.
+- `LU req: valid_i=0 tid=53 vaddr=paddr=0x800205b5 dtlb_hit=1` — NOT requesting.
+- `D$ ld-port: rd_req=0 miss_req=0 .. wbuf empty=1 not_ni=1` — D$/wbuf/LSQ all
+  IDLE. DEADLOCK (not busy-stall): load unit holds tid53 but issues no request.
+
+### Mechanism hypothesis
+Classic OoO bypass-FIFO livelock family (same class as r71/r124/rfix131a-03/08
+already patched in load_unit.sv): a younger flagged/specmiss load sits ahead of
+the commit-head LW in lsu_bypass; commit-head load can't reach commit -> never
+becomes non-speculative -> never yields; specmiss load can't resolve -> lsu_ready
+held 0. The existing escapes (wsl_replay_fire@32, is_speculative_load_miss pop,
+lu_replay_fire) apparently do NOT fire for this interleaving — needs the exact
+stuck FSM state + why the yield path is bypassed.
+
+### Repro/iteration problem
+Hang needs ~265k cyc of real firmware (FDT parse + device init + this mem
+routine). 13h boot too slow to iterate. Options: (a) targeted bare-metal repro
+of specmiss-ahead-of-commit-head-load under store pressure; (b) re-run boot on
+smtquantfix with +lu_replay_trace +ld_state +smt_flow_trace windowed at the
+hang; (c) deep FSM analysis of load_unit WAIT_SPEC_LOAD / WAIT_PAGE_OFFSET /
+WAIT_WB_EMPTY yield arms vs the bypass-head ordering.
+
+### Status
+NOT yet fixed. Coverage suite (smtquantfix) still running clean — bare-metal
+tests do not reach this firmware path. This is now the top OpenWrt-boot blocker.
+
+## OpenWrt boot blocker #2 ROOT-CAUSED: g6lc_zicclsm split-unit cancel livelock
+
+Boot witness hyp8-witness-cycprog13 (fw_payload, +hang_dump=2000) wedged @cyc~265492 on
+core0: `[hang] since_ack=2000 sb_empty=0 lsu_ready=0`, commit head = load @0x800133da.
+
+FULL hang anatomy (decisive dump, gen_hd_wt block g6lc_core.sv:2925+):
+- LSU bypass cnt=4 rp=0 | e0 v=1 fu=1(LOAD) tid=53 specmiss=1 | e1 v=1 fu=1 tid=1 specmiss=0
+- SU state=0 tid_q=53 treq=0 dtlb_hit=1 st_ready=1 | LU state_q=1 (=bit0=IDLE, NOT WAIT_GNT)
+  ldbuf_v=0 | STQ spec=0 commit=0 | amo_rdy=1
+- LU req: valid_i=0 tid=53 vaddr=0x800205b5 paddr=0x800205b5 dtlb_hit=1 treq=0 ex=0
+  cancelled=0 | port data_req=0 gnt=0 tag_valid=0 kill=0 rvalid=0 | wbuf_not_ni=1 st_empty=1 no_st=1
+- D$ ld-port: rd_req=0 rd_ack=0 miss_req=0 miss_ack=0 ... ALL ZERO. wbuf empty, mshr_vld=0.
+
+MECHANISM (verified end-to-end):
+1. tid=53 is a LOAD at vaddr 0x800205b5 -> offset 5. W=8 (XLEN64). wraps(off=5,sz):
+   LW(sz=2b10): off>W-4=4 -> 5>4 SPLIT; LD(sz=2b11): off!=0 -> SPLIT. It is a SPLIT access.
+2. g6lc_zicclsm (load_store_unit.sv:729) splits word-boundary-wrapping loads into beat0+beat1.
+   It sits between lsu_bypass and the load/store FUs: bypass->lsu_ctrl_byp->lsu_ctrl_pre->
+   i_zicclsm.ctrl_i -> ctrl_o=lsu_ctrl -> which_op -> ld_valid_i/st_valid_i.
+3. While splitting, zicclsm holds the bypass head (pop_*_byp_o=0) and in B0_WAIT/B1_WAIT drives
+   ctrl_o.valid=0 waiting for the beat completion ld_valid_fu_i/st_valid_fu_i.
+4. tid=53 got CANCELLED wrong-path (OoO cancelled_mask -> is_speculative_load_miss=1). OoO
+   younger-only LSU recovery (load_store_unit.sv:62 FSE S4) does NOT assert flush_i.
+5. zicclsm WAIT arms check ONLY ld_valid_fu_i/st_valid_fu_i + flush_i. A cancelled beat never
+   produces a valid completion -> zicclsm waits forever -> ctrl_o.valid=0 -> ld_valid_i=0
+   (matches LU valid_i=0, state IDLE) -> bypass head never popped -> younger ops (commit-head
+   load tid=1) jam -> scoreboard head pinned -> lsu_ready=0 -> HANG.
+
+ROOT CAUSE: g6lc_zicclsm has NO cancellation/wrong-path recovery in its split states.
+flush_i resets it (line ~299) but OoO cancelled_mask recovery is not a flush.
+
+FIX (implemented this pass, uncommitted):
+- split_now (line ~118): add `&& !ctrl_i.is_speculative_load_miss` so a doomed op is not split.
+- always_comb: add cancel abort `state_q != IDLE && ctrl_i.is_speculative_load_miss` ->
+  state_d=IDLE, ctrl_o.valid=0, valids=0, pop the held bypass head (is_load?pop_ld:pop_st).
+  ctrl_i.is_speculative_load_miss tracks the held head's cancelled_mask (head==orig during
+  split since pop=0). FU-side beat dropped independently by same cancelled_mask.
+- Placed before hold_v_q/flush_i overrides so those keep precedence.
+
+STATUS: fix written; needs Verilator lint + remote model rebuild + boot re-validation.
+This is very likely THE remaining OpenWrt/Linux boot blocker after the SMT fixes.

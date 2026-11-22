@@ -365,7 +365,8 @@ def main():
         'allowOverlap': allow,
         'capacity': {'nproc': nproc, 'loadavg': loadavg,
                      'mem': meminfo,
-                     'limits': {'buildJobs': int(os.environ.get('HYP8_BUILD_JOBS', '2')), 'verilatorThreads': 1}},
+                     'limits': {'buildJobs': int(os.environ.get('HYP8_BUILD_JOBS', '2')),
+                                'verilatorThreads': int(os.environ.get('HYP8_VERILATOR_THREADS', '2'))}},
     }
     if procs and not allow:
         results['status'] = 'build_blocked_by_overlap'
@@ -375,7 +376,11 @@ def main():
                          SOFT_LADDER_BUILD_TARGET=os.environ.get('HYP8_BUILD_TARGET', 'g6lc64_hyp8'),
                          SOFT_LADDER_VERLIB=str(out / 'model'),
                          SOFT_LADDER_BUILD_JOBS=os.environ.get('HYP8_BUILD_JOBS', '2'),
-                         SOFT_LADDER_VERILATOR_THREADS=os.environ.get('HYP8_VERILATOR_THREADS', '1'),
+                         # --threads is partition granularity (V3Partition cpLimit),
+                         # not runtime workers; threads=2 is the measured optimum for
+                         # these ~2x-parallelism cores (perf guide §30), threads=1 is
+                         # serial/slowest. Functionally identical either way.
+                         SOFT_LADDER_VERILATOR_THREADS=os.environ.get('HYP8_VERILATOR_THREADS', '2'),
                          # g6lc fork is the required default for hyp8 remote
                          # builds: it carries the split_var/unroll-before-split
                          # fixes the mc model needs. pinned remains available

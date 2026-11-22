@@ -141,6 +141,7 @@ ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/alu.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/alu_wrapper.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/aes.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/fpu_wrap.sv
+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_fp_zfa.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_rvc_enc.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_jalr_usable.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_cf_unissued.sv

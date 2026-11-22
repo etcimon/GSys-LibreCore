@@ -201,6 +201,188 @@ module g6lc_ai_gemm_fp32_norm (
   end
 endmodule
 
+// r127 contract item "AI FP32 add third stage": pipeline the norm leaf at the
+// candidate-vector boundary. `g6lc_ai_gemm_fp32_norm` is one combinational
+// cone (align_i -> magnitude -> leading-one -> masked 25-way candidates ->
+// 6-level OR-reduce -> pack, ~44 FO4). The two halves below are bit-identical
+// extracts of that cone: cand evaluates align_i into the masked candidate
+// vectors + the scalar terms the pack needs; pack only OR-reduces and packs.
+// Registering the candidate bundle between them splits the cone into a
+// candidate-eval stage and a shallow reduce+pack stage. Purely additive: the
+// comb `g6lc_ai_gemm_fp32_norm`/`_add`/`_add_p2` are untouched, so the default
+// build is unchanged; a consumer opts in by instantiating `_add_p3`.
+module g6lc_ai_gemm_fp32_norm_p1 (
+  input  logic clk_i,
+  input  logic rst_ni,
+  input  g6lc_ai_fp_pkg::fp32_align_t align_i,
+  output logic [36:0] result_o
+);
+  // ---- stage A (comb): candidate evaluation, identical to fp32_norm ----
+  logic [23:0] x_mag, y_shift;
+  logic sx, sy, corr, same_sign, nonneg, sign;
+  logic [7:0] ec;
+  logic [24:0] sum_same, diff_xy, diff_yx, magnitude, rounded;
+  logic [25:0] diff_xy_wide;
+  logic [24:0] diff_yx_xor, diff_yx_carry;
+  logic [1:0] low_sum, round_inc;
+  logic [24:0] leading;
+  logic [22:0] subnormal_fraction;
+  logic [24:0] overflow_hit, subnormal_hit, normal_hit;
+  logic [22:0] normal_fraction [25];
+  logic [7:0] normal_exponent [25];
+  logic        magn_nonzero, ovf_any, sub_any, topnl;
+  // special-case passthrough terms (registered so stage B needs no align_i)
+  logic        nan_q_in, inf_a_q_in, inf_b_q_in, zero_both_q_in;
+  logic        sign_a_q_in, sign_b_q_in;
+
+  assign x_mag = align_i.x_mag;
+  assign y_shift = align_i.y_shift;
+  assign sx = align_i.sx;
+  assign sy = align_i.sy;
+  assign corr = align_i.corr;
+  assign ec = align_i.ec;
+  assign same_sign = sx == sy;
+  assign sum_same = {1'b0, x_mag} + {1'b0, y_shift} + 25'(corr);
+  assign diff_xy_wide = {2'b00, x_mag} + {1'b0, ~{1'b0, y_shift}} + 26'(!corr);
+  assign {nonneg, diff_xy} = diff_xy_wide;
+  assign diff_yx_xor = {1'b0, y_shift} ^ ~{1'b0, x_mag} ^ {23'd0, corr, !corr};
+  assign diff_yx_carry = ((({1'b0, y_shift} & ~{1'b0, x_mag}) |
+                           ({1'b0, y_shift} & {23'd0, corr, !corr}) |
+                           (~{1'b0, x_mag} & {23'd0, corr, !corr})) << 1);
+  assign diff_yx = diff_yx_xor + diff_yx_carry;
+  assign magnitude = same_sign ? sum_same : (nonneg ? diff_xy : diff_yx);
+  assign sign = same_sign ? sx : (nonneg ? sx : !sx);
+  assign low_sum = 2'(x_mag[0]) + 2'(y_shift[0]) + 2'(corr);
+  assign round_inc = 2'(low_sum[1]) +
+                     2'(low_sum[0] && (x_mag[1] ^ y_shift[1] ^ low_sum[1]));
+  assign rounded = {2'b00, x_mag[23:1]} + {2'b00, y_shift[23:1]} + 25'(round_inc);
+  for (genvar b = 0; b < 25; b++) begin : gen_leading
+    logic [7:0] exponent_field;
+    logic [22:0] fraction;
+    logic overflow_sel, subnormal_sel, normal_sel;
+    if (b == 24) begin : gen_top
+      assign leading[b] = magnitude[b];
+    end else begin : gen_suffix
+      assign leading[b] = magnitude[b] && !(|magnitude[24:b+1]);
+    end
+    assign exponent_field = ec + 8'(b) - 8'd23;
+    if (b == 24) begin : gen_round
+      assign fraction = rounded[22:0];
+    end else begin : gen_exact
+      assign fraction = 23'(magnitude << (23 - b));
+    end
+    assign overflow_sel = {1'b0, ec} > 9'(277 - b);
+    assign subnormal_sel = {1'b0, ec} < 9'(24 - b);
+    assign normal_sel = !overflow_sel && !subnormal_sel;
+    assign overflow_hit[b] = leading[b] && overflow_sel;
+    assign subnormal_hit[b] = leading[b] && subnormal_sel;
+    assign normal_hit[b] = leading[b] && normal_sel;
+    assign normal_fraction[b] = {23{normal_hit[b]}} & fraction;
+    assign normal_exponent[b] = {8{normal_hit[b]}} & exponent_field;
+  end
+  logic [4:0] sub_shift;
+  assign sub_shift = (ec >= 8'd24) ? 5'd22 : 5'(ec - 8'd1);
+  assign subnormal_fraction = 23'(magnitude[22:0] << sub_shift);
+  // Scalar terms the pack stage needs (pre-reduced so stage B stays shallow).
+  assign magn_nonzero = |magnitude;
+  assign ovf_any     = |overflow_hit;
+  assign sub_any     = |subnormal_hit;
+  assign topnl       = normal_hit[24] && low_sum[0];
+  assign nan_q_in      = align_i.nan;
+  assign inf_a_q_in    = align_i.inf_a;
+  assign inf_b_q_in    = align_i.inf_b;
+  assign zero_both_q_in= align_i.zero_both;
+  assign sign_a_q_in   = align_i.sign_a;
+  assign sign_b_q_in   = align_i.sign_b;
+
+  // ---- pipeline register: the candidate bundle ----
+  logic [22:0] normal_fraction_q [25];
+  logic [7:0]  normal_exponent_q [25];
+  logic        sign_q, magn_nonzero_q, ovf_any_q, sub_any_q, topnl_q;
+  logic        nan_q, inf_a_q, inf_b_q, zero_both_q, sign_a_q, sign_b_q;
+  logic [22:0] subnormal_fraction_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      for (int b = 0; b < 25; b++) begin
+        normal_fraction_q[b] <= '0;
+        normal_exponent_q[b] <= '0;
+      end
+      sign_q <= 1'b0; magn_nonzero_q <= 1'b0; ovf_any_q <= 1'b0;
+      sub_any_q <= 1'b0; topnl_q <= 1'b0;
+      nan_q <= 1'b0; inf_a_q <= 1'b0; inf_b_q <= 1'b0;
+      zero_both_q <= 1'b0; sign_a_q <= 1'b0; sign_b_q <= 1'b0;
+      subnormal_fraction_q <= '0;
+    end else begin
+      for (int b = 0; b < 25; b++) begin
+        normal_fraction_q[b] <= normal_fraction[b];
+        normal_exponent_q[b] <= normal_exponent[b];
+      end
+      sign_q <= sign; magn_nonzero_q <= magn_nonzero; ovf_any_q <= ovf_any;
+      sub_any_q <= sub_any; topnl_q <= topnl;
+      nan_q <= nan_q_in; inf_a_q <= inf_a_q_in; inf_b_q <= inf_b_q_in;
+      zero_both_q <= zero_both_q_in; sign_a_q <= sign_a_q_in; sign_b_q <= sign_b_q_in;
+      subnormal_fraction_q <= subnormal_fraction;
+    end
+  end
+
+  // ---- stage B (comb): OR-reduce + pack + special mux, identical ----
+  for (genvar l = 0; l <= 5; l++) begin : gen_normal_or
+    localparam int N = 32 >> l;
+    logic [22:0] fraction_l [N];
+    logic [7:0] exponent_l [N];
+    for (genvar i = 0; i < N; i++) begin : gen_node
+      if (l == 0) begin : gen_input
+        if (i < 25) begin : gen_used
+          assign fraction_l[i] = normal_fraction_q[i];
+          assign exponent_l[i] = normal_exponent_q[i];
+        end else begin : gen_pad
+          assign fraction_l[i] = '0;
+          assign exponent_l[i] = '0;
+        end
+      end else begin : gen_or
+        assign fraction_l[i] = gen_normal_or[l-1].fraction_l[2*i] |
+                               gen_normal_or[l-1].fraction_l[2*i+1];
+        assign exponent_l[i] = gen_normal_or[l-1].exponent_l[2*i] |
+                               gen_normal_or[l-1].exponent_l[2*i+1];
+      end
+    end
+  end
+  logic [36:0] finite_result;
+  assign finite_result[36:32] = {2'b00, ovf_any_q, 1'b0, topnl_q};
+  assign finite_result[31] = sign_q && magn_nonzero_q;
+  assign finite_result[30:23] = {8{ovf_any_q}} | gen_normal_or[5].exponent_l[0];
+  assign finite_result[22:0] = gen_normal_or[5].fraction_l[0] |
+                             ({23{sub_any_q}} & subnormal_fraction_q);
+  always_comb begin
+    if (nan_q) result_o = {5'b10000, 32'h7fc00000};
+    else if (inf_a_q) result_o = {5'b00100, sign_a_q, 8'hff, 23'd0};
+    else if (inf_b_q) result_o = {5'b00100, sign_b_q, 8'hff, 23'd0};
+    else if (zero_both_q) result_o = {5'd0, (sign_a_q & sign_b_q), 31'd0};
+    else result_o = finite_result;
+  end
+endmodule
+
+// Three-stage composition: align registered (as _p2), then the norm leaf
+// pipelined at the candidate boundary. Operands presented at edge N produce
+// result_o after edge N+2; the caller owns the three-cycle spacing.
+module g6lc_ai_gemm_fp32_add_p3 (
+  input  logic clk_i,
+  input  logic rst_ni,
+  input  logic en_i,
+  input  logic [31:0] a_i,
+  input  logic [31:0] b_i,
+  output logic [36:0] result_o
+);
+  g6lc_ai_fp_pkg::fp32_align_t align, align_q;
+  g6lc_ai_gemm_fp32_align i_align (.a_i, .b_i, .align_o(align));
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) align_q <= '0;
+    else if (en_i) align_q <= align;
+  end
+  g6lc_ai_gemm_fp32_norm_p1 i_norm (.clk_i, .rst_ni, .align_i(align_q),
+                                    .result_o);
+endmodule
+
 // Combinational composition: the reference-equivalence surface.
 module g6lc_ai_gemm_fp32_add (
   input  logic [31:0] a_i,

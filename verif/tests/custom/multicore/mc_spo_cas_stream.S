@@ -6,6 +6,17 @@
 # multi-KiB loops multi-million-cycle on bare Variane; pattern is unchanged.
 # Soft-skip CAS only if illegal (ISS without Zacas).
 
+# Bare-metal _start shim (single-hart); see zacas_amocas_d.S.
+  .section .text.init
+  .globl _start
+_start:
+  csrr t0, mhartid
+  bnez t0, park
+  li   sp, 0x80008000
+  la   t0, trap_vec
+  csrw mtvec, t0
+  j    main
+
   .globl main
 main:
   # frame: 512 B stream + 16 B pad/lock (aligned)
@@ -76,3 +87,29 @@ fail:
   add  sp, sp, t0
   li   a0, 1
   jal  exit
+
+  .globl exit
+exit:
+  slli a0, a0, 1
+  addi a0, a0, 1
+  la   t0, tohost
+  sw   a0, 0(t0)
+9:  j    9b
+
+trap_vec:
+  li   a0, 3
+  la   t0, tohost
+  sw   a0, 0(t0)
+8:  j    8b
+
+park:
+7:  wfi
+  j    7b
+
+  .section .tohost,"aw",@progbits
+  .align 6
+  .globl tohost
+tohost: .dword 0
+  .align 6
+  .globl fromhost
+fromhost: .dword 0

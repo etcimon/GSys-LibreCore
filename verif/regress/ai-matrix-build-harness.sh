@@ -189,12 +189,19 @@ if [[ -f "${HOME}/tools/oss-cad-suite/environment" ]]; then
   source "${HOME}/tools/oss-cad-suite/environment"
 fi
 
-# Runtime model threads: saturate the builder. Compile stays JOBS=1
-# (OOM is parallel cc1plus, not --threads). Pin 1 with
+# Verilation --threads is a PARTITION-GRANULARITY knob, not the runtime worker
+# count: V3Partition coarsens the MTask graph toward `threads`-way parallelism
+# via cpLimit = totalGraphCost*3/(threads*5) (AGENTS-verilator-performance.md
+# §30). Oversubscribing (raw nproc) over-fragments low-parallelism designs into
+# many small MTasks and pays a VlMTaskDoneMask sync tax per eval; the proven
+# optimum for ~2x-parallelism cores is threads=2. AI-island/matrix units may
+# have higher achievable parallelism, so default to a bounded 4 rather than
+# nproc and tune AI_MATRIX_VERILATOR_THREADS to the measured partition. Compile
+# stays JOBS=1 (OOM is parallel cc1plus, not --threads); pin 1 with
 # AI_MATRIX_VERILATOR_THREADS=1 if a serial cc1plus still OOMs.
 VTHREADS="${AI_MATRIX_VERILATOR_THREADS:-}"
 if [[ -z "$VTHREADS" || "$VTHREADS" == "\$(nproc)" || "$VTHREADS" == "nproc" ]]; then
-  VTHREADS="$( (command -v nproc >/dev/null && nproc) || echo 12)"
+  VTHREADS=4
 fi
 
 export VPATH="$CVA6_REPO_DIR"

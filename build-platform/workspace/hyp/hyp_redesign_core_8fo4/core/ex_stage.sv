@@ -749,6 +749,11 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
   // the PRF write port.
   // -------------------------------------------------------
   localparam bit ALU_STAG = (HypCfg.AluStages >= 2) && HypCfg.AluStaggered;
+  // hyp8 r127 AesStages: when the aes module runs its 3-stage (AesPipe3) form,
+  // result_o lands one cycle later, so the AES FLU lane must capture one edge
+  // deeper -- exactly the AluStages q2/q3 mechanism applied to the AES record.
+  // Both sides derive from HypCfg.AesStages so they can never disagree.
+  localparam bit AES_PIPE3 = (HypCfg.AesStages == 3);
 
   // Lane-in selects mirror the emit's result-mux priority (the
   // reservation table already guarantees at most one of these fires).
@@ -784,9 +789,10 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
   logic                          alu_res_vld_q;
   logic [G6LCCfg.TRANS_ID_BITS-1:0] alu_tid_q;
   logic [G6LCCfg.XLEN-1:0]         alu_res_q;
-  // CSR / AES single-edge lane records.
-  logic                          csr_vld_q, aes_vld_q;
-  logic [G6LCCfg.TRANS_ID_BITS-1:0] csr_tid_q, aes_tid_q;
+  // CSR / AES single-edge lane records. aes_vld_q2/aes_tid_q2 are the
+  // AesStages==3 second delay stage (dead when AES_PIPE3==0).
+  logic                          csr_vld_q, aes_vld_q, aes_vld_q2;
+  logic [G6LCCfg.TRANS_ID_BITS-1:0] csr_tid_q, aes_tid_q, aes_tid_q2;
   logic [G6LCCfg.XLEN-1:0]         csr_res_q;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin : flu_lane_regs
@@ -802,6 +808,8 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
       csr_res_q     <= '0;
       aes_vld_q     <= 1'b0;
       aes_tid_q     <= '0;
+      aes_vld_q2    <= 1'b0;
+      aes_tid_q2    <= '0;
     end else if (flush_i) begin
       alu_vld_q     <= 1'b0;
       alu_vld_q2    <= 1'b0;
@@ -809,6 +817,7 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
       alu_res_vld_q <= 1'b0;
       csr_vld_q     <= 1'b0;
       aes_vld_q     <= 1'b0;
+      aes_vld_q2    <= 1'b0;
     end else begin
       alu_vld_q     <= alu_in;
       alu_vld_q2    <= alu_vld_q;
@@ -825,6 +834,8 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
       csr_res_q     <= csr_result;
       aes_vld_q     <= aes_in;
       aes_tid_q     <= one_cycle_data.trans_id;
+      aes_vld_q2    <= aes_vld_q;
+      aes_tid_q2    <= aes_tid_q;
     end
   end
 
@@ -861,7 +872,12 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
   assign resolve_branch_o = resolve_branch_raw && br_lane_v;
   assign alu_lane_v = alu_lane_v_raw & ~cancelled_mask_i[alu_lane_tid];
   assign csr_lane_v = csr_vld_q & ~cancelled_mask_i[csr_tid_q];
-  assign aes_lane_v = aes_vld_q & ~cancelled_mask_i[aes_tid_q];
+  // AesStages==3: capture the AES record one edge deeper to match aes_result's
+  // added pipeline stage; AesStages==1 keeps the original single-edge lane.
+  logic [G6LCCfg.TRANS_ID_BITS-1:0] aes_lane_tid;
+  assign aes_lane_tid = AES_PIPE3 ? aes_tid_q2 : aes_tid_q;
+  assign aes_lane_v   = (AES_PIPE3 ? aes_vld_q2 : aes_vld_q)
+                        & ~cancelled_mask_i[aes_lane_tid];
 
   logic                              flu_valid_c;
   logic [G6LCCfg.XLEN-1:0]           flu_result_c;
@@ -896,7 +912,7 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
       flu_trans_id_c = mult_trans_id;
     end else if (aes_lane_v) begin
       flu_result_c   = aes_result;
-      flu_trans_id_c = aes_tid_q;
+      flu_trans_id_c = aes_lane_tid;
     end
   end
 
@@ -1448,7 +1464,8 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
     if (G6LCCfg.ZKN) begin : aes_gen
       aes #(
           .G6LCCfg  (G6LCCfg),
-          .fu_data_t(fu_data_t)
+          .fu_data_t(fu_data_t),
+          .AesPipe3 (AES_PIPE3)
       ) aes_i (
           .clk_i,
           .rst_ni,

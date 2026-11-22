@@ -1686,3 +1686,93 @@ hyp-package cause is proven pre-existing; the rest are reported, not
 diagnosed. Final source archive
 `gemm-r41-final-closure.zip` sha256
 `28bfd9fd75c19ac57bb5f117ae7754e8bd437b34d3837d733e05585768a4cd57`.
+
+---
+
+## r127-cont / tracedb wedge-cluster + FO4 frontier notes (uncommitted analysis)
+
+**Categorized status (tracedb `hyp8-trace.sqlite`):** directed suite
+`mc-directed-simd-isa` on the ISA-port model — 2/34 pass so far:
+`mc_boot_sanity` (525 cyc, progExit=0, held-125 artifact) and
+`mc_hart1_alive` (**200,518 cyc, progExit=0** — direct proof secondary-hart
+release + execution works under BOOT_HOLD). autoingest.sh live; verdict fix
+`held-125 + progExit=0 -> pass` applied + force re-ingested. Witness
+`hyp8-witness-cycprog13` running, 0 `[cycprog]` yet (first at 500k cyc,
+~200cyc/s host ⇒ hours). Suite now on `mc_all_harts_present`.
+
+**Wedge cluster hypothesis (needs sim trace, do NOT blind-edit):**
+`mc_za64rs_independence`, `mc_cbo_contended`, `mc_cbo_ewt` wedged on the old
+rfix131a model; common element = cross-core plain `sd`/`ld` flag sync under
+BOOT_HOLD + coherence write-invalidate. Prime suspect is
+`g6lc_coherence_hub.sv` B-response withholding ("withhold writer's B until
+invalidation obligation delivered", ~L34-37, `inv_pend_*`/`inv_wait`/
+`inv_settle`, `HUB_INV_LOSS` guard ~L1435): if an invalidation is never
+delivered/acked the writer's B is withheld forever → store never commits →
+peer flag never visible → both cores' poll loops hang (no timeout because the
+timeout `ld` itself needs the memory path). Confirm via `+hang_dump`/
+`+stall_census` on the CURRENT model before touching RTL — the
+`instr_queue` FE-deadlock fix (20cf587d7) may already have cleared some.
+
+**FO4 island_top registered submit-source — design analysis (NOT yet coded):**
+naive output skid does NOT cut module-internal FO4 (mux→skid-D is the same
+cone depth). Real transform = 2-stage: register per-source *eligibility*
+(`l_eng_let`/`sb_let`/`db_let` leaf cone ~L1696-1710) one cycle early, then
+priority-select+data-mux next cycle. Contract hazard = eligibility sampled a
+cycle stale (cpl_full/fetch_ready/holds can change) ⇒ optimistic submit;
+needs engine-side backpressure guarantee + remote `run_island_gate.sh`.
+Multi-session item per census; do not rush blind.
+
+**za64rs status:** `g6lc_axi_lrsc` monitor keys reservations on exact AXI
+address = a 1-address set = legal conservative Za64rs set (per both
+`g6lc_za64rs.sv` and `mc_za64rs_independence.S` comments). `g6lc_za64rs.sv`
+is an *uninstantiated* leaf qualifier (`same_set/within_max/za64rs_ok`).
+Remaining = directed `mc_za64rs_independence` pass (currently wedged — see
+above) → flip `RVZa64rs=1` → advertise `za64rs` in dts.
+
+### r127-cont.2 — BootHoldCyc parameter (directed-suite speedup, uncommitted)
+
+Added `parameter logic [17:0] BootHoldCyc = 18'd200000` to
+`corev_apu/src/g6lc_cluster.sv` (replaces the `BOOT_HOLD_CYC` localparam; the
+`rel` release term now compares `boot_hold_q >= BootHoldCyc`) and a matching
+top-level `BootHoldCyc` on `corev_apu/tb/g6lc_testharness.sv` forwarded via
+`.BootHoldCyc`. Default is identical (200000) so the witness/OpenSBI path and
+every existing build are unchanged; only an explicit override shortens the
+held-secondary wait.
+
+Motivation: `mc_hart1_alive` ran 200,518 cycles of which ~200,000 were the
+BOOT_HOLD timeout — ~99.7% of directed-suite wall time is the artificial
+hold, not the test. A fast-hold variant collapses each held test ~10-100x.
+
+To build a fast-hold directed model (no source change needed):
+  SOFT_LADDER_BUILD_VLT_ARGS="-GBootHoldCyc=2000"  (or desired cycles)
+through `hyp8-build-harness.sh` — `BUILD_VLT_ARGS` is appended to the
+verilator cmdline (line ~411). `-G` overrides the top-module parameter at
+elaboration. Keep the witness/normal builds at the 200000 default (OpenSBI
+releases via HSM `ipi_seen` anyway, so it is unaffected either way).
+
+Verification status: source-only, NOT yet elaborated/built. Next: verilate a
+fast-hold variant (`-GBootHoldCyc=2000`) to confirm the `-G` override binds,
+then re-run the directed suite on it for the wedge cluster
+(mc_za64rs_independence / mc_cbo_* / CAS). Mirror to repo-root `corev_apu/`
+only if a non-hyp target needs the same knob.
+
+### r127-cont.3 — fast-hold build launched (uncommitted)
+
+Launched detached non-PGO build `work-ver-hyp8-mc-fasthold` via
+`/tmp/launch-fasthold.sh` (mirrors simd launch + `SOFT_LADDER_BUILD_VLT_ARGS=
+"-GBootHoldCyc=5000"`, `HYP8_BUILD_PGO=0 HYP8_BUILD_ALLOW_NOPGO=1`,
+`VLT_HOME=verilator-v5.008-g6lc-dev-simd`, ccache, jobs=4 vthreads=2,
+CLEAN=0 but fresh verlib). verilator_bin running, 0 `%Error`, deep in
+elaboration (split_var instance paths resolving) → `-G` accepted, no
+BootHoldCyc elaboration error. BootHoldCyc=5000 chosen: ~40x hold reduction,
+large margin over the ~hundreds-of-cycles flag-init the self-synchronizing
+tests need; bump toward 50000 if any spurious early-release failure appears.
+
+When `work-ver-hyp8-mc-fasthold/.../Variane_testharness` lands: point
+`run_hyp8_mc_directed.py` (HYP8_MODEL/HYP8_MC_MODEL path) at it and run the
+wedge cluster first — mc_za64rs_independence, mc_cbo_contended, mc_cbo_ewt,
+mc_cbo_zero_probe, mc_lrsc_set_zombie, mini_lrsc_d, mini_amoadd_w_spin,
+mini_amocas_d, zacas_amocas_{d,w}, mc_cas_lock_handoff, mc_spo_cas_stream —
+each now ~5k+work cycles ≈ seconds-to-a-minute instead of ~17min. Ingest
+results to tracedb; the +hang_dump=20000/+stall_census already in the suite
+plusargs will localize any genuine wedge.

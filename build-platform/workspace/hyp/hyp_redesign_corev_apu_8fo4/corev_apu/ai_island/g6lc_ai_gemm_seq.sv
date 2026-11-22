@@ -61,6 +61,14 @@ module g6lc_ai_gemm_seq #(
     // 0: combinational g6lc_ai_pe_dot (128 FO4 class); 1: g6lc_ai_pe_dot_pipe,
     // one tree level per stage on the SAME latency as the float pipe.
     parameter bit          DotPipeInt   = 1'b0,
+    // r127: float accumulate through g6lc_ai_gemm_fp32_add_p3 (align_q +
+    // candidate register = one extra pipeline flop vs p2). The fp32 result and
+    // its metadata then land one cycle later, so a second capture stage (s2_*)
+    // delays the whole s1 bundle by one edge and the commit/C-write moves one
+    // cycle later. 0 = p2 + s1 (bit- and cycle-identical to the pre-change
+    // RTL). Requires the same-set partial issue spacing to cover the extra
+    // accumulate edge before enabling; qualification-gated.
+    parameter bit          Fp32Pipe2    = 1'b0,
     parameter int unsigned MaxAROut  = 2,  // I3: multi-outstanding AR; live = 2
     // Shared DRAM stripe (g6lc_ai_island_cfg_pkg). N=1 leaves MaxBurstBeats
     // at 255 so the live 256³ fixture stays bit-identical. N>1 caps each
@@ -1069,6 +1077,15 @@ module g6lc_ai_gemm_seq #(
   logic [OutCols-1:0] s1_cv_q, s1_bypass_q;
   logic [31:0] s1_int_q [OutCols];
   logic [31:0] s1_raw_q [OutCols];
+  // r127 Fp32Pipe2: stage-2 capture = the whole s1 result bundle delayed one
+  // more edge, so the fp32_add_p3 result (one flop deeper than p2) lands on a
+  // valid strobe. Only consumed when Fp32Pipe2 && pe_float_en (use_s2); int
+  // jobs and the default build keep the s1 timing.
+  logic        s2_v_q, s2_ph_q, s2_last_q;
+  logic [31:0] s2_i_q, s2_j_q;
+  logic [OutCols-1:0] s2_cv_q, s2_bypass_q;
+  logic [31:0] s2_raw_q [OutCols];
+  logic        use_s2;
   logic [31:0] sum_i_q, sum_i_d;
   logic [31:0] sum_j_q, sum_j_d;
   logic        err_q, err_d;
@@ -1727,10 +1744,17 @@ module g6lc_ai_gemm_seq #(
     assign seed_case = acc_mode_q && g == 0;
     assign base = sum_first_q ? (seed_case ? mac_seed_q[sum_ph_q] : 32'd0)
                               : acc_q[sum_ph_q][g];
-    g6lc_ai_gemm_fp32_add_p2 i_acc_add (
-      .clk_i, .rst_ni, .en_i(sum_v_q),
-      .a_i(base), .b_i(sum_q[g]), .result_o(mac_fp32_add[g])
-    );
+    if (Fp32Pipe2) begin : gen_acc_add_p3
+      g6lc_ai_gemm_fp32_add_p3 i_acc_add (
+        .clk_i, .rst_ni, .en_i(sum_v_q),
+        .a_i(base), .b_i(sum_q[g]), .result_o(mac_fp32_add[g])
+      );
+    end else begin : gen_acc_add_p2
+      g6lc_ai_gemm_fp32_add_p2 i_acc_add (
+        .clk_i, .rst_ni, .en_i(sum_v_q),
+        .a_i(base), .b_i(sum_q[g]), .result_o(mac_fp32_add[g])
+      );
+    end
     assign fp_result_bits = mac_fp32_add[g][31:0];
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
@@ -1741,8 +1765,12 @@ module g6lc_ai_gemm_seq #(
         s1_bypass_q[g] <= sum_first_q && !seed_case;
       end
     end
-    assign mac_acc_next[g] = pe_float_en ? (s1_bypass_q[g] ? s1_raw_q[g] : fp_result_bits)
-                                         : s1_int_q[g];
+    // use_s2 (Fp32Pipe2 && pe_float_en) reads the stage-2 bundle: fp_result_bits
+    // is then the p3 output, valid on the s2_v_q edge instead of s1_v_q.
+    assign mac_acc_next[g] = pe_float_en
+        ? (use_s2 ? (s2_bypass_q[g] ? s2_raw_q[g] : fp_result_bits)
+                  : (s1_bypass_q[g] ? s1_raw_q[g] : fp_result_bits))
+        : s1_int_q[g];
   end
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -1755,6 +1783,28 @@ module g6lc_ai_gemm_seq #(
         s1_i_q <= sum_i_q; s1_j_q <= sum_j_q;
         for (int unsigned g = 0; g < OutCols; g++) s1_cv_q[g] <= sum_cv_q[g];
       end
+    end
+  end
+  // r127 Fp32Pipe2 stage-2 capture: the s1 result bundle delayed one edge.
+  // s1_* holds a partial's metadata for exactly the cycle its (p2) result is
+  // consumed; clocking it through once more yields the same bundle on the
+  // cycle the (p3) result is consumed. Unconditional so consecutive partials
+  // stay aligned; only the use_s2 consumers observe it.
+  assign use_s2 = Fp32Pipe2 && pe_float_en;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      s2_v_q <= 1'b0; s2_ph_q <= 1'b0; s2_last_q <= 1'b0;
+      s2_i_q <= '0; s2_j_q <= '0; s2_cv_q <= '0; s2_bypass_q <= '0;
+      for (int unsigned g = 0; g < OutCols; g++) s2_raw_q[g] <= '0;
+    end else begin
+      s2_v_q     <= s1_v_q;
+      s2_ph_q    <= s1_ph_q;
+      s2_last_q  <= s1_last_q;
+      s2_i_q     <= s1_i_q;
+      s2_j_q     <= s1_j_q;
+      s2_cv_q    <= s1_cv_q;
+      s2_bypass_q<= s1_bypass_q;
+      for (int unsigned g = 0; g < OutCols; g++) s2_raw_q[g] <= s1_raw_q[g];
     end
   end
   // pragma translate_off
@@ -3172,8 +3222,13 @@ module g6lc_ai_gemm_seq #(
   // each on the state_d cone; the shared quiet cone plus per-arm terms is
   // strictly shallower. Identical operands, identical value.
   logic mac_quiet;
+  // r127 Fp32Pipe2: under use_s2 the accumulator writeback and the commit token
+  // trail s1 by one edge, so the drain must also wait on the s2 window or the
+  // FSM could leave ST_MAC (breaking the commit_v_q |-> ST_MAC contract) while
+  // a p3 result is still in flight. Gated by use_s2 so the default path's
+  // quiet cone is unchanged.
   assign mac_quiet = !rows_left_q & (dot_pending_q == '0) &
-      !(rd_v_q | sum_v_q | s1_v_q | commit_v_q);
+      !(rd_v_q | sum_v_q | s1_v_q | commit_v_q | (use_s2 & s2_v_q));
   assign store_reset = (state_q == ST_IDLE) |
       ((state_q == ST_MAC) & (!DualCRead | acc_mode_q) & mac_quiet);
 
@@ -3488,7 +3543,10 @@ module g6lc_ai_gemm_seq #(
   for (genvar st = 0; st < 2; st++) begin : gen_accumulate_set
     for (genvar g = 0; g < OutCols; g++) begin : gen_accumulate_partial
       logic update;
-      assign update = s1_v_q && s1_cv_q[g] && s1_ph_q == st;
+      // use_s2 selects the stage-2 (Fp32Pipe2) result-valid window; default and
+      // int jobs keep the s1 window, so acc_q update timing is unchanged.
+      assign update = use_s2 ? (s2_v_q && s2_cv_q[g] && s2_ph_q == st)
+                             : (s1_v_q && s1_cv_q[g] && s1_ph_q == st);
       assign acc_d[st][g] = {32{mac_state}} & (update ? mac_acc_next[g] : acc_q[st][g]);
     end
   end
@@ -3501,10 +3559,15 @@ module g6lc_ai_gemm_seq #(
     if (!rst_ni) begin
       commit_v_q <= 1'b0; commit_i_q <= '0; commit_j_q <= '0; commit_cv_q <= '0; commit_ph_q <= 1'b0;
     end else begin
-      commit_v_q <= s1_v_q && s1_last_q;
-      if (s1_v_q && s1_last_q) begin
-        commit_i_q <= s1_i_q; commit_j_q <= s1_j_q; commit_ph_q <= s1_ph_q;
-        commit_cv_q <= s1_cv_q;
+      // Fp32Pipe2 float jobs commit on the stage-2 window (one edge later);
+      // default and int jobs keep the s1 window, so the C-write arbitration is
+      // unchanged unless the deeper pipeline is explicitly enabled.
+      commit_v_q <= use_s2 ? (s2_v_q && s2_last_q) : (s1_v_q && s1_last_q);
+      if (use_s2 ? (s2_v_q && s2_last_q) : (s1_v_q && s1_last_q)) begin
+        commit_i_q  <= use_s2 ? s2_i_q  : s1_i_q;
+        commit_j_q  <= use_s2 ? s2_j_q  : s1_j_q;
+        commit_ph_q <= use_s2 ? s2_ph_q : s1_ph_q;
+        commit_cv_q <= use_s2 ? s2_cv_q : s1_cv_q;
       end
     end
   end

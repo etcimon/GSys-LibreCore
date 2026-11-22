@@ -1300,3 +1300,1314 @@ The `synth` stage on the RP4+SP2 tree (leaf `apu-leaf-20261113T130512-03c430a0c4
   `PayStageWords=64`) were still inside `synth -noabc`/`opt` loops at last check —
   diagnostic only, no verdict claimed. Until a screen completes, SP1–SP5 have no
   cell or flop figure.
+
+## 12. Frame-path reconciliation and next-rung detail (2026-11-21)
+
+§9's stage costs and §10.2's reference frame were written before RP1–RP4, SP1–SP5 and
+the R3 record store landed. This section restates the frame breakdown against the
+measured frontier and gives the module-level detail for the rungs that are now the
+binding constraints. Same evidence rules as §8–§11: per-clock figures only, "measured"
+is a counter or bench line, "estimate" is a state-list count, and no frequency or
+frame-rate claim follows.
+
+### 12.1 Where the frame's cycles go now
+
+The landed sequencing passes moved both engines off their decode/control overhead.
+Measured deltas from §11.7:
+
+| Engine | Origin | Now | Driver |
+|---|---:|---:|---|
+| Rasteriser, cycles per pixel written | 252 | 96 | RP1–RP4 (sequencing + write-behind) |
+| Shader, cycles per wave-instruction | 35.0 | 21.3 | SP1–SP5 (row cache + sequencing) |
+
+The bottleneck has therefore **shifted from control to data movement**, in three
+places that are now the binding constraints:
+
+1. **The device-memory port is the shared serializer.** `g6lc_apu_apmem` is still one
+   global FSM, `MaxOut=1`, one beat in flight for every requester in the device,
+   granted by fixed port-index priority across the eight `APU_MP_N` requesters
+   (`PUB/VQ/CTL/OBJ/PUMP/SH/RAST/EXEC`). Post-SP5 the shader's device-memory
+   load/store states
+   are 53–64% of wave busy on the graphics sessions (single triangle 64%, four
+   attachments 54%, derivative chain 53%; only the sampled session is lower at 18%
+   because its time is in the sampler). On the rasteriser side memory requests are the
+   largest single term at ~37 cycles per fragment. R2 was deferred on 2026-11-14 when
+   the aggregate shader-busy share read 2.3%; that figure was dominated by non-graphics
+   vectors and is superseded — on the frame path the port is the limit, not a corner.
+2. **The record path is on-chip but still port-serialized and narrow.** The record
+   store (R3) already serves the wave engine's record traffic: `ls_rec_q` record
+   accesses are `dom=1` aperture requests inside `[rec_base_i, +APU_REC_CARVE_BYTES)`,
+   the same 64 KiB scratch carve `isrec_w` answers from `tc_sram`. So records no
+   longer cross DRAM — but every beat still transits the single-outstanding `apmem`
+   FSM, and the issue width is still one 32-bit word per lane per request (~5 states,
+   two port waits; a four-component store is four requests per lane). SP4 paired two
+   adjacent words and SP5 removed one wait state; what is left is apmem's global
+   serialization (NR1) plus the per-lane issue width (NR2).
+3. **Interpolation and output merge remain serial float chains on the rasteriser.**
+   Interpolation is still ~64.7 cycles per fragment (the largest rasteriser class after
+   RP2), merge ~17.8. FP6 (move interpolation onto the fragment wave's lanes) is gated
+   on TP3/G-T2; FP10 stage A (parallel merge) is independent and unstarted.
+
+The sampled/texture session is the exception: ~60% of its wave busy is arithmetic and
+texture (lane-serial sampler in the wave FSM), which is FP9's target, not the port's.
+
+### 12.2 Restated reference frame
+
+Recomputing §10.2's hypothetical 1080p frame with the measured rates (still lower
+bounds; shader time excluded; "today" is the post-R3 state):
+
+| Term | §10.2 (pre-pass) | Now | Note |
+|---|---:|---:|---|
+| Scan, interpolation, merge | ~1,300 M (250/pix) | ~500 M (96/pix) | RP1–RP4; interpolation still dominant |
+| Vertex fetch + setup | ~185 M | ~185 M | untouched; FP4/FP5 pending |
+| Clears | ≥ 8 M | ~5 M | RP4 write-behind cut the wait ~40%; FP3 burst clears not landed |
+| Texture | ≥ 104 M | ≥ 104 M | unchanged; FP9 not started |
+| **Fixed-function total** | **≥ 1,600 M** | **~790 M** | roughly halved, still pixel-bound |
+
+Pixel work remains the dominant term. The G-F2 targets (1 pixel/clock fill, 4 bilinear
+samples/clock) are unchanged and still the smallest point at which shader throughput,
+not fixed function, decides the frame — but the distance to them is now ~100× on fill
+(96 cy/pix → 1) rather than ~250×.
+
+### 12.3 Next-rung implementation detail
+
+The rungs below are ordered by measured leverage on the frame path, not by the §11.4
+table's original deferral. Each carries the §11.5 pass contract implicitly: the counter
+that must move, the equality argument, the blast radius, the timing note, and the
+admission tier.
+
+**NR1 — memory port: per-requester slots and bursts (R2 / TP2b, pulled forward).**
+The single largest measured term on both engines. Concretely:
+
+- `apu_mp_req_t` (`corev_apu/apu/include/g6lc_apu_mp_pkg.sv`) gains a beat count
+  `beats[3:0]`
+  and the response gains a per-beat `last` flag; requesters leaving `beats==0` see
+  today's single-beat behaviour. A burst is one request returning N responses.
+- `g6lc_apu_apmem` moves from one global FSM to **one transaction slot per port**
+  across the eight `APU_MP_N` requesters (`PUB/VQ/CTL/OBJ/PUMP/SH/RAST/EXEC`,
+  `g6lc_apu_mp_pkg.sv`). AXI ID = port index; `apu_dma_id_t` is 4 bits and already
+  covers 8 ports. The per-port contract — at most one outstanding per port, exactly
+  one response per request, `flush_i` drops only unissued requests — is unchanged;
+  only the *global* serialization goes. Window classification, currently
+  combinational on the request, is registered so it does not lengthen the accept path.
+- The burst immediately serves: the 64-byte texel-cache fill (eight single beats in
+  `W_TXF0`/`W_TXF1` today), the four-beat descriptor-record fetch (`W_DS1` onward),
+  object-table/objpay line fills, and the record beats — the four consumers §8 TP2
+  already enumerated.
+- Downstream must accept several outstanding IDs: `g6lc_apu_tdma` (the 2:1 join), the
+  bench AXI slave models, the bridge DRAM model, and the testharness join.
+- Ordering argument to prove, not assume: order within a port is kept; the used-ring
+  publication chain is on one port; work completion precedes the fence by state-machine
+  sequencing, not by arbitration. Controls: the address-channel order checks in
+  `sys-venus`/`cva6-venus`, and `memory.pipeline_barrier.*`.
+- Expected: the memory share divided by ~8 on eligible accesses; on the rasteriser the
+  ~37 cy/fragment request term and on the shader the 53–64% device-memory state share
+  are the counters that must move. Blast radius: `apmem`, `mp_pkg`, `tdma`, the wave
+  LSU request path, the rasteriser `S_MPW`/record writes, xfer legs, and every AXI
+  slave model. This is a multi-module rework — the largest single structural change
+  since the record store.
+
+**NR2 — wave-engine record issue width (extends SP4/SP5, needs NR1).**
+Records are already on `tc_sram` (R3); what remains is that the wave LSU still issues
+them one 32-bit word per lane per request — ~5 states and two `apmem` waits per beat,
+four requests for a four-component store. Two separable widenings:
+
+- (a) **Lane-vector record access.** Records are per-invocation contiguous (152 B each,
+  the six `OFF_*` carve buffers), so lane *l*'s word-*w* sits at
+  `base + l·record_stride + w·8` — a **cross-lane strided gather**, not a contiguous
+  vector. One request can still carry every active lane's same-word via a stride
+  parameter: classify active lanes, issue one strided access, demux on return. This is
+  the §8 TP2a lane-vector load/store applied to the `ls_rec_q` path and removes the
+  per-lane serial issue that SP4 only halved. Bounds and the dead/helper-lane Output
+  store rule are unchanged — the mask is applied to the same lane set.
+- (b) **Multi-word record beats.** Where consecutive record words are contiguous
+  (the 18-beat FS-in record, the FS-out write), issue them as the NR1 burst so one
+  request returns the run instead of one beat per request. This is the same burst
+  mechanism NR1 adds to `apu_mp_req_t`, applied to the record stream.
+- Both need NR1's per-port slots to pay off — a wider request still serialises behind
+  the one-in-flight FSM today. Sequence after NR1.
+- Control: every `ue_gpos_*`/`ue_cpos_*` session bit-exact (the R3/SP4 admission
+  pattern), plus `pipeline.monolithic.vertex_input` and the FS-in varyings vectors.
+  The atomic/robust-access vectors are the fails-if-wrong control for the lane-set
+  masking.
+
+**NR3 — fragment-wave preamble for interpolation (FP6, still gated on TP3).**
+Unchanged from §9.3 FP6 and §11.3 point 2: at 21.3 cy/insn the preamble would cost
+~18 cy/fragment only after G-T2 (≤4 cy/insn). Do **not** pull this forward — the
+rasteriser keeps the chain and schedules it (RP2) until TP3 lands. The dependency is
+recorded so FP6 is not mis-scheduled.
+
+**NR4 — output merge stage A (FP10-A).**
+Independent of the port and of TP3; can run in parallel with NR1/NR2. Read shader
+outputs from the record store (already `tc_sram` via R3 — FS-out records are the
+wave's `ls_rec_q` writes), decode/blend/encode the four channels in
+parallel with per-channel operation order unchanged, combine adjacent pixels into full
+64-bit beats and rows into bursts, read destination lines once per run, and write
+through a pixel-store interface. The interface is what keeps stage A from being
+discarded when the tile engine (FP10-B) lands. Control: the blend/depth/stencil/
+logic-op vectors; `pipeline.monolithic.blend`, `fragment_operations.*`.
+
+**NR5 — pipelined issue and banked RF (R5 / TP3).**
+The shader's 21.3 cy/insn is now the largest *compute* term and the gate for FP6 and
+TP7. Per §8 TP3/TP3a-3: bank the register file into 128-bit `tc_sram` macros bounded by
+a new `RfRows` parameter (today 2 MiB/core of flop RF is outside the SRAM envelope),
+give it two read ports, then pipeline row-read → operand-read → execute → write-back
+with write-back-to-operand forward and a stall for multi-cycle units, dispatching on
+the row's opcode class instead of `unique case (opc_q)` in `W_EX`. Target 2–4
+cy/wave-instruction = 16–32 FP32 ops/clock/core. The TP3a-3 measurement stands: the
+operand stream is fetch-width-bound (~12% of bench cycles), so the real lever inside
+TP3 is decode-ahead/lookahead (3a row-cache-hit path, then 3b RF port-1 prefetch with
+RAW check, then 3c wider fetch) — not the dual RF port alone, which is already landed
+and cycle-exact.
+
+**NR6 — texture unit (R6 / FP9).**
+For the sampled session (~60% arithmetic+texture). Factor the lane-serial sampler out
+of the wave FSM into `g6lc_apu_tex`, one request/response per quad; cache the per-image
+mip layout beside the descriptor record; read a whole cache line per access and
+extract/filter the four footprint texels in parallel; a larger set-associative cache
+with SRAM tags, burst fill, persistent across batches (FP8). Generate decode/encode
+from the format table; cube/3D/1D from the §9a address function. Control: the texture
+corpus bit-exact, then `texture.*` and `pipeline.monolithic.sampler`.
+
+### 12.4 What this means for the gate ladder
+
+- **G-T1 / G-F1 (wall-time)**: NR1 is the highest-leverage single change for CTS wall
+  time — it attacks the port wait that dominates both the rasteriser's request term
+  and the shader's device-memory states, which are what make the `texture.*`,
+  `sampler2d_fixed_vertex` and `compute.pipeline.basic` groups run long. It should be
+  pulled forward alongside B/C exactly as the plan already allows when wall time
+  blocks a group.
+- **G-T2**: unchanged — NR5/TP3 is the path; nothing in NR1–NR4 substitutes for it.
+- **G-T3 / G-F3 (Pareto)**: still gated on TP3a + the `area-attr.sh` attribution. The
+  candidate core counts (8/24/96) remain not credible at today's per-core state.
+- **CTS mapping**: NR1+NR2 serve `draw.*`, `rasterization.*`, `pipeline.monolithic.*`,
+  `texture.*` wall time; NR4 serves `fragment_operations.*`, `renderpasses.*`;
+  NR6 serves `texture.*`, `image.*`; NR5 serves every shader group's throughput and is
+  the prerequisite for FP6/TP7. None of these is a conformance fix — they shorten wall
+  time on groups whose *results* are already correct or already failing for named
+  functional reasons. Conformance remains workstreams A/B/C/E; this section is the D
+  (throughput) track made concrete.
+
+### 12.5 Standing caveats
+
+- All figures are per clock on the ideal memory slave (three cycles per request,
+  always ready); real DRAM latency widens every memory term above.
+- "Now" column in §12.2 uses post-R3 measured rates; sessions that bypass `apmem`
+  (`tb_apu_mp_mem`) cannot see the record store, so NR1/NR2 gains must be admitted on
+  the `sys-venus`/`top`/`perf` cohort, not the unit benches alone — the R3 precedent.
+- SP1–SP5 and the shwave/vnpump/vnfront enabled screens still have no cell/flop figure
+  (§11.8 open limitation); NR1's multi-slot `apmem` will need its own `synth` screen
+  before area claims are made.
+
+## 13. Vulkan 1.4 frame aspect matrix (2026-11-21)
+
+§8–§12 are the throughput view. This section is the complementary **capability**
+view: every aspect a Vulkan 1.4 frame crosses, its current implementation, the gap to
+the 1.4 contract, and the workstream/pass that closes it. It consolidates
+`apu-vulkan-engine.md`, `apu-graphics.md`, the plan's workstreams A–F and §9.5/§10.1
+rather than restating them. "Status" is honest: landed-and-verified, partial, or
+absent — never an advertised-bit claim. Profile values are from
+`corev_apu/apu/tools/vn_device_profile.toml`; where the profile and the elaborated RTL
+width disagree, the row says "verify", because capability honesty is workstream A.
+
+| # | Frame aspect | Current implementation | Status | Gap to Vulkan 1.4 | Closes via |
+|---|---|---|---|---|---|
+| 1 | Host app → loader → ICD | Stock Mesa `libvulkan_virtio` is the target; Venus serialises commands onto a host-visible blob ring; SPIR-V via `vkCreateShaderModule` | partial | diagnostic `virtio-mmio`, not x86 `virtio-pci`; SHM LEN/BASE returns all-ones (no host-visible region); capset support partial | W9, plan F |
+| 2 | Instance/device truth | `vn_device_profile.toml` apiVersion **1.1.0**; audit reports 19 findings / 29 rules | partial | not 1.4; several limits below core minima; feature bits exceed implementation | W1, plan E (per-apiVersion ladder) |
+| 3 | Command buffers & queues | `vnfront/vndec/vnrep/vnpump` decode; `cmdrec`/`cmdexec` G3b-iii chunk chains; `vqwalk` rings 0/1; `doneq` 16 fence slots | partial | secondary CBs, pool reset/trim, `READN` bursts landed; indirect+`DispatchBase` landed; one executor serves all families | A, plan C |
+| 4 | Synchronisation | fences, events, barriers; `CmdSet/Reset/WaitEvents` | partial | timeline semaphores, `synchronization2`, external sync, per-queue families | W2, plan E |
+| 5 | Descriptors | F5 memory-resident 32 B records; pool/layout/set/update; dynamic-index LSU fetch + cache | partial | `maxBoundDescriptorSets` **4** (need 7, UE wants 9); binding rows in CAM; descriptor-indexing/bindless/descriptor-buffers/push-descriptors partial | plan P7, B, E |
+| 6 | Memory / VM / residency | `objtab/objmem/objpay`; `vgpages` aperture allocator; `apmem` single-outstanding; 3d-d host-visible backing | partial | no GPU VM/page tables/BDA/sparse/coherent L2; `apmem` one beat device-wide (NR1); residency = 8-slot module LRU | W5, NR1 |
+| 7 | Shader modules / SPIR-V | `shmod` commit scanner + `shwave`/`shcore`; compute model 5; `MaxWaves=16`×8 lanes | partial | workgroup invocations **128** (need 256); operand-complete ISA growing (functions/discard/FragDepth/atomics/pack/SFU landed per G3a); no geometry/task/mesh/tess | B, TP3a, NR5 |
+| 8 | Vertex fetch / assembly | `rast` `S_GA_*`: index+attr windowed reads, serial convert, record writes; 63-vertex batches | partial | strips/fans >1 batch refused (FP4 carry-last-two); vertex-format table partial (integer 8/16/32 landed); no post-transform reuse admitted (TP5 off) | C, FP4, TP5 |
+| 9 | Clipping / setup / cull | `S_PR_*`/`S_OC*`/`S_CP_*`/`S_T*`; Sutherland–Hodgman; ~45 serial float ops/tri | partial | viewport transform recomputed per corner (FP5 screen cache); setup on one FMA/div/converter | C, FP5 |
+| 10 | Rasterisation / interpolation | `S_SCAN` 2×2 blocks, six-product coverage, perspective-correct varyings, helper lanes | landed-basic | interpolation ~64.7 cy/frag is top rasteriser class; moves to wave preamble only after TP3 (NR3/FP6); no MSAA | C, FP6, FP10-B |
+| 11 | Depth / stencil / blend / ROP | early-Z D32/D16; late-Z; stencil compare; blend/logicOp; `S_ROP_*`/`S_BL_*` | landed-basic | `maxColorAttachments` **4** (need 8); merge one-fragment-at-a-time (~17.8 cy/frag); no store/resolve step; depth-bias slope bug fixed (`slope_bias_late`) | C, NR4 (FP10-A), FP10-B |
+| 12 | Textures / images / sampler | implicit-LOD trilinear; format table + sRGB LUT; `W_TX*` in wave FSM; 16-line 64 B texel cache | partial | 1D/3D/cube/array/shadow fault; no BC1–7, compare, gather, aniso; lane-serial sampler (~60% of sampled session) | B, NR6 (FP9), FP8 |
+| 13 | Compute dispatch | `shcore`/`shwave` workgroups; `DispatchIndirect`+`DispatchBase` | partial | workgroup size/count/invocations below 1.4; subgroup ops basic; shared-memory slab/barriers partial | B, CTS-1/2 |
+| 14 | Geometry / task / mesh | none | absent | all of it; mesh/task are 1.4-relevant for UE/Source2-class workloads | W8, plan E |
+| 15 | Ray tracing | none | absent | RT pipelines, accel structures, SBT, traversal, compaction — not started | W7 |
+| 16 | Advanced / GPU-driven | descriptor sets 4 (need 9); bindless partial; indirect draw landed; VRS none; transform feedback none | partial | bindless descriptor-indexing, mesh/task amplification, `VK_EXT_device_generated_commands`, conditional rendering | W8, plan E |
+| 17 | Fragment / vertex completeness (G3c) | points/lines/restart/strips, stencil, depth bias/clamp, input attachments, secondary CBs, indirect, clear/blit/resolve, occlusion/timestamp queries, MSAA 4× — per plan C, largely landed or in flight | partial→landed | MSAA needs tile engine (FP10-B); 8th attachment needs NR4/FP10-A width; full format table (R4) | C, R4, FP10 |
+| 18 | Queries | `vkGetQueryPoolResults` truthful readback; occlusion/timestamp/pipeline-stat | partial | timestamp period needs a real clock; pipeline-statistics counters partial | C, FP12 |
+| 19 | WSI / presentation | **none** — control queue decodes no scanout/flush/display/EDID; `num_scanouts=0` | absent | entire path: scanout, blob-backed present (pointer flip), external sync, DRM/KMS, virtio-pci transport | W9, FP13, plan F |
+| 20 | CTS / release | CTS-0…5 ladder; `vk-default.txt` must-pass; groups currently fail/abort for named reasons | in-progress | full conformant pass; x86-64 UE/CS2 qualification; physical synth/timing/FPGA | W10, plan F |
+
+### 13.1 Reading the matrix
+
+- **Two tracks, one frame.** Rows 1–6 and 19 are the *host/transport/memory* track
+  (workstreams W1/W2/W5/W9); rows 7–18 are the *device pipeline* track (W3/W4/W7/W8).
+  They meet at the `apmem` port and the record store — which is why NR1 (§12) is on the
+  critical path for both.
+- **Honest breadth vs depth.** Rows 8–12, 17 are the most complete (real vertex/
+  fragment shading verified against Mesa/llvmpipe); rows 14–16, 19 are absent or
+  near-absent. The release contract is "all of them," so the absent rows are the long
+  pole, not the polished ones.
+- **Profile-vs-RTL is a live check.** `maxPushConstantsSize` now reads 256 in the
+  profile while §10.1 recorded an RTL `push_q[32]`=128 B width — either the RTL was
+  widened (the `pushwide`/`fs_push` work) or the profile over-advertises. Every such
+  pair is a workstream-A audit item; the matrix marks them "verify" rather than
+  asserting.
+- **Performance and conformance are orthogonal gates.** A row can be functionally
+  complete (17) and still miss its throughput target (11 merge serial, 12 sampler
+  serial); §12's NR passes address the latter without changing the former's results.
+
+### 13.2 The frame's two hard walls
+
+Two aspects bound everything else and are worth naming as the frame's structural
+ceilings until they move:
+
+1. **`apmem` single-outstanding** (row 6/NR1) — one beat in flight for the whole
+   device caps every stage that touches memory: vertex fetch, record traffic, texture
+   fills, descriptor reads, ROP writes, transfers. It is the shared serializer §12.1
+   identified; no per-stage pass substitutes for it.
+2. **The serial wave/raster micro-sequencer** (rows 9–12) — even with the port fixed,
+   interpolation, merge and sampling run as one-operation-in-flight chains until TP3
+   (NR5) and the tile/texture units (NR4/NR6/FP10-B) land. These are the G-T2/G-F2/G-F3
+   gates.
+
+Everything else — descriptors to memory, sync2, WSI, RT, mesh — is breadth that can
+be built on top once these two walls have a scalable shape, because they determine
+whether the added features have somewhere fast to run.
+
+## 14. NR1 implementation contract — multi-outstanding memory port (2026-11-21)
+
+§12.3 NR1 and §13.2 wall 1 name `apmem` the top structural constraint. This section is
+the implementable contract for it — the interface delta, the slot design, the ordering
+and reset semantics, and the verification gates — specific enough to start RTL against.
+It changes cycle counts and port concurrency only; no requester's visible results may
+change (§1 correctness-preserving). Line numbers drift; names are the contract.
+
+### 14.1 Interface delta (`g6lc_apu_mp_pkg.sv`)
+
+- `apu_mp_req_t` gains `beats[3:0]` (burst length in 8-byte beats; `0` = one beat,
+  today's behaviour) and, for writes, the beat data already streams on `wdata` per
+  beat as today — a burst read returns `beats` responses.
+- `apu_mp_rsp_t` gains `last` (set on the final beat of a burst) alongside `rdata`,
+  `err`. A burst of N beats produces exactly N `rsp_valid` pulses, the last flagged.
+- `beats` is sampled at accept; a requester may not change it mid-transaction. The
+  per-port contract is preserved: **at most one transaction per port, exactly one
+  response stream per accepted request, `flush_i` drops only un-issued work.**
+
+### 14.2 Slot design (`g6lc_apu_apmem`)
+
+Replace the single global FSM with **one transaction slot per port** (8 slots,
+`APU_MP_N`). Each slot is a small FSM:
+
+```
+IDLE -> CLASSIFY -> ISSUE -> WAIT -> CAPTURE -> RESP -> IDLE
+        (registered)  (AW/W/AR)      (per beat)   (rsp pulses)
+```
+
+- **Grant** is still fixed port-index priority (`PUB>VQ>CTL>OBJ>PUMP>SH>RAST>EXEC`),
+  but now arbitrates *slot launch*, not the whole device: a granted port launches its
+  slot; up to 8 transactions are then in flight concurrently (one per port).
+- **AXI ID = port index.** `apu_dma_id_t` is 4 bits and already covers 8 ports, so
+  each slot drives its own ID; the AXI interleaving rules then give per-ID ordering
+  for free. No new ID space.
+- **Window classification moves into the slot.** `dom`, the aperture/guest window
+  compares, `isrec_w` (record carve) and `isvtx_w` (vertex cache) are evaluated once
+  at `CLASSIFY` and registered into the slot, so the accept path stays
+  non-blocking and the carve hit never reaches AXI. A carve hit completes in-slot
+  with SRAM-latency responses and no AXI beat.
+- **Burst assembly.** For `beats>0`, the slot issues one AR/AW and captures N beats;
+  for carve hits it reads the `tc_sram` banks N times. Writes keep the existing
+  narrow-strobe head/tail handling per beat.
+
+### 14.3 Ordering, fence and reset semantics (the proof obligations)
+
+These are the parts that must be *argued and controlled*, not assumed:
+
+- **Per-port order is kept.** A slot retires its beats in address order and returns
+  responses in order; a port never sees a later beat's response before an earlier
+  one's. Cross-port responses may interleave — no requester may depend on
+  cross-port ordering (today none does; the used-ring publication chain is a single
+  port's stream).
+- **Fence correctness is by sequencing, not arbitration.** Work completion precedes
+  the fence because the executor/rasteriser state machines only advance a fence after
+  their work item's `done` — which is downstream of response delivery, not of grant
+  order. Controls: `memory.pipeline_barrier.*`, the `sys-venus`/`cva6-venus`
+  address-channel order checks.
+- **`flush_i`** drops, per slot, requests not yet issued to AXI (same semantic as
+  today, now per-slot). A transaction whose AW/W/AR beat is being accepted runs to
+  completion — `outstanding_o` is the OR of all slots' in-flight state, and the
+  `vgsys` reset sequencer still waits `!outstanding` before `eng_rst_n`.
+- **`idle_o`** = no slot busy and no AXI transaction in flight (was: the one FSM
+  idle). Used by the same reset/idle observers.
+
+### 14.4 Downstream and blast radius
+
+- `g6lc_apu_tdma` (the 2:1 AXI join), the bench AXI slave models, the bridge DRAM
+  model and the testharness join must accept **several outstanding AXI IDs** — today
+  they see one. This is the widest blast radius: every memory slave in the verify
+  path.
+- Requesters that issue bursts: the wave LSU record/buffer path (NR2), the texel-cache
+  fill (8 beats), the descriptor-record fetch (4 beats), objtab/objpay line fills,
+  rasteriser `S_MPW`/record writes, xfer legs, and the `READN` payload reads. Each is
+  a separate small change gated on this contract.
+- Files: `g6lc_apu_mp_pkg.sv` (interface), `g6lc_apu_apmem.sv` (slots), `tdma`,
+  `vgsys` (reset/idle aggregation unchanged), the AXI slave/DRM models, and every
+  requester that opts into `beats>0`.
+
+### 14.5 Timing, area, verification
+
+- **Timing:** per-slot classification is registered; the grant mux is the same
+  priority encoder, now feeding 8 slot-launch enables instead of one FSM. No new long
+  combinational path; the widest cone is unchanged (the 8:1 request mux). 8 slots ≈
+  8× the FSM state but each is small — record cells/flops from a `synth` screen
+  before any area claim (the §11.8 open limitation applies: shwave/vnpump/vnfront
+  lack an enabled screen; `apmem`/`vgsys` do have one).
+- **DFT/power:** slots are flop state behind `tc_clk_gating` on the engine idle;
+  `testmode_i`/`test_en_i` observability preserved per slot.
+- **Verification gates (in order):** (1) `apmem`/`mp` unit bench — per-port ordering,
+  burst last-flag, flush-drops-unissued, carve hits never reaching AXI, `beats=0`
+  equivalence; (2) `sys-venus`/`cva6-venus` address-channel order checks unchanged;
+  (3) `memory.pipeline_barrier.*` and the jitter arm (`+mp_lat_min=1 +mp_lat_max=20
+  +mp_ready_pct=60`) for handshake safety; (4) remote `perf` leaf — same checked work,
+  the §12.1 counters (rasteriser ~37 cy/fragment request term; shader 53–64%
+  device-memory state share) must fall; (5) `synth` screen for cells/flops.
+- **Admission:** T0 `perf` leaf always; T1 `top`/`synth` because it touches the device
+  path; the counter that must move is port wait / device-memory state share, not a
+  result. Expected direction per §8 TP2: memory share ÷~8 on eligible accesses —
+  replaced by the measured counter delta on admission, not asserted here.
+
+### 14.6 Ordering precondition — what the global serializer actually guarantees (2026-11-21)
+
+Before NR1 is implementable, one correctness question must be answered, and a first
+RTL audit (this section) shows it is *mostly already satisfied by design* — which
+lowers NR1's risk from "semantic redesign" to "mechanical change + bounded audit."
+
+**The hidden guarantee.** Today `apmem`'s single FSM serialises *every* port's
+accesses into one total order. That is far stronger than the `apu_mp` contract
+requires ("at most one outstanding *per requester*"): it also gives a **cross-port
+total order** for free. NR1's per-port slots remove that — two ports' transactions
+can now be in flight at once and complete out of order on the AXI fabric (AXI does
+not order across IDs). Whether that is safe is a *memory-ordering* question, not a
+throughput one.
+
+**Engines already run concurrently.** `g6lc_apu_vgtop` runs rasteriser (`rs_done`),
+shader (`sh_done`, split VS/FS via `work_id`), xfer (`xf_done`) and cmdexec
+(`work_done_i`) as independent engines feeding one `doneq`; the `doneq` comment
+states it outright — "engines run concurrently." So cross-port accesses *can*
+overlap today only because the serializer forces them to. NR1 makes that overlap
+real.
+
+**The saving grace: drain-before-done is already the discipline.** Every engine
+holds `done_o` until its memory is committed, not merely issued:
+
+- `g6lc_apu_rast`: `done_o` requires `!wq_v_q[0]` — RP4's posted-write queue is
+  fully drained (each entry popped only on its `mp_rsp_valid_i`), so done ⇒ every
+  raster write has received its response. Comment: "drain before wave launch / done."
+- `g6lc_apu_cmdexec`: "submit end drain[s] outstanding work via `work_done_i`."
+- `g6lc_apu_xfer`, `g6lc_apu_vqwalk`, `g6lc_apu_objmem`: each tracks its
+  single-outstanding beat(s) and drains to idle before completion.
+- `g6lc_apu_shwave`: one outstanding access per wave, `wave_q` advances only in
+  `W_SCHED`; done follows wave retirement, which follows LSU response.
+
+So `done_o ⇒ memory-commit` holds per engine, and every producer→consumer edge that
+crosses ports (shader writes FS-out record → raster reads it for blend; raster writes
+vertex/primitive record → shader/assembly reads it; objtab write → shader/assembly
+read) is separated by a done-barrier at work-item granularity (`sh_done_i(gfx_done)`
+feeds `i_rast`; `work_id` routes VS vs FS dones). **If every such edge is
+barrier-separated and every engine drains before done, NR1 preserves the only
+ordering that matters** — the barriers still order the data, they just no longer
+rely on the serializer for the in-flight overlap.
+
+**The residual audit NR1 still owes** (do before merge, not after):
+
+1. **Per-port, not just per-engine, drain.** `done_o` is per engine, but a port can
+   carry accesses for more than one logical stream (e.g. `mp_req_o[2]`/SH serves
+   shader record + descriptor + buffer traffic). Confirm no producer stream's last
+   write can still be in `apmem` when a *different* consumer on the same port (or a
+   done-barrier peer) reads it — i.e. the barrier implies *that port's* queue empty,
+   not just the engine's FSM idle.
+2. **Pipelined-draw overlap.** Vertex shader batch N+1 can be in flight while the
+   rasteriser consumes batch N's records. If they share a record-carve region, a
+   batch-N read could race a batch-N+1 write on the *same* port/region. Confirm
+   record slots are per-batch-disjoint or that VS-done for batch N+1 cannot be
+   issued until raster has consumed batch N (the `MaxWaves`/batch accounting).
+3. **`flush_i`/reset during overlap.** With N slots, a flush must drop each port's
+   *unissued* request independently and still run every *issued* AXI transaction to
+   B/R — the §14.3 rule applied per slot, plus the used-ring/fence publication order
+   (`doneq` → `work_done_i` → fence) must be re-proven under interleaved completion.
+
+**Why this is safe, not just hopeful.** NR1 keeps "at most one outstanding *per
+port*" (§14.1), so *within* a port request order is preserved exactly as today.
+The only new degree of freedom is *across* ports — and every cross-port
+producer→consumer data edge is already separated by a done-barrier whose
+`done_o ⇒ memory-commit` (drain-before-done, above). A consumer therefore cannot
+issue a dependent read until the producer's writes have returned their responses,
+regardless of how the fabric interleaved the two ports' other traffic. Record-slot
+reuse safety is likewise unaffected: whether a carve slot may be rewritten before it
+is consumed is enforced by the allocator's logical free/used tracking, not by
+memory ordering — NR1 changes transaction *timing*, never allocation. The one
+pattern that *would* break this is a consumer that polls or lockstep-reads producer
+data without a done-barrier; the engine set uses done-pulses throughout, so the audit
+item is to *confirm no such edge exists*, not to add fencing.
+
+**Conclusion for the landing order (§19).** NR1 is *not* blocked on a memory-model
+redesign — the engine-level ordering discipline already provides the barriers NR1
+needs. It is blocked on (a) the mechanical slot+ID+burst implementation, (b) the
+three-point audit above, and (c) downstream multi-ID support in `tdma`/slaves/DRM.
+Item (b) is a read-only RTL audit that can run *before* any NR1 RTL lands and is the
+cheapest way to retire the ordering risk. Recommend it as NR1 step 0.
+
+## 15. NR5/TP3 implementation contract — pipelined issue and banked register file (2026-11-21)
+
+§13.2 wall 2 and §12.3 NR5 name the serial wave micro-sequencer the second structural
+wall and the G-T2 gate (≤4 cy/wave-instruction). This is its implementable contract —
+the pipeline, the register-file re-banking that is its precondition, the hazard and
+decode-ahead rules measured in TP3a-3, and the verification gates. Like §14 it is
+correctness-preserving: same operations, operands and order per invocation; only issue
+width and overlap change. The reference for arithmetic legality stays §1 and the
+Gate-1 bit-exact shader vectors.
+
+### 15.1 Why the precondition is the register file, not the pipeline
+
+The wave engine today reads its register file as `MaxWaves × ShaderRegs` rows of
+`ShaderLanes × ShaderVec × 32` bits — 16,384 × 1,024 b ≈ 2 MiB per core at the `vgtop`
+defaults, as two single-port `tc_sram` halves. That geometry is **outside the SRAM
+envelope** (`AGENTS-configuration.md`: single-port, depth 64–4096, width 32–128, read
+pipelined ≥2 cycles at 8 FO4; dual-port only for the register file). A pipelined issue
+needs two operand reads and one write-back per cycle — impossible against a
+single-ported 1,024-bit row. So TP3a (bank the RF) is not optional packaging; it is the
+enabling structure.
+
+### 15.2 TP3a — bank the register file (`g6lc_apu_shwave`)
+
+- Re-express the RF as `RfRows`-bounded banks of 128-bit `tc_sram` macros: the
+  1,024-bit architectural row becomes 8×128-bit banks (or 16×64-bit if the macro
+  granularity favours it — decided by the macro leaf, not here). Rows in use are
+  `waves_in_flight × ShaderRegs`; commit already knows the bound, so `RfRows` is a
+  parameter sized from it, not a new limit.
+- **Two read ports + one write port** on the banked RF (the envelope's dual-port RF
+  exception). TP3a-2 (the dual port) is already landed and cycle-exact — it did not
+  shorten the operand *stream*, which is fetch-width-bound (§15.4), but it is the port
+  budget TP3's operand stage needs.
+- `maxComputeWorkGroupInvocations` and the fragment batch size become **derived from
+  the elaborated `RfRows`** (pattern CTS-P2), not typed into the profile — this is also
+  the §10.1 path to the 256-invocation 1.4 minimum.
+- Blast radius: `shwave` RF arrays, `shcore` slot/commit geometry, the `vgtop`
+  `MaxWaves`/`ShaderRegs` defaults, `g6lc_apu_sh_pkg` row-width constants, every
+  `shwave`/`shcore`/`vgtop` bench that binds the RF geometry, and the generated
+  `sh_opcodes.py`/`spirv_scan.py` row tables if the row format moves (§15.3).
+
+### 15.3 TP3 — the pipeline (`g6lc_apu_shwave`)
+
+Replace the fetch/decode/read/execute/writeback FSM's serial walk with an in-order,
+single-issue pipeline for row-eligible instructions:
+
+```
+ROW_RD -> OP_RD -> EX -> WB -> (forward to OP_RD)
+```
+
+- **ROW_RD** reads the predecoded row (SP1's `RowCacheEntries` store, or the TP1
+  commit-time row once it lands) — opcode class, result row, type shape, operand
+  rows/tags.
+- **OP_RD** reads the operand values from the banked RF (two ports). A
+  write-back-to-operand **forward** covers the adjacent-instruction RAW; a same-wave
+  RAW beyond one stage stalls.
+- **EX** dispatches on the row's opcode *class* instead of `unique case (opc_q)` in
+  `W_EX`. Multi-cycle units (divide, sqrt, transcendental, texture, aggregate,
+  matrix, calls/phi/switch) either stall the pipe or move to a generated micro-code
+  ROM — the §8 decision deferred to the `area-attr.sh` attribution, not assumed here.
+- **WB** writes the result row; the wave pick and PC advance fold into retire (the
+  SP2 pattern), and a wave runs to its next barrier/end/quantum rather than
+  round-robining per instruction (the §11.6 run-to-barrier default stays reversible).
+- **Long-form fallback.** Instructions that do not fit the row keep the present word
+  walk behind a flag — the retained walk is also the differential control (a parameter
+  selects it module-wide), exactly as SP1's `RowCacheEntries=0` arm does today.
+- Target: **2–4 cy/wave-instruction** = 16–32 FP32 ops/clock/core (G-T2), vs 21.3
+  today. The pipeline is in-order and single-issue — no scoreboard — until measured
+  otherwise.
+
+### 15.4 The decode-ahead sub-passes (TP3a-3, measured — do not skip)
+
+TP3a-3 established the operand stream `W_LD0`/`W_LD1` is the largest per-instruction
+cost (~449k of 3.67M bench cycles, ~12%) and is **fetch-width-bound, not
+RF-latency-bound**: `prog_addr_o`/`prog_data_i` move one 32-bit program word per cycle,
+and the operand-value RF read is already issued one stream-cycle early. The dual RF
+port therefore does not shorten the stream. The real G-T2 lever is overlap:
+
+- **3a — decode-ahead on the row-cache-hit path only.** A lookahead runs
+  fetch/decode/operand-prefetch ≥1 instruction ahead so N+1's operand stream overlaps
+  N's execute. No operand prefetch, no hazard — the safe first cut.
+- **3b — RF port-1 operand prefetch into a shadow `va_q`.** Prefetches N+1's operand
+  values on the second read port; needs a RAW check against the retiring
+  instruction's write rows (forward `wb_q` or stall on a same-wave hit).
+- **3c — wider fetch.** `prog_data_i` 32→64 needs `i_prog` dual-read, but `i_prog`
+  also serves `shmod`'s own decode/validation reads — the port budget needs care
+  before this is chosen over 3a/3b.
+- Hazards to hold constant: same-wave RAW (N writes a reg N+1 reads), taken-branch
+  invalidation of the shadow, multi-row write-back, row-cache write-back timing.
+  `W_IDLE` (~35% of cycles) is dispatch-bound and belongs to TP6/TP7 parallelism, not
+  per-instruction pipelining — do not size TP3 against it.
+- Row-cache *capacity* is not a lever: `RowCacheEntries=4096` saved only 0.04%; the
+  61.5% hit rate is compulsory/conflict-bound, so 1024 stays.
+
+### 15.5 Verification and gates
+
+- **Gate 1 bit-exact** on every shader vector at every lane/wave geometry variant —
+  the model has no geometry, which is the point (§1). The atomic vectors are the
+  fails-if-wrong control for the run-to-barrier reordering; the `RowCacheEntries=0`
+  long-decode arm and the `unique case`→class dispatch both keep a differential path.
+- **G-T2 threshold:** ≤4 cy/wave-instruction on arithmetic-bound vectors, per-core
+  cells and SRAM bits from a synthesis leaf, RF + row store inside the SRAM envelope.
+- **Admission:** T0 `perf` leaf (same checked work, suite cycles fall); T1 `unit` +
+  `top` because it touches `shwave`/`shcore`/`vgtop`; `synth` for the banked-RF cell/
+  flop figure — noting the §11.8 open limitation that `synth-shwave` has no completed
+  enabled screen, so the RF banking may be the first geometry that forces one.
+- **Sequencing:** TP3a (banked RF + `RfRows`) is a hard precondition and lands alone
+  first (cycle-exact, results identical); TP3's pipeline and the 3a→3b→3c decode-ahead
+  then land as separate admitted passes so each counter delta is attributable.
+
+## 16. NR4/FP10-A implementation contract — output merge stage A (2026-11-21)
+
+§12.3 NR4 and §9.3 FP10 stage A: the output merge is the rasteriser's second-largest
+class (~17.8 cy/fragment after interpolation) and the only NR rung fully independent
+of NR1 and TP3 — it can land in parallel with both. This is its implementable contract.
+It also carries the §10.1 `maxColorAttachments` 4→8 width, so it is a throughput pass
+and a 1.4-capacity change in one. Stage A is immediate-mode only; the tile engine
+(FP10-B) is a later, separate contract that reuses the same merge datapath and
+pixel-store interface — building A against that interface is what keeps it from being
+discarded.
+
+### 16.1 What the merge does today (`g6lc_apu_rast`, `S_ROP_*`/`S_BL_*`/`S_DB*`)
+
+Per fragment, per attachment (`at_q` cursor, already 3 bits = 0..7):
+
+- read the fragment's FS-out record — two 8-byte beats (`S_ROP_R*`/`S_MPW`);
+- with blending, read the destination pixel once (`S_BL_*` dst fetch);
+- decode the shader output and destination through ~9 float ops, blend up to ~5 ops
+  per channel (`S_BL_F1/F1B/F2B/M2/OP/ST`), encode back;
+- write one 8-byte pixel with byte strobes (`S_ROP_WR`/`S_ROP_NX`); late depth adds a
+  depth read+write (`S_DB*`/`S_ROP_L*`).
+
+Three serial costs bound it: (a) fragments merge **one at a time in batch order** —
+adjacent pixels are not combined, so an RGBA8 row costs one memory round trip per
+pixel although a beat holds two; (b) the four attachments are processed **in series**,
+each re-walking the read/blend/write chain; (c) FS-out records come from DRAM beats,
+not the record store. RP4's write-behind queue already overlaps the *write* leg; what
+remains is the read/compute/issue serialization above.
+
+### 16.2 The stage-A datapath
+
+- **FS-out from the record store.** The wave's FS-out writes are already `dom=1`
+  `ls_rec_q` beats into the `[rec_base_i, +APU_REC_CARVE_BYTES)` `tc_sram` carve
+  (§12.1 item 2). The merge reads the same window — no DRAM round trip per record
+  word. This is a read-port addition on the carve, not new storage.
+- **Parallel channel merge.** Decode, blend and encode the four channels in parallel,
+  keeping the **per-channel operation order unchanged** — the same operations and
+  operands, issued four-at-a-time instead of serially. UNORM/sRGB decode/encode use
+  the generated format table (R4) where it exists; where it does not, the present
+  per-format case list stays.
+- **Pixel combining.** Adjacent fragments of a batch that land in the same 8-byte beat
+  (two RGBA8 pixels, or the matching packing for the format) merge into **one write
+  beat**; consecutive beats in a row merge into a **burst** on the NR1 port (§14).
+  Where fragments are non-adjacent (overdraw, discard, helper lanes) the merge falls
+  back to per-pixel beats — correctness never depends on adjacency.
+- **Destination read once per run.** For a blend run covering a contiguous span, the
+  destination line is read once into a small line buffer and reused across the run's
+  fragments, instead of one read per fragment. The line buffer is `tc_sram`, sized to
+  the widest attachment row the batch can touch (parameter, not a fixed 4).
+- **Pixel-store interface.** All merged pixels leave through one `pixel_store` port
+  contract (address, beat data, strobes, byte enables) that FP10-B's tile writeback
+  will also drive. Stage A implements it as bursts to `apmem`; stage B re-targets it
+  at tile SRAM without changing the merge math.
+
+### 16.3 The 4→8 attachment width (§10.1, rides this pass)
+
+- `apu_rast_draw_t.ca[3:0]`→`ca[7:0]`, `.blend[3:0]`→`.blend[7:0]`; `at_q` is already
+  3 bits so the cursor needs no widening — the loop bound becomes 8.
+- FS-out record locations and stride grow with the count (§10.1 varying/record row);
+  the record stride is already a parameter per the ledger.
+- `maxFragmentCombinedOutputResources` 16 is the real 1.4 bound, not just 8 colours —
+  the merge's per-fragment resource accounting must count combined outputs, so the
+  width change and the resource table land together or the profile over-advertises.
+
+### 16.4 Ordering and correctness obligations
+
+- **Per-pixel order is unchanged.** Merging adjacent pixels into one beat does not
+  reorder fragments — each pixel's blend still sees the same destination value it
+  would have seen serially, because the line buffer holds the pre-run destination and
+  each pixel updates only its own bytes. Overlapping fragments in one beat are
+  impossible by construction (one fragment owns a pixel).
+- **Late-Z interaction.** `S_ROP_LC`/`S_DB*` depth bias uses per-primitive slope
+  registers; the `slope_bias_late` flush (§11.3 defect fix) already forces
+  single-primitive batches where needed. Stage A must not merge across that boundary —
+  the batch boundary is the existing correctness seam, preserved.
+- **Blend/logicOp/depth/stencil vectors are the fails-if-wrong control** — every
+  `S_BL_*` op, `SRC_ALPHA_SATURATE`, `CONST_COLOR`, logic op on sRGB, per-attachment
+  blend under MRT (the 62-case/31,749-check rast suite §11.7 hardened is the gate).
+
+### 16.5 Verification and gates
+
+- **Equality:** pixel-identical against the present merge on the full rast suite plus
+  the blend/depth/stencil/logic-op vectors; the `jitter` arm for the port handshake.
+- **G-F1-adjacent:** graphics-session cycles fall; the merge class (~17.8 cy/fragment)
+  and the per-fragment memory-request count are the counters that must move — admitted
+  on the `perf` leaf's frame section, not asserted.
+- **G-F2 direction:** combining adjacent pixels + row bursts + record-store FS-out is
+  the path toward 1 pixel/clock fill; the measured delta replaces the projection.
+- **Admission:** T0 `perf` leaf; T1 `unit`+`top`+`synth` (touches `rast`, the device
+  path, and adds `tc_sram` line buffer + read port); the `synth-rast` screen (which
+  exists and passes, unlike `synth-shwave`) gives the cell/flop figure.
+- **Sequencing:** independent of NR1/NR5 — land whenever its counter justifies; the
+  pixel-store interface is the only forward commitment (FP10-B depends on it). The
+  4→8 width rides it per §10.3 so no field is widened twice.
+
+## 17. NR6/FP9 implementation contract — texture unit (2026-11-21)
+
+§12.3 NR6 and §9.3 FP9: the sampled session is the one frame path whose bottleneck is
+**not** the port — ~60% of its wave busy is arithmetic and the lane-serial sampler.
+This is its implementable contract: factor the sampler out of the wave state machine
+into a dedicated unit. It is also the path that unblocks general sampling breadth
+(§13 rows 12/16) and the `texture.*`/`image.*` CTS groups, so it is simultaneously a
+throughput pass and a feature enabler.
+
+### 17.1 What the sampler is today (`g6lc_apu_shwave`, the `W_TX*` chain)
+
+The sampler is ~40 states embedded in the wave FSM, run **one lane at a time**:
+
+```
+W_TX0..4  sampler/image record fetch (DS path)
+W_TXM     per-mip layout walk (iterator, up to ~13 steps)
+W_TXL0..C level + coordinate setup; W_TXC*/W_TXJ*/W_TXS*/W_TXG*/W_TXQ* compare,
+          gather, projection and query-LOD tails
+W_TXB/TXT texel address -> probe -> words; W_TXF0/F1 the 64 B cache-line fill
+W_TXD     decode texel -> channels; W_TXA/A2..A4 accumulate the filtered weight
+W_TXR0/R1 finalize lane result; W_TXN next lane / wave done
+W_TXW/E/Q image-store beats, encode + sRGB search, query results
+```
+
+State held per sample: the gather list (up to 8 `{mip,border,iu,iv}` points),
+`tx_mof0/1` mip offsets, `tx_acc1_q[4]` for the second mip level (trilinear),
+`tx_bpp_q`/`tx_td_q` raw texel beats. The texel cache is **dispatch-scoped** —
+`TexCacheLines × 64 B` `tc_sram`, direct tags in flops, invalidated per batch, filled
+by eight single beats. A bilinear sample costs ≥20 cycles for its four texel reads on
+cache hits (§9.1), so the path is ≤0.05 samples/clock — 320–1,900× below the
+published fixed-function reference points.
+
+### 17.2 The `g6lc_apu_tex` unit
+
+- **One request / one response per quad.** The wave issues a sampling request for a
+  2×2 quad (position, gradients or implicit-LOD inputs, descriptor record, sampler
+  state) and gets back four filtered texel results. The unit owns the entire
+  `W_TX*` chain internally; the wave sees a single multi-cycle op, like a texture
+  "instruction" — this is what removes it from the per-lane serial FSM.
+- **Per-image mip layout cached beside the descriptor record.** Today `W_TXM` walks
+  the mip layout *per lane per sample*; the unit caches `{offset,pitch,extent}` per
+  mip once per image (keyed like the descriptor-record cache) so the walk runs once
+  per image, not per lane.
+- **Level computed once per quad where the spec defines it per quad.** Implicit-LOD
+  derivatives are quad-uniform; the present per-lane sequence did not need to
+  recompute per lane. Where the spec makes LOD lane-dependent (explicit gradients,
+  per-sample), the unit keeps per-lane level — the contract is spec-driven, not a
+  blanket quad assumption.
+- **Whole-line fetch, parallel footprint.** One cache-line read returns all four
+  bilinear footprint texels; decode and the four-channel filter run in parallel
+  (per-channel order unchanged). This replaces the per-texel `address→probe→read→
+  decode→accumulate` serial loop and the eight-single-beat line fill (which also
+  becomes an NR1 burst).
+- **Persistent set-associative cache.** Larger than the 16-line direct-mapped flop
+  cache: tags in `tc_sram`, filled by bursts (NR1), **persistent across batches of a
+  draw** (FP8 invalidation: new draw, barrier, image store by the wave, or a write to
+  an attachment also bound for sampling). This is the hit-rate fix the dispatch-scoped
+  cache cannot give.
+- **Format table decode/encode.** Decode and encode are generated from the format
+  table (R4), replacing the fixed `W_TXD` case list; sRGB stays a LUT. Cube, 3D and
+  1D addressing come from the §9a single address function — they fault today and are
+  a 1.4/CTS requirement (`texture.*`, `pipeline.monolithic.sampler`).
+- **BC decode and anisotropy stay unadvertised** until the per-codec decision —
+  decode-on-fill is the mechanism, but no format bit flips before its vector passes.
+
+### 17.3 Interface and blast radius
+
+- New `g6lc_apu_tex` module + a request/response port pair on `shcore`/`shwave`
+  (the wave's `W_TX*` chain becomes the request driver and result consumer). The
+  transfer engine's blit path (§9.2 S11 scaled blits) reuses the same unit — one
+  sampler, two clients.
+- The descriptor record's sampler words (filters/mipmap/address/border/compare/
+  LOD/bias, bytes 20–27 per §11 F5/5b) become the unit's input contract — already
+  memory-resident, so no new descriptor plumbing.
+- Blast radius: `shwave` `W_TX*` states (deleted or reduced to the request driver),
+  `shcore`/`vgtop` port wiring, `g6lc_apu_xfer` blit reuse, the texel-cache `tc_sram`
+  (moves/replaces the dispatch-scoped one), `g6lc_apu_mp_pkg` if the unit has its own
+  memory port (it should share `apmem` via a port or ride the SH port's bursts).
+
+### 17.4 Ordering and correctness obligations
+
+- **Quad-uniform vs per-lane results must match the spec bit-for-bit.** The fails-if-
+  wrong controls are the texture corpus (bit-exact today), the derivative/projection/
+  gather/query sessions, and then `texture.*` + `pipeline.monolithic.sampler`. The
+  `RowCacheEntries=0`-style differential arm applies: a parameter selects the
+  in-FSM sampler vs `g6lc_apu_tex` for the whole module during bring-up.
+- **Image store / atomic path stays in the wave** (`W_TXW/E/Q`) — the unit is a
+  *sampling* unit; stores and atomics keep their existing memory ordering through the
+  LSU. The cache invalidation rules above are what keep a store-then-sample sequence
+  correct.
+- **robustBufferAccess / out-of-bounds** texel fetches return the spec'd border/zero —
+  the unit inherits the present bounds logic (`W_TXB`), not a new one.
+
+### 17.5 Verification and gates
+
+- **Equality:** texture corpus bit-exact, then the `texture.*`/`sampler` CTS groups;
+  the sampled-session counter (arithmetic+texture share of wave busy) must fall on the
+  `perf` leaf.
+- **G-F2 direction:** ≥4 bilinear samples/clock on cache hits is the target (§9.4);
+  measured samples/clock replaces the ≤0.05 today.
+- **Admission:** T0 `perf` leaf; T1 `unit`+`top` (touches `shwave`/`xfer`); `synth`
+  for the new unit's cells/flops — same §11.8 `synth-shwave` caveat applies to the
+  wave-side change, but `g6lc_apu_tex` itself gets its own screen.
+- **Sequencing:** needs NR1's burst fill for the line fills to pay off and FP8's
+  persistence rules; the per-quad request interface is the forward commitment (the
+  blit client and any future bindless path depend on it). Cube/3D/1D and BC/aniso are
+  *feature* gates behind this unit, landed per-format with their own vectors — the
+  unit's structure must not pre-judge which codecs ship.
+
+## 18. NR2 implementation contract — wave record issue width (2026-11-21)
+
+§12.3 NR2 and §12.1 item 2: the record store (R3) already serves the wave's
+`ls_rec_q` traffic from `tc_sram`, so records no longer cross DRAM — but the LSU
+still issues them **one 32-bit word per lane per request**, ~5 states and two `apmem`
+port waits per beat, four requests for a four-component store. On graphics sessions
+this is 53–64% of wave busy (§11.7). This contract widens the issue without changing
+what any lane reads or writes. It is gated on NR1 (§14): a wider request still
+serialises behind the one-in-flight FSM until per-port slots land.
+
+### 18.1 The access geometry (corrected)
+
+Records are **per-invocation contiguous**, 152 B each (`VSTR+8`), in the six `OFF_*`
+carve buffers (`vsi/vso/fsi/fso/clip_out/clip_tmp`) inside `[rec_base_i,
++APU_REC_CARVE_BYTES)`. Two distinct patterns fall out:
+
+- **Within one record — contiguous.** A record is 18–19 eight-byte beats sequential.
+  Reading or writing a whole record (VS-in gather, FS-in varyings, FS-out store) is a
+  **burst** candidate: one request, N beats (§14 `beats[3:0]`).
+- **Across lanes at one word offset — strided gather.** Lane *l*'s word-*w* is at
+  `base + l·record_stride + w·8`; for fixed *w* across lanes the stride is
+  `record_stride` (~152 B), not contiguous. This is a **strided vector** access, the
+  §8 TP2a lane-vector load/store shape — one request carries every active lane's
+  same-offset word, demuxed on return.
+
+These are complementary, not alternatives: bursts serve the per-record sequential
+stream; the strided vector serves the per-word-across-lanes fan-out. Which dominates
+depends on the access — FS-in varying reads are strided-gather-heavy (each lane reads
+its own record's varying slots), FS-out stores are per-record contiguous.
+
+### 18.2 The LSU change (`g6lc_apu_shwave`, `ls_rec_q` path)
+
+- **Record-burst mode.** When `ls_rec_q` targets a contiguous run inside one record
+  (the compiler/runtime already knows the record extent from the slot map), issue the
+  run as one NR1 burst instead of N single beats. The demux writes each returned beat
+  to its lane's destination — for a per-lane record this is still one lane's stream,
+  so the burst is *per lane*, collapsing the 18 sequential waits into one transaction.
+- **Strided lane-vector mode.** For the fixed-offset-across-lanes case, classify the
+  active lane set (the same `act_w`/`dead_q`/`hlp_w` mask the LSU already computes)
+  and issue one strided request `{base, stride=record_stride, lanes=popcount(mask)}`;
+  on return, demux beat *i* to lane *i*-th-set-bit. This removes the per-lane serial
+  issue SP4 only halved.
+- **Interface.** Both ride the NR1 `apu_mp_req_t` extension: `beats` for the burst,
+  and a new `stride`/`lanes` field (or a `vec` qualifier) for the gather — the §14
+  contract's "requesters leaving `beats==0` see today's behaviour" extends to "leaving
+  the vector qualifier clear sees today's per-lane path." The SH port (`mp_req_o[2]`,
+  `dom=1`) already reaches `apmem`'s carve window.
+- **Dead/helper Output-store rule preserved.** The present rule (dead/helper lanes
+  lose device-memory stores but keep Output record stores, ~line 3667) is applied to
+  the *lane mask* before the vector is issued — the mask, not the request shape,
+  carries the semantics. Robust/bounds (`ls_bok_q`) and atomic serialization are
+  unchanged; an out-of-range lane falls back to the per-lane path so
+  `robustBufferAccess` counts stay exact.
+
+### 18.3 What it does NOT do
+
+- It does not widen the record store or move records — R3 already did that.
+- It does not touch non-record device memory (buffers/images/descriptors) — that is
+  TP2a's general lane-vector load/store, a separate consumer of the same NR1
+  mechanism; NR2 is scoped to `ls_rec_q` only so its blast radius stays the record
+  path.
+- It does not change record *content* or layout — the 152 B stride and slot map are
+  fixed by the carve; only the issue width changes.
+
+### 18.4 Verification and gates
+
+- **Equality:** every `ue_gpos_*`/`ue_cpos_*` session bit-exact through the carve
+  (the R3/SP4 admission pattern), plus `pipeline.monolithic.vertex_input` and the
+  FS-in varyings vectors; the atomic/robust-access vectors are the fails-if-wrong
+  control for the lane-mask and bounds fallback.
+- **Counters:** the §11.7 device-session table's "device-memory load/store states"
+  share (53–64% on graphics sessions) and the per-request state count (~5 → fewer)
+  are what must fall on the `perf` leaf; the record beats/request ratio is the direct
+  measure.
+- **Admission:** gated on NR1 (§14) — without per-port slots the wider request still
+  serialises. T0 `perf` leaf; T1 `unit`+`top` (touches `shwave`/`shcore`/`vgtop`);
+  `synth` subject to the §11.8 `synth-shwave` open limitation.
+- **Sequencing:** after NR1 lands and its counter delta is admitted; the vector/burst
+  qualifier is the forward commitment (TP2a's general lane-vector load/store and any
+  gather/scatter-capable memory path build on the same `apu_mp_req_t` fields).
+
+## 19. Landing order and critical path (2026-11-21)
+
+§12–§18 give every actionable rung a contract. This is the dependency-ordered landing
+sequence — what unblocks what, and the single critical path. Gates are the §11.4/§12.4
+ladder; "blocked-by" is a hard RTL dependency, not a preference.
+
+| Order | Pass | Contract | Blocked by | Unblocks | Gate |
+|---|---|---|---|---|---|
+| 1 | **NR1** `apmem` slots+bursts | §14 | — | NR2, FP9 fill, FP3 clears, FP1 window, FP2 `READN`, TP2a | G-T1 wall-time |
+| 2 | **NR4** FP10-A merge | §16 | — (parallel) | FP10-B tile engine, 8-attachment width | G-F1/G-F2 |
+| 3 | **NR6** FP9 texture unit | §17 | NR1 (burst fill), FP8 rules | `texture.*`/`image.*`, blit/resolve, cube/3D/BC | G-F2 samples |
+| 4 | **TP3a** banked RF | §15.2 | — | TP3 pipeline, 256-invocation width | — |
+| 5 | **TP3** pipelined issue | §15.3–15.4 | TP3a | G-T2, FP6 interpolation, TP7 cores | G-T2 |
+| 6 | **NR2** record issue width | §18 | NR1 | record-path state share (53–64%) | G-F1 |
+| 7 | **FP6** interp→wave preamble | §9.3/§15 | TP3 (G-T2) | interpolation off rasteriser | G-F2 |
+| 8 | **FP10-B** tile engine | §9.3 | FP10-A, FP9, MSAA need | tile residency, resolve, ordering | G-F3 |
+| 9 | **TP7** shader cores | §8 | TP3 measured, TP3a | multi-core scaling | G-T3 |
+
+**Critical path:** NR1 → (NR2 ∥ FP9 ∥ FP3 ∥ FP1/FP2) and TP3a → TP3 → (FP6 ∥ TP7). The
+memory port (NR1) is the widest unblock — six consumers wait on it — so it is the
+first land even though TP3a has no dependency and could start in parallel on a second
+front. FP10-A (NR4) is the only pass with no inbound dependency and the only one that
+also carries a 1.4 capacity width (8 attachments), so it is the best *parallel* slot.
+
+**What is deliberately not contracted here:** NR3/FP6 (§ gated on TP3 — spec'ing it
+now would guess at the post-TP3 wave interface); FP10-B tile engine (needs FP10-A's
+pixel-store interface and FP9's sampler to exist first); TP7 multi-core (needs TP3's
+per-core numbers); WSI/transport (a platform track, §13 rows 1/2/19 — different doc).
+
+**Honest bottom line:** the frame's two structural walls (§13.2) are NR1 and TP3 —
+both now have contracts (§14, §15). Everything else is either parallelizable
+(NR4/NR6/NR2), gated (FP6/TP7/FP10-B), or breadth that rides on top (descriptors to
+memory, sync2, WSI, RT, mesh). The device-pipeline throughput analysis is complete;
+the next evidence needed is the first admitted NR1 counter delta, which re-sizes
+every downstream projection.
+
+## 20. Frame boundary — host ingress and presentation egress (2026-11-21)
+
+§9's S1–S13 covers the device stages. This section covers the two segments that
+bookend them and that no device-side pass reaches: how a frame's commands and pixels
+cross the **host↔device boundary**. Ingress is host→device (app to engine); egress is
+device→screen (engine to display). Both are currently the least-complete parts of the
+frame and both are hard release requirements (stock Ubuntu/Mesa/loader, real WSI).
+Detail on the stock-software contract lives in `apu-graphics.md`; this section is the
+frame-lifecycle view and the performance/cost angle.
+
+### 20.1 Ingress — host app to engine (S0)
+
+The path a `vkQueueSubmit` takes before §9 S1 (`vqwalk`) begins:
+
+```
+app vkQueueSubmit
+  → Mesa Venus vn_physical_device (libvulkan_virtio, the stock ICD)
+  → virtio_gpu execbuffer commands (CREATE_BLOB/MAP_BLOB/TRANSFER/WAIT/...) on the
+    host-visible blob ring  [host side, kernel virtio-gpu + DRM]
+  → guest virtqueues (q0 control, q1 Venus)  [transport: virtio-mmio today]
+  → vqwalk descriptor walk → vnpump/vndec decode → vnfront → cmdrec → cmdexec
+  → the engines of §9
+```
+
+Current state and cost:
+
+- **Transport is diagnostic `virtio-mmio`, not a qualified endpoint.**
+  `g6lc_apu_virtio_mmio.sv` returns all-ones SHM length/base (~lines 202–203), which
+  the driver reads as *no host-visible region* — so the blob ring the Venus path
+  needs is not actually mapped today. `APU_IMPL_FEATURES` carries `VERSION_1` +
+  `RING_RESET`; Venus capset (id 4) support is partial. x86 physical use needs a
+  stock-compatible **virtio-pci** (BAR/MSI-X/DMA/reset); RISC-V stays virtio-mmio.
+- **The blob ring is the command/pixel transport.** Venus serialises Vulkan commands
+  and reads back results through a host-visible blob region; SPIR-V arrives via
+  `vkCreateShaderModule`. Until SHM mapping is real, this path is exercised only in
+  the QEMU/bridge harness, not a stock guest.
+- **Per-command host cost is already measured and large.** The DRAM-backed ObjTab
+  path costs ~3,000 cycles per host command (`execute_large_primary`, §9.1) — that is
+  *inside* the device (S2/S3), but it sits on the ingress critical path: every
+  `vkCmd*` the driver emits pays it before any engine work. FP1/FP2/TP9 (§9.3) are the
+  device-side reducers; the transport side adds its own per-command virtqueue +
+  doorbell + used-ring round trip on top.
+- **Synchronization crosses the boundary twice per frame.** Fences/semaphores are
+  raised in-device (`doneq`, 16 slots) and must be signalled back through the
+  virtqueue used-ring interrupt (`g6lc_apu_uir`) to the host driver, which the guest
+  ICD polls or sleeps on. Timeline semaphores and external sync (the WSI requirement)
+  are not yet present (§13 rows 4/19).
+
+### 20.2 Egress — engine to screen (S13, currently none)
+
+§9.2 S13 records the honest state: **there is no presentation path.** The control
+queue decodes no scanout, flush, display-info or EDID command; the Venus config
+requires `num_scanouts=0`; pixels reach the host today only by CPU readback
+(`vkMapMemory` of a host-visible image). What a real frame needs:
+
+- **A scanout resource.** A guest image the display scans out directly — today every
+  "present" is a readback copy, which is why G2's matched-llvmpipe evidence is
+  smoke/milestone, not presentation.
+- **`RESOURCE_FLUSH` / cache maintenance** so the device's rendered pixels are visible
+  to the host scanout (the aperture is device-coherent only where the memory type
+  says so; the flush is the explicit hand-off).
+- **External synchronisation.** WSI acquire/present needs `sync_file`/semaphore-fd
+  export/import — the same external-sync path `VK_KHR_external_memory_fd`/semaphore
+  already started for images must extend to swapchain images. Without it there is no
+  tear-free present and no correct acquire.
+- **Blob-backed present = pointer flip, no copy.** The acceptance shape (plan W9 /
+  FP13): the scanout resource is a `RESOURCE_BLOB` the host maps once; present is a
+  flush + a host-side buffer-index flip, so the per-frame egress cost is the flush
+  only — "no render-path cost per frame beyond the flush" is the stated criterion.
+- ** virtio-gpu scanout commands** (`SET_SCANOUT`, `TRANSFER_TO_HOST_2D` only as a
+  fallback, `GET_DISPLAY_INFO`, `GET_EDID`) decoded on the **control queue** — a new
+  command class the current decoder does not have.
+
+### 20.3 The transport contract to qualify against
+
+Both ends must match stock behaviour with no custom ICD/firmware/daemon:
+
+- **virtio-mmio (RISC-V lane):** real SHM LEN/BASE discovery (fix the all-ones),
+  queue notify/used-ring/ISR (`uir`), capset `GET_CAPSET_INFO`/`GET_CAPSET` for Venus
+  id 4, `RESOURCE_CREATE_BLOB`/`MAP_BLOB`/`context_init`, feature words
+  `{0,3,4}`+`{32=VERSION_1,40=RING_RESET}` written back exactly (the probe already
+  does this register-for-register).
+- **virtio-pci (x86 lane):** the same virtio-gpu protocol over a modern PCI
+  transport — BARs, MSI-X, DMA, reset — so the *same* Venus command stream runs on a
+  PC. This is a transport swap, not a protocol change; the device-side Venus engines
+  are transport-agnostic behind `vgsys`.
+- **Honesty rule (unchanged):** an official Ubuntu baseline that cannot expose a
+  required feature stays BLOCKED — no cap masking, no SkipVulkanProfileCheck, no
+  custom ICD to make an app start.
+
+### 20.4 Performance notes on the boundary
+
+- **Ingress overhead is per-command, not per-pixel.** A frame's cost is dominated by
+  device work (§12), but the *fixed* per-submit overhead (virtqueue post, doorbell,
+  used-ring poll, ObjTab resolution ~3,000 cy/command) is what makes small draws and
+  the `api.*` CTS groups slow in wall time — FP1/FP2/TP9 and the transport doorbell
+  path are the reducers. For large frames it amortises to noise.
+- **Egress must be O(1) per frame.** The blob-backed pointer flip makes present
+  constant-cost; anything that copies the framebuffer per frame (a `TRANSFER_TO_HOST`
+  fallback) reintroduces a full-frame memory pass and breaks the §12.2 budget. The
+  flush is the only unavoidable per-frame egress cost.
+- **Fence/semaphore round-trips are latency, not throughput.** They gate CPU/GPU
+  overlap; timeline semaphores (plan E, 1.2) and a real free-running timestamp
+  counter (FP12) reduce the poll/serialisation stalls on both sides of the boundary.
+
+### 20.5 Gates and verification
+
+- **Ingress gate:** a stock guest (Ubuntu kernel/Mesa/loader, no custom ICD)
+  enumerates Venus, negotiates the capset and SHM region, and runs `vkcompute` +
+  `vkQueueSubmit`→fence→`vkQueueWaitIdle` end-to-end — the `sys-venus`/`cva6-venus`
+  benches cover the device side; the missing evidence is the *stock transport* arm.
+- **Egress gate (W9/FP13):** `wsi.*` CTS groups on x86-64 virtio-pci — acquire,
+  present, resize, external sync — with the blob-backed pointer flip measured at
+  flush-only cost. Offscreen output is qualified separately from visible
+  resize/present (the `apu-graphics.md` deployment matrix already separates these).
+- **Ordering:** ingress transport qualification (SHM mapping, capset, blob) is a
+  *prerequisite* for meaningful guest CTS runs — it is upstream of every device
+  group. Egress/presentation is downstream of raster correctness and can trail it,
+  but both are release blockers, not optional.
+
+## 21. Memory subsystem — device VA space, BDA and the GPU-VM decision (2026-11-21)
+
+§13 row 6 flags the largest *architectural* gap that is not a throughput rung: the
+device has **no GPU virtual memory**. This section records what exists, what Vulkan
+1.4 actually requires, and a phased path — because "scalable memory/VM/cache
+infrastructure" is an explicit goal and the answer is *not* "build a full MMU now."
+
+### 21.1 What exists today (verified in RTL)
+
+The memory model is **physical aperture, no translation:**
+
+- `g6lc_apu_vgpages` is a first-fit **physical** page allocator over the blob-SHM
+  aperture window (`ALLOC`/`ALLOC_AT`/`ALLOC_HI`/`FREE`, window-relative byte
+  offsets). It backs both virtio-gpu blobs (`vgctl`) and `vkAllocateMemory` device
+  memory (`vnfront`) — one pool, physical offsets only.
+- Descriptor records are 32-byte aperture records; a buffer descriptor's `base` is
+  the **physical aperture offset** of the bound memory (`abs base = resolved
+  mem.base + off`, `g6lc_apu_sh_pkg`). Images carry the same physical base + a
+  per-mip layout the texture walk recomputes.
+- `g6lc_apu_apmem` classifies `dom=0` (absolute guest byte address — virtqueue
+  control) vs `dom=1` (aperture-relative offset → `ap_base + offset` → AXI). There
+  is no third domain and no VA→PA step anywhere on the path.
+- On-chip carve-outs (R3 record store 64 KiB, TP5 vertex cache) are `tc_sram`
+  windows inside the same aperture address space, served before AXI.
+
+Net: a "device address" *is* a physical aperture offset. The guest driver places
+memory and the device dereferences it directly. This is a legitimate *simplified*
+Vulkan memory model — it is why bounded Venus compute and the current graphics
+vectors pass without any MMU.
+
+### 21.2 What Vulkan 1.4 requires vs. what is deferrable
+
+| Requirement | Needs a GPU-VM? | Honest near-term answer |
+|---|---|---|
+| `vkAllocateMemory`/`vkBind*Memory`, host-visible + device-local heaps | No — physical aperture allocation already models this | Works today within the aperture |
+| `bufferDeviceAddress` (BDA) for SSBO/UBO/descriptor-buffer/bindless-by-address | No — BDA can *be* the aperture offset | Cheap; expose the existing base |
+| Descriptor indexing / `VK_EXT_descriptor_indexing` | No — descriptors already live in aperture memory; indexing is a lookup, not a VA | Width/binding work (§10.1), not VM |
+| Sparse residency (`VK_EXT_sparse_*`, `VK_KHR_maintenance*`) | **Yes** — unbound VA regions need a page table | Deferrable; not a 1.4 *required* feature |
+| Driver-chosen device VAs, aliasing, remap | **Yes** | Deferrable for CTS; needed for real drivers that assume VA |
+| Heap > aperture (real games need GB) | Effectively yes — or a much larger aperture | **The real driver** — see §21.4 |
+| Coherent/host-visible caching | No — needs defined flush/invalidate, not VA | Cache-op contract, orthogonal to VM |
+
+The decisive point: **nothing in Vulkan 1.4 *requires* a GPU-VM.** Sparse and
+maintainance are extensions; core bind semantics map onto physical allocation. The
+VM becomes necessary for *scale* (heap larger than the aperture) and for drivers
+that assume a VA space — both real, but neither blocks the near-term CTS ladder.
+
+### 21.3 Phased path
+
+- **M0 — honest physical model (now).** Keep aperture-offset addressing. Make the
+  aperture/heap sizing an explicit SoC decision (plan W5) and stop advertising
+  `maxMemoryAllocationCount`/heap sizes the 128 MiB window cannot honour. This is
+  capability honesty (workstream A), not a perf change.
+- **M1 — BDA (cheap, high value).** Expose `bufferDeviceAddress` = the aperture
+  offset the descriptor already stores. Enables SSBO/UBO, descriptor buffers and
+  bindless-by-address *without* any MMU — the address is already unique and stable.
+  Locus: the descriptor-record `base` field + a `VkPhysicalDeviceBufferDeviceAddress`
+  feature bit + the shader `OpAccessChain`/load path that already resolves
+  `mem.base`. Small, verifiable, unblocks a real feature family.
+- **M2 — GPU-VM (the big one, gated).** A real VA→PA translation for the case the
+  aperture cannot serve. Design sketch, not a commitment:
+  - *Translation point:* the cleanest seam is a new `dom=2` (device-VA) in
+    `apmem`'s classifier, OR a dedicated `g6lc_apu_mmu` the requesters consult
+    before issuing `dom=1`. Per-access page-table walks are too slow for the LSU
+    hot path, so a **TLB in `tc_sram`** (tag → aperture offset, ~4 KiB pages) is
+    mandatory; misses walk the guest-owned page table through a low-priority
+    memory port.
+  - *Descriptor format:* buffer/image descriptors would carry a device-VA instead
+    of a physical base; every consumer (shwave LSU, texture, xfer, rast vertex/
+    index fetch, FP9 sampler) translates. This is the wide blast radius — the same
+    records §10.1 already touches for width.
+  - *Page-table storage:* guest physical memory owned by the driver; the walker
+    reads it via `apmem` (recursive) or a dedicated port. Invalidation on
+    `vkQueueSubmit`/memory-bind/barrier.
+  - *Coherence:* VM and caching are orthogonal — host-visible cache ops
+    (flush/invalidate) are needed regardless and should land with M1, not wait for M2.
+- **M3 — coherent L2 / larger heaps.** Only if profiling shows the flat aperture +
+  AXI path is the wall. The `tc_sram` carve-outs already prove the on-chip-window
+  pattern; a coherent L2 is a separate scalability study.
+
+### 21.4 The real driver is aperture size, not the MMU
+
+The single hardest constraint is not virtualisation — it is that **`APU_SHM_BYTES`
+is 128 MiB (64 MiB guest-visible)** while a single 7680×7680 RGBA8 attachment is
+225 MiB (§10.1). No amount of VA translation fixes a framebuffer that does not fit.
+So the *ordering* inside the memory track should be:
+
+1. **W5 aperture/heap sizing** (SoC decision) — raise the mappable window or adopt
+   a tiled/host-backed framebuffer model. This gates *any* real-resolution frame.
+2. **M1 BDA** — cheap feature unlock, independent of aperture size.
+3. **M2 GPU-VM** — when sparse/aliasing/driver-VA or heap-beyond-aperture is
+   actually required by a target workload, designed against the then-current
+   aperture model.
+4. **M3 coherent L2** — profiling-driven, last.
+
+### 21.5 Gates and verification
+
+- **M0:** profile `maxMemoryAllocationCount`/heap fields match the elaborated
+  aperture; a vector that allocates past the window returns `VK_ERROR_OUT_OF_DEVICE_MEMORY`
+  cleanly (no wrap).
+- **M1:** a `bufferDeviceAddress` vector — SSBO store→load through the BDA equals
+  the descriptor path bit-exact; descriptor-buffer and one bindless-by-address case.
+- **M2:** before any RTL — a written page-table format + TLB hit/miss budget +
+  invalidation rules reviewed against `vkBind*Memory`/sparse/`memoryBarrier` CTS
+  groups; then `sparse.*`/`descriptorBuffer`/`maintenance` vectors.
+- **Honesty rule (unchanged):** do not advertise sparse/BDA/large-heap features the
+  elaborated aperture and descriptor format cannot honour; capability honesty is
+  workstream A and precedes every width here.
+
+**Bottom line:** the memory subsystem is a *decision*, not a missing block. The
+physical-aperture model is correct for the current scope; BDA is the cheap next
+unlock; the GPU-VM is real but gated on aperture scale and driver-VA needs, and the
+aperture-size decision (W5) is the true first domino.
+
+## 22. Synchronization — fences, events, timeline semaphores and sparse (2026-11-21)
+
+§13 row 4 flags sync as "partial." Verified against `vn_command_set.txt` (157
+entries) and the engine RTL, the picture is sharper than "partial": **Vulkan 1.1
+synchronization is substantially implemented; what is missing is the 1.2+
+timeline/semaphore2 surface, sparse binding, and a truthful timestamp.** A frame
+cannot retire or order work correctly without this, so it is correctness, not
+throughput — but it shares machinery with the performance path (`doneq`, fences).
+
+### 22.1 What exists (verified)
+
+- **Submission/completion:** `vkQueueSubmit`, `vkQueueWaitIdle`,
+  `vkDeviceWaitIdle`; the device tracks outstanding work in `outst_q` decremented
+  per `work_done_i` (cmdexec), completions queued through `g6lc_apu_doneq` because
+  engine `done_o` pulses are single-cycle and concurrent.
+- **Fences:** full 1.1 API (`vkCreateFence`/`ResetFences`/`GetFenceStatus`/
+  `WaitForFences`/`DestroyFence`); device side `fence_pulse_o`/`fence_id_o`/
+  `fence_ring_o` from the chain-completion path, 16-slot done queue.
+- **Events:** `vkCreateEvent`/`SetEvent`/`ResetEvent`/`GetEventStatus` +
+  `vkCmdSetEvent`/`ResetEvent`/`WaitEvents`; device side writes ObjTab event-state
+  bit 0, and `WaitEvents` drains then polls `state[0]` every 64 cycles.
+- **Barriers:** `vkCmdPipelineBarrier`; cmdexec has barrier-drain and
+  SETSTATE/WaitEvents states.
+- **Timestamps (form only):** `vkCmdWriteTimestamp` + `vkCmdWriteTimestamp2` decode,
+  but §10.1/§13 record the value path reports **zero valid bits** — no real counter.
+- **External sync queries:** `vkGetPhysicalDeviceExternalFenceProperties` /
+  `…SemaphoreProperties` present (needed for WSI, §20.2).
+
+### 22.2 What is absent (verified absent from the decoder)
+
+- **Timeline semaphores:** `vkSignalSemaphore`, `vkWaitSemaphores`,
+  `vkGetSemaphoreCounterValue` — none present. A timeline semaphore is a
+  monotonic 64-bit counter the device increments on signal and the host polls;
+  it needs (a) a device-side counter value per semaphore and (b) the signal/wait
+  submission ops.
+- **synchronization2** (`VK_KHR_synchronization2`, core in 1.3): `vkQueueSubmit2`,
+  `vkCmdPipelineBarrier2`, `vkCmdSetEvent2`, `vkCmdWaitEvents2`,
+  `vkCmdResetEvent2` — all absent (only `vkCmdWriteTimestamp2` exists). These are
+  the entry forms modern drivers/Mesa emit.
+- **Sparse binding:** `vkQueueBindSparse`, `vkCmdBindSparse*` — absent. Sparse
+  residency needs the GPU-VM page-table update path (§21 M2), so it is gated on
+  that, not independent.
+- **Real timestamp:** a free-running counter with a truthful
+  `timestampPeriod` (FP12) — currently the decode exists but reports no valid
+  bits.
+
+### 22.3 Implementation contracts
+
+- **S-TL — timeline semaphores.** A monotonic `timeline_cnt` (the same free-running
+  counter FP12 needs — share it). Device state: per-semaphore `{counter, wait_mask}`
+  in ObjTab or a small table; `vkSignalSemaphore`/`vkWaitSemaphores` are *submission*
+  ops that enqueue a signal/wait against the counter, resolved through the existing
+  `doneq`/`outst_q` completion path (a signal fires when its batch drains; a wait
+  blocks until `counter >= value`). `vkGetSemaphoreCounterValue` reads the counter.
+  Depends on FP12's clock; gate on `timelineSemaphore` feature + `*2` submit.
+- **S-S2 — synchronization2 entry forms.** The `*2` commands carry
+  `Vk*Synchronization2` structs (semaphore/fence/event payloads with stage/access
+  masks). Per plan P4 they are *entry forms* that write the same per-draw/per-submit
+  state record the 1.1 forms already write — so this is decoder-table + payload
+  decode work (`vn_command_set.txt` regeneration, §10.1 entry-forms row), reusing
+  the existing barrier/event/fence device states. Land in few large table revisions.
+- **S-SP — sparse binding.** `vkQueueBindSparse` enqueues page-bind/unbind ops that
+  update the GPU-VM page table (§21 M2) and invalidate the TLB. Hard-gated on M2 —
+  without a VA space there is nothing to sparsely bind. Do not advertise
+  `sparseBinding`/`sparseResidency*` until M2 + this land together.
+- **S-TS — timestamp counter.** A real free-running counter clocked at a known
+  rate; `timestampPeriod` reported truthfully; `vkCmdWriteTimestamp`/`2` sample it
+  into the query pool. Needs the device clock (FP12); the query-pool readback path
+  (`vkGetQueryPoolResults`) already exists.
+
+### 22.4 Ordering and dependencies
+
+```
+FP12 clock ──► S-TS timestamp counter ──► S-TL timeline value source
+                                        ▲
+S-S2 entry forms (decoder) ─────────────┤  (independent of VM)
+                                        │
+§21 M2 GPU-VM ──► TLB/page-table ──► S-SP sparse bind
+```
+
+- S-TS and S-TL share the counter — land the clock/counter once.
+- S-S2 is decoder-surface work, independent of the VM; it unblocks modern drivers
+  emitting `*2`/`Submit2` even before timeline semaphores function.
+- S-SP is strictly downstream of §21 M2 — sequence it there, not here.
+- All are *correctness/feature* work (plan E/C), not the §19 throughput critical
+  path — they ride alongside, gated on their own vectors (`synchronization2.*`,
+  `semaphore.*`, `sparse.*`, `query.timestamp.*` CTS groups).
+
+**Bottom line:** 1.1 synchronization is done; the gap is a bounded, well-defined
+set — a shared timestamp/timeline counter (FP12), the `*2`/Submit2 decoder surface
+(P4), and sparse (gated on the §21 VM). None is on the §19 throughput critical
+path, but all are required for "fully featured" 1.3/1.4 and for the CTS groups that
+exercise them.
+
+## 23. Descriptors — sets, bindings, indexing and push descriptors (2026-11-21)
+
+§13 row 5 flags descriptors as "partial." Verified against `g6lc_apu_sh_pkg` and
+`vn_command_set.txt`: the F5 **memory-resident descriptor model is already the
+right architecture** — 32-byte records in aperture memory resolved through a
+per-set binding-row CAM plus dynamic offsets. What is missing is *width* (set and
+binding counts) and *indexing features* (descriptor indexing/bindless, push
+descriptors, descriptor buffers). This is the last major feature aspect without a
+contract; it completes §13's coverage alongside §21 (memory) and §22 (sync).
+
+### 23.1 What exists (verified)
+
+- **Memory-resident records:** one descriptor = `APU_DESC_BYTES`=32 aperture bytes
+  at `set_base[s] + off32*32 + array_index*32`. Buffer/image/sampler records carry
+  resolved aperture bases — the same physical-address model as §21.
+- **Resolution path:** `(set,binding,idx)` → `boff` binding-row CAM → fetch record
+  → `APU_DESC_CACHE`=8-entry dispatch-scoped LSU record cache. Dynamic offsets via
+  `dyn_off[set][dynbase+idx]`.
+- **Constants:** `APU_DESC_SETS`=4, `APU_DESC_BND`=16 binding rows/set (CAM),
+  `APU_DESC_DYN`=16 dynamic slots/set.
+- **API surface (decoder):** `vkCreate/Destroy/ResetDescriptorPool`,
+  `Allocate/FreeDescriptorSets`, `UpdateDescriptorSets`,
+  `Create/DestroyDescriptorSetLayout`, `vkCmdBindDescriptorSets`,
+  `vkCmdPushConstants` — the 1.1 descriptor path is complete.
+
+### 23.2 What is absent or width-bound
+
+- **`maxBoundDescriptorSets` 4 → 7 (UE RT wants 9).** `APU_DESC_SETS`=4 sizes
+  `set_base`, `dyn_off`, `boff`, the wave `dsc_set_q[1:0]` and cmdexec's
+  `dset[3:0]`/`dyn[3:0]` snapshot together. §10.1: at 9 sets the ~5.3 kbit sideband
+  should become a small SRAM or per-set fetch, not widened flops.
+- **`maxPerStageResources` 200 / per-set 90·96·144 vs `APU_DESC_BND`=16.** The
+  binding-row CAM holds only 16 rows/set; real descriptor-set layouts have far
+  more bindings. Rows must move to memory with a per-set lookup (same change as the
+  set count — one binding-table redesign serves both).
+- **Descriptor indexing / bindless** (`VK_EXT_descriptor_indexing`,
+  `runtimeDescriptorArray`, `updateAfterBind`, non-uniform indexing): the
+  `(set,binding,idx)` resolution already indexes `array_index`; the gaps are
+  *feature flags + legality* (which types may be runtime-indexed, update-after-bind
+  ordering vs. in-flight draws) and **descriptor buffers** — descriptors addressed
+  by `bufferDeviceAddress`, which needs §21 M1 BDA.
+- **Push descriptors** (`vkCmdPushDescriptorSet*` KHR/META): absent from the
+  decoder. They are *entry forms* writing the same bound-set state `CmdBind…`
+  writes — plan P4 decoder-table work plus a push-block path (the push-constant
+  block already exists as the model).
+- **Push-constant width** 128→256 B: `vkCmdPushConstants` decodes, but
+  `push_q[32]`/`push_i[1023:0]` is 128 B; §10.1 moves it to the record store (TP4)
+  as 64 words — a width change riding TP4, not a new feature.
+
+### 23.3 Implementation contracts
+
+- **D-SETS — set-count widening.** Make `APU_DESC_SETS` a package parameter that
+  sizes `set_base`/`dyn_off`/`boff`/`dsc_set_q`/`dset`/`dyn` *together* (never
+  independently — §10.1's warning). At ≤8 sets keep the flop sideband; at 9 move
+  `boff`+`set_base` to a `tc_sram` table fetched per set. Gate: a vector binding
+  7 then 9 sets with per-set distinct records, bit-exact vs. the 4-set golden.
+- **D-BIND — memory-backed binding table.** Replace the 16-entry `boff` CAM with a
+  memory-resident per-set binding directory (the same aperture record space
+  descriptors already use), so `maxPerStageResources`=200 and per-set limits are
+  honoured. This is the prerequisite for descriptor indexing at scale and for UE-
+  class layouts. Locus: `g6lc_apu_sh_pkg` `apu_sh_bindrow_t`/`boff` → a table the
+  LSU walks; keep the 8-entry record cache as the hot path.
+- **D-IDX — descriptor indexing/bindless.** Advertise only after D-BIND: nonuniform
+  indexing is already expressible through `array_index`; add the feature bits
+  (`runtimeDescriptorArray`, `descriptorBindingPartiallyBound`,
+  `updateAfterBind`), the legality checks in `vkCreateDescriptorSetLayout`, and —
+  for `updateAfterBind` — the ordering rule that an update cannot race an in-flight
+  draw reading the same set (needs the §22 fence/event machinery). **Descriptor
+  buffers** (`VK_EXT_descriptor_buffer`) additionally need §21 M1 BDA — gate that
+  sub-feature on M1, not on D-IDX.
+- **D-PUSH — push descriptors.** Add `vkCmdPushDescriptorSet*` to
+  `vn_command_set.txt`; the device path reuses the bound-set record `CmdBind…`
+  produces (a push writes a transient overlay the next draw consumes, scoped to
+  the command buffer). Decoder-table regen per plan P4; small device state.
+- **D-PC — push-constant width.** Ride TP4: `push_q`/`push_i`→64 words in the
+  record store; profile `maxPushConstantsSize`=256 follows the elaborated width.
+
+### 23.4 Ordering and dependencies
+
+```
+D-BIND (binding table→memory) ──► D-SETS can widen sideband cheaply
+        │                              │
+        └──► D-IDX (indexing/bindless)  └──► UE-class layouts unblocked
+                     │
+        §21 M1 BDA ─┴──► descriptor_buffer sub-feature only
+D-PUSH (decoder) and D-PC (TP4) are independent entry-form/width riders.
+```
+
+- D-BIND is the keystone: it unblocks both the set-count sideband and indexing at
+  scale, and it is pure descriptor-table work (no VM, no new engine).
+- D-IDX's `updateAfterBind` correctness leans on §22 fences/events — sequence the
+  legality+ordering proof with S-TL/S-S2, not before.
+- None of D-* is on the §19 throughput critical path; they are feature/width work
+  (plan B/P7) that determines whether real descriptor-heavy shaders (UE RT) run.
+
+**Bottom line:** the descriptor *architecture* is already right (memory-resident
+records + CAM resolution). The gap is width (sets 4→9, bindings 16→memory) and the
+indexing/push-descriptor feature surface. D-BIND is the keystone contract; D-IDX
+partially waits on §21 M1 (descriptor buffers) and §22 (update-after-bind ordering);
+D-PUSH/D-PC are independent decoder/width riders. With §21 and §22, every major
+Vulkan 1.4 frame aspect now has an implementation contract or decision.

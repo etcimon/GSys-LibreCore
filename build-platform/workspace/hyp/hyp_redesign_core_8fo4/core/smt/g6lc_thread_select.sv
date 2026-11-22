@@ -355,16 +355,28 @@ module g6lc_thread_select
     always_comb begin : p_gate
       // I4bc: delay only when IQ has a head and ID is empty (tail sitting
       // in IQ). Do not wait on fetch_valid alone (I4bb) or I$ present (I4bd).
+      // uniss_pend bounds the wait at SMT_UNISS_WAIT. It must accumulate across
+      // the sparse do_pol (fetch_fire) re-assertions and brief iqv/idu flicker:
+      // the old form reset the counter every !do_pol cycle so the bound never
+      // fired and the quantum switch starved the peer (mc_smt_sibling_both_present,
+      // hart1 resident=0). Once a do_pol-blocked episode starts the count is held
+      // until the switch resolves, flush, or hold -- the head-state term only
+      // gates whether a *new* delay is granted, never whether the bound is kept.
       uniss_pend_d = '0;
       do_g1 = do_pol; rm_g1 = rm_pol; rq_g1 = rq_pol; rs_g1 = rs_pol;
       ry_g1 = ry_pol;
-      if (do_pol && iq_valid_i && !id_uniss_i &&
-          (uniss_pend_q < SMT_UNISS_WAIT) && !hold_i) begin
-        do_g1        = 1'b0;
-        rm_g1        = 1'b0;
-        rq_g1        = 1'b0;
-        rs_g1        = 1'b0;
-        uniss_pend_d = uniss_pend_q + 6'd1;
+      if (do_pol && iq_valid_i && !id_uniss_i && !hold_i) begin
+        if (uniss_pend_q < SMT_UNISS_WAIT) begin
+          do_g1        = 1'b0;
+          rm_g1        = 1'b0;
+          rq_g1        = 1'b0;
+          rs_g1        = 1'b0;
+          uniss_pend_d = uniss_pend_q + 6'd1;
+        end else begin
+          uniss_pend_d = SMT_UNISS_WAIT;
+        end
+      end else if (!flush_i && !hold_i && (uniss_pend_q != '0)) begin
+        uniss_pend_d = uniss_pend_q;
       end
 
       // I4bg: after lui/addi t0, suppress *quantum/starve* only so one more
@@ -517,7 +529,17 @@ module g6lc_thread_select
                                 ? HID_W'(int'(next_peer) + 1 - NH)
                                 : HID_W'(int'(next_peer) + 1))
                            : rr_ptr_q;
-    assign quantum_d   = (flush_i || hold_i || do_switch) ? '0
+    // quantum additionally cleared by hold/do_switch. flush_i is deliberately
+    // NOT a reset: the frontend flushes on routine self-inflicted events
+    // (FENCE/FENCE.I/SFENCE/HFENCE/CBO and branch mispredicts) that have nothing
+    // to do with SMT fairness. Counting them as quantum resets made Q_MAX
+    // unreachable in fence/mispredict-dense code -- the resident hart never
+    // yielded and the ready SMT sibling starved (mc_all_harts_present: hart0's
+    // per-pass `fence` held quantum_q<=~29 << 4096 -> do_pol never fired ->
+    // hart1 resident=0). During the flush fetch_fire_i is low so the count
+    // simply holds; it resumes on the next fetch grant. Only a genuine
+    // handoff/hold boundary (do_switch, hold_i) earns a fresh quantum.
+    assign quantum_d   = (hold_i || do_switch) ? '0
                        : !fetch_fire_i ? quantum_q
                        : (quantum_q >= Q_W'(Q_MAX - 1)) ? Q_W'(Q_MAX)
                                                         : quantum_q + 1'b1;
@@ -611,7 +633,10 @@ module g6lc_thread_select
         quantum_q        <= quantum_d;
         activate_age_q   <= activate_age_d;
         stall_age_q      <= stall_age_d;
-        uniss_pend_q     <= uniss_pend_d;
+        // Reset the unissued-head wait on an actual switch so the next resident
+        // hart gets a fresh SMT_UNISS_WAIT grace instead of inheriting a
+        // saturated count that would disable the I4bc delay entirely.
+        uniss_pend_q     <= do_switch ? '0 : uniss_pend_d;
         t0_extra_q       <= t0_extra_d;
         t0_bank_q        <= do_switch & t0_extra_q;
         switch_q         <= do_switch;
@@ -641,6 +666,62 @@ module g6lc_thread_select
     assign drain_forced_o      = 1'b0;
     assign drain_force_pc_o    = '0;
 `endif
+
+    //pragma translate_off
+`ifdef G6LC_FETCH_B
+    // Quantum/switch decision probe (+smt_quant_probe, windowed by
+    // +smt_quant_lo/hi). Captures the decision chain smt_sched does NOT expose
+    // -- do_pol/do_g1/do_switch, rq_* reason bits, quantum_q, fetch_fire_i,
+    // found_peer, uniss_pend_q -- to isolate why an SMT_RR quantum switch never
+    // requests a drain while a ready peer waits. `do_switch` is consumed into
+    // drain_pending_d inside p_drain (cleared to 0 in the FETCH_B else leg), so
+    // the intermediate do_pol/do_g1/rq_* nets carry the pre-consumption truth.
+    bit smt_quant_probe;
+    int unsigned smt_quant_cycle;
+    int unsigned smt_quant_ff, smt_quant_dp;
+    int unsigned smt_quant_lo, smt_quant_hi;
+    initial begin
+      smt_quant_probe = $test$plusargs("smt_quant_probe");
+      smt_quant_lo = 0;
+      smt_quant_hi = 32'hFFFF_FFFF;
+      void'($value$plusargs("smt_quant_lo=%0d", smt_quant_lo));
+      void'($value$plusargs("smt_quant_hi=%0d", smt_quant_hi));
+      smt_quant_cycle = 0; smt_quant_ff = 0; smt_quant_dp = 0;
+    end
+    always @(posedge clk_i) begin
+      if (!rst_ni) begin
+        smt_quant_cycle <= 0; smt_quant_ff <= 0; smt_quant_dp <= 0;
+      end else if (smt_quant_probe) begin
+        smt_quant_cycle <= smt_quant_cycle + 1;
+        if (smt_quant_cycle >= smt_quant_lo && smt_quant_cycle <= smt_quant_hi) begin
+          if (fetch_fire_i) smt_quant_ff <= smt_quant_ff + 1;
+          // Event A: raw SMT_RR quantum predicate asserted (do_pol+r_q) but the
+          // gated decision did not reach a drain request -> a suppressor ate it.
+          if (do_pol && rq_pol) begin
+            $display("[smt-quant] POL cyc=%0d act=%0d q=%0d ff=%b fp=%b cmt=%b iss=%b g1=%b rq1=%b ready=%b iqv=%b idu=%b uniss=%0d t0x=%b trap=%b fl=%b hold=%b dp=%0d",
+                     smt_quant_cycle, active_q, quantum_q, fetch_fire_i, found_peer,
+                     commit_i, issue_fire_i, do_g1, rq_g1, hart_ready_i, iq_valid_i,
+                     id_uniss_i, uniss_pend_q, t0_extra_q, trap_hold_i, flush_i,
+                     hold_i, drain_pending_q);
+          end
+          // Event B: gated decision survived to a drain request.
+          if (drain_pending_d && !drain_pending_q) begin
+            smt_quant_dp <= smt_quant_dp + 1;
+            $display("[smt-quant] DP cyc=%0d act=%0d peer=%0d reason=%b q=%0d",
+                     smt_quant_cycle, active_q, drain_peer_d, drain_reason_d, quantum_q);
+          end
+          // Periodic snapshot (every 1024 cyc): quantum trajectory + fire rates.
+          if ((smt_quant_cycle & 12'h3FF) == 12'h000)
+            $display("[smt-quant] SM cyc=%0d act=%0d q=%0d pol=%b/%b g1=%b/%b sw=%b rq=%b ff=%b fp=%b cmt=%b iss=%b ready=%b iqv=%b idu=%b uniss=%0d dp=%0d swq=%0d ffN=%0d dpN=%0d",
+                     smt_quant_cycle, active_q, quantum_q, do_pol, rq_pol, do_g1, rq_g1,
+                     do_switch, reason_quantum, fetch_fire_i, found_peer, commit_i,
+                     issue_fire_i, hart_ready_i, iq_valid_i, id_uniss_i, uniss_pend_q,
+                     drain_pending_q, switch_q, smt_quant_ff, smt_quant_dp);
+        end
+      end
+    end
+`endif
+    //pragma translate_on
 
     //pragma translate_off
 `ifdef G6LC_FETCH_B

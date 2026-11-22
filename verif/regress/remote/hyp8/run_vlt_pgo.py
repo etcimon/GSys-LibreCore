@@ -39,7 +39,7 @@ def verilate(root, out):
     env = dict(os.environ, CVA6_REPO_DIR=str(root), VERILATOR_FLAVOUR='g6lc',
                VLT_HOME=home, VERILATOR_ROOT=vroot,
                SOFT_LADDER_BUILD_TARGET=os.environ.get('HYP8_TARGET', 'g6lc64_hyp8_mc'),
-               SOFT_LADDER_VERILATOR_THREADS=os.environ.get('HYP8_THREADS', '4'),
+               SOFT_LADDER_VERILATOR_THREADS=os.environ.get('HYP8_THREADS', '2'),
                SOFT_LADDER_VERLIB=str(mdir), HYP8_BUILD_VERILATE_ONLY='1')
     t0 = time.time()
     ru0 = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -78,7 +78,7 @@ def build(root, out):
     env = dict(os.environ, CVA6_REPO_DIR=str(root), VERILATOR_FLAVOUR='g6lc',
                VLT_HOME=home, VERILATOR_ROOT=vroot,
                SOFT_LADDER_BUILD_TARGET=os.environ.get('HYP8_TARGET', 'g6lc64_hyp8_mc'),
-               SOFT_LADDER_VERILATOR_THREADS=os.environ.get('HYP8_THREADS', '4'),
+               SOFT_LADDER_VERILATOR_THREADS=os.environ.get('HYP8_THREADS', '2'),
                SOFT_LADDER_BUILD_JOBS=os.environ.get('JOBS', '4'),
                SOFT_LADDER_VERLIB=str(out / 'mdir'),
                SPIKE_INSTALL_DIR=os.environ.get('SPIKE_INSTALL_DIR', '/opt/testharness/toolchains/spike'),

@@ -86,21 +86,25 @@ case "$TARGET" in
     TARGET_VLT_DEFS=""
     TARGET_CFLAGS="-DG6LC_TB_OOO"
     TARGET_HARTS=1
+    TARGET_NCORES=1
     ;;
   g6lc64_hyp8_smt2)
     TARGET_VLT_DEFS="-DG6LC_HYP8_SMT2"
     TARGET_CFLAGS="-DG6LC_TB_BANKED -DG6LC_TB_OOO"
     TARGET_HARTS=2
+    TARGET_NCORES=1
     ;;
   g6lc64_hyp8_l3)
     TARGET_VLT_DEFS="-DG6LC_HYP8_L3"
     TARGET_CFLAGS="-DG6LC_TB_OOO"
     TARGET_HARTS=1
+    TARGET_NCORES=1
     ;;
   g6lc64_hyp8_deep)
     TARGET_VLT_DEFS="-DG6LC_HYP8_DEEP"
     TARGET_CFLAGS="-DG6LC_TB_OOO"
     TARGET_HARTS=1
+    TARGET_NCORES=1
     ;;
   g6lc64_hyp8_mmu_staged)
     # r127: the MMU staging the Hyp8 profile declares (TlbStages=3,
@@ -108,24 +112,41 @@ case "$TARGET" in
     TARGET_VLT_DEFS="-DG6LC_HYP8_MMU_STAGED"
     TARGET_CFLAGS="-DG6LC_TB_OOO"
     TARGET_HARTS=1
+    TARGET_NCORES=1
     ;;
   g6lc64_hyp8_iqsteer2)
     # r127 B2: early (registered) IQ bank steer, IqSteerStages=2.
     TARGET_VLT_DEFS="-DG6LC_HYP8_IQSTEER2"
     TARGET_CFLAGS="-DG6LC_TB_OOO"
     TARGET_HARTS=1
+    TARGET_NCORES=1
+    ;;
+  g6lc64_hyp8_aes3)
+    # r127 AES: 3-stage AES/SHA pipe, AesStages=3. Composes with the
+    # DEEP/MMU_STAGED/IQSTEER2 config seams; default AesStages==1 is
+    # bit/cycle-identical. Single-hart qualification target first.
+    TARGET_VLT_DEFS="-DG6LC_HYP8_AES3"
+    TARGET_CFLAGS="-DG6LC_TB_OOO"
+    TARGET_HARTS=1
+    TARGET_NCORES=1
     ;;
   g6lc64_hyp8_mc)
     TARGET_VLT_DEFS="-DG6LC_HYP8_MC"
     TARGET_CFLAGS="-DG6LC_TB_BANKED -DG6LC_TB_OOO"
     TARGET_HARTS=8
+    TARGET_NCORES=4
     FLIST_MC="verif/regress/remote/hyp8/Flist.hyp8_mc_sim"
     ;;
   *)
-    echo "[hyp8-build] usage: SOFT_LADDER_BUILD_TARGET=g6lc64_hyp8|g6lc64_hyp8_smt2|g6lc64_hyp8_l3|g6lc64_hyp8_mc|g6lc64_hyp8_deep|g6lc64_hyp8_mmu_staged $0 hyp8 (got '${TARGET:-<unset>}')" >&2
+    echo "[hyp8-build] usage: SOFT_LADDER_BUILD_TARGET=g6lc64_hyp8|g6lc64_hyp8_smt2|g6lc64_hyp8_l3|g6lc64_hyp8_mc|g6lc64_hyp8_deep|g6lc64_hyp8_mmu_staged|g6lc64_hyp8_iqsteer2|g6lc64_hyp8_aes3 $0 hyp8 (got '${TARGET:-<unset>}')" >&2
     exit 2
     ;;
 esac
+# G6LC_TB_NCORES: the partitioned (module-class) testbench reaches core c
+# through g6lc_tb_core_pi, whose member select names every gen_core__BRA__N
+# the cluster emits. Single-core targets (NrCores=1) have only gen_core[0];
+# without the bound the C++ references gen_core[1..3] and fails to compile.
+TARGET_CFLAGS="$TARGET_CFLAGS -DG6LC_TB_NCORES=$TARGET_NCORES"
 JOBS="${SOFT_LADDER_BUILD_JOBS:-$( (command -v nproc >/dev/null && nproc) || echo 8)}"
 if [[ "$JOBS" == "$(nproc)" ]] || [[ "$JOBS" == "\$(nproc)" ]]; then
   JOBS=$( (command -v nproc >/dev/null && nproc) || echo 8)
@@ -257,7 +278,7 @@ fi
 [[ -n "$VERILATOR" ]] || { log "no verilator found"; exit 1; }
 export VERILATOR_ROOT="${VERILATOR_ROOT:-$VLT_HOME/share/verilator}"
 [[ -d "$VERILATOR_ROOT" ]] || export VERILATOR_ROOT="$VLT_HOME"
-log "verilator: $VERILATOR flavour=$VLT_FLAVOUR (root=$VERILATOR_ROOT threads=$VTHREADS jobs=$JOBS)"
+log "verilator: $VERILATOR flavour=$VLT_FLAVOUR (root=$VERILATOR_ROOT vthreads=$VTHREADS jobs=$JOBS)"
 
 # --- split-loops control (unroll-before-split needs split_var targets) -------
 SPLIT_VLT_SRC="$ROOT/build-platform/scripts/verilator-split-loops.vlt"
@@ -316,6 +337,14 @@ if [[ -z "${HYP8_BUILD_MARCH:-}" ]]; then
     # Full x86-64-v4 AVX-512 baseline: the wide word-vector helpers widen to the
     # 16-word SIMD tier (VL_SIMD_PREFER_512) and native codegen improved measurably.
     BUILD_MARCH="x86-64-v4"
+    # _VL_HW_FUNNEL (verilated_types.h) needs __AVX512VBMI2__ — the vpshrdvd
+    # funnel that collapses each wide shift/insert chunk from 3 insns to 1 on
+    # ~4.8k sites. x86-64-v4 omits VBMI2, so opt in explicitly when the host
+    # exposes it (cpuinfo spells it avx512_vbmi2 on AMD/Intel; verified
+    # -march=x86-64-v4 alone leaves __AVX512VBMI2__ undefined on gcc-16).
+    if grep -qwE 'avx512_?vbmi2' /proc/cpuinfo 2>/dev/null; then
+      BUILD_MARCH="$BUILD_MARCH -mavx512vbmi2"
+    fi
   elif [[ "$VLT_FLAVOUR" == g6lc && "$(uname -m)" == x86_64 ]] \
      && grep -qw avx2 /proc/cpuinfo 2>/dev/null && grep -qw bmi2 /proc/cpuinfo 2>/dev/null; then
     BUILD_MARCH="x86-64-v3"
@@ -454,6 +483,11 @@ rc=$?
 set -e
 fi
 
+# Record the partition granularity for consumers that size the DI worker
+# pool from build.log (testharness_proxy.py greps 'vthreads=' -> .vthreads).
+# --threads is partition granularity, not runtime workers (perf guide §30).
+echo "vthreads=$VTHREADS" >>"$BUILD_LOG"
+
 if [[ $rc -ne 0 || ! -x "$VERLIB_DIR/Variane_testharness" ]]; then
   log "COMPILE FAIL rc=$rc — last 60 log lines:"
   tail -n 60 "$BUILD_LOG"
@@ -523,4 +557,4 @@ fi
 
 warnings=$(grep -cE "%Warning" "$BUILD_LOG" 2>/dev/null || true)
 errors=$(grep -cE "%Error" "$BUILD_LOG" 2>/dev/null || true)
-log "BUILD OK: $VERLIB_DIR/Variane_testharness (warnings=$warnings errors=$errors pgo=$PGO opt=$BUILD_OPT march=$BUILD_MARCH threads=$VTHREADS)"
+log "BUILD OK: $VERLIB_DIR/Variane_testharness (warnings=$warnings errors=$errors pgo=$PGO opt=$BUILD_OPT march=$BUILD_MARCH vthreads=$VTHREADS)"

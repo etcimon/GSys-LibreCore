@@ -3,6 +3,19 @@
 #
 # Zacas AMOCAS.D narrow smoke (RV64). Soft-skip without A or on illegal AMOCAS.
 
+# Bare-metal _start shim (single-hart): the original Spike/libc-style body is
+# kept verbatim under main; _start parks sibling harts, sets sp/mtvec and
+# jumps to main. exit() writes (code<<1)|1 to tohost per crt.S convention.
+  .section .text.init
+  .globl _start
+_start:
+  csrr t0, mhartid
+  bnez t0, park
+  li   sp, 0x80008000
+  la   t0, trap_vec
+  csrw mtvec, t0
+  j    main
+
   .globl main
 main:
   addi sp, sp, -48
@@ -55,3 +68,30 @@ fail:
   addi sp, sp, 48
   li   a0, 1
   jal  exit
+
+# --- bare-metal runtime (exit/park/trap_vec/tohost) ---
+  .globl exit
+exit:
+  slli a0, a0, 1
+  addi a0, a0, 1
+  la   t0, tohost
+  sw   a0, 0(t0)
+9:  j    9b
+
+trap_vec:
+  li   a0, 3
+  la   t0, tohost
+  sw   a0, 0(t0)
+8:  j    8b
+
+park:
+7:  wfi
+  j    7b
+
+  .section .tohost,"aw",@progbits
+  .align 6
+  .globl tohost
+tohost: .dword 0
+  .align 6
+  .globl fromhost
+fromhost: .dword 0

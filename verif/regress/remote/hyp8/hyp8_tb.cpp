@@ -112,10 +112,17 @@ static Vg6lc_core_hb___024root* g6lc_core_root(int c) {
 // partitioning verbatim are handled at their call sites.
 static inline auto g6lc_tb_core_pi(Vg6lc_testharness* t, int c) {
   auto* cl = t->g6lc_testharness->i_cluster;
+#if defined(G6LC_TB_NCORES) && (G6LC_TB_NCORES <= 1)
+  // Single-core cluster: only gen_core[0] is emitted, so the multi-core
+  // member select below would name non-existent gen_core[1..3] members.
+  (void)c;
+  auto* h = cl->gen_core__BRA__0__KET____DOT__i_g6lc;
+#else
   auto* h = (c == 0) ? cl->gen_core__BRA__0__KET____DOT__i_g6lc
            : (c == 1) ? cl->gen_core__BRA__1__KET____DOT__i_g6lc
            : (c == 2) ? cl->gen_core__BRA__2__KET____DOT__i_g6lc
                      : cl->gen_core__BRA__3__KET____DOT__i_g6lc;
+#endif
 #if defined(G6LC_CVA6_GEN_ACC)
   return h->gen_acc__DOT__i_g6lc;
 #else
@@ -320,6 +327,11 @@ static const char *verilog_plusargs[] = {
     // absent): core/smt/g6lc_thread_select.sv [smt-sched] and core/cva6.sv
     // [smt-flow]/[smt-probe] (+smt_handoff_trace == +smt_flow_trace).
     "smt_sched_lo", "smt_sched_hi", "smt_handoff_trace", "smt_flow_lo", "smt_flow_hi",
+    // +smt_quant_probe (core/smt/g6lc_thread_select.sv, translate_off): SMT_RR
+    // quantum/policy observer -- do_pol/do_g1/do_switch, rq_* reason bits,
+    // quantum_q, fetch_fire_i, found_peer, uniss_pend_q, drain state over the
+    // [smt_quant_lo, smt_quant_hi] window. Same allowlist rule as above.
+    "smt_quant_probe", "smt_quant_lo", "smt_quant_hi",
     // T21 BP checkpoint association probe (core/cva6.sv gen_ckpt_trace,
     // translate_off): mismatch / dead / refused events inside the fe window;
     // the [ckpt] final census prints regardless. Same allowlist rule as above.
@@ -1048,8 +1060,12 @@ done_processing:
         auto *rc = G6LC_CORE_ROOT(0);
         const auto &robq = rc->G6LC_CVA6_C0(
             issue_stage_i__DOT__gen_full_ooo__DOT__i_ooo_dispatch__DOT__i_rob__DOT__rob_q);
-        const auto &fhit = rc->G6LC_CVA6_C0(
-            issue_stage_i__DOT__gen_full_ooo__DOT__i_ooo_dispatch__DOT__i_rob__DOT__free_hit);
+        // free_hit is a generate-flattened packed array: in partitioned models
+        // Verilator emits it as per-bit __BRA__ members, not an indexable
+        // vector, so the fhit[b/32] read cannot compile here. Recompute the
+        // predicate instead: free_hit[r][s] = retire_ack[r] && rob_q[s].valid
+        // && (rob_q[s].tid==retire_tid[r]) && !claimed[r], with claimed[0]=0
+        // and claimed[1]=free_hit[0][s]. robq/rtid/fire are all readable.
         unsigned rh = (unsigned)rc->G6LC_CVA6_C0(
             issue_stage_i__DOT__gen_full_ooo__DOT__i_ooo_dispatch__DOT__i_rob__DOT__head_q);
         unsigned rt = (unsigned)rc->G6LC_CVA6_C0(
@@ -1070,6 +1086,7 @@ done_processing:
         uint64_t vmask = 0;
         std::string vt;
         int nvalid = 0;
+        unsigned char slot_ok[128] = {0}, slot_tid[128] = {0};
         for (int s = 0; s < 128; s++) {
           int base = s * 519;
           if (!((robq[(base + 518) / 32] >> ((base + 518) % 32)) & 1u)) continue;
@@ -1077,6 +1094,7 @@ done_processing:
           for (int b = 0; b < 6; b++)
             tid |= ((robq[(base + 510 + b) / 32] >> ((base + 510 + b) % 32)) & 1u) << b;
           nvalid++;
+          slot_ok[s] = 1; slot_tid[s] = (unsigned char)tid;
           if (tid < 64) vmask |= (1ull << tid);
           if (vt.size() < 300) {
             char tmp[16];
@@ -1098,15 +1116,21 @@ done_processing:
           ports += tmp;
         }
         std::string fh;
-        for (int r = 0; r < 2; r++)
+        unsigned char fh0[128] = {0};
+        for (int r = 0; r < 2; r++) {
+          unsigned ack = (fire >> r) & 1u;
+          unsigned tidr = (rtid >> (r * 6)) & 0x3fu;
           for (int s = 0; s < 128; s++) {
-            int b = r * 128 + s;
-            if ((fhit[b / 32] >> (b % 32)) & 1u) {
+            unsigned claimed = (r == 0) ? 0u : (unsigned)fh0[s];
+            unsigned f = ack && slot_ok[s] && (slot_tid[s] == tidr) && !claimed;
+            if (r == 0) fh0[s] = (unsigned char)f;
+            if (f) {
               char tmp[16];
               snprintf(tmp, sizeof(tmp), "p%ds%d,", r, s);
               fh += tmp;
             }
           }
+        }
         std::cerr << "[rob] t=" << main_time << " h=" << rh << " tl=" << rt
                   << " n=" << rn << " nv=" << nvalid << " vt={" << vt << "}"
                   << " vm=" << std::hex << vmask << " ev=" << rob_evermask

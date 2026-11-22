@@ -1083,8 +1083,11 @@ def boot_initial_review():
         shutil.copy2(data / Path(relative).name, repo / relative)
     inputs = {str(p.relative_to(repo)): sha(p) for base in ('core', 'corev_apu')
               for p in (repo / base).rglob('*') if p.is_file() and p.suffix in ('.sv', '.svh')}
+    # --threads=2: partition granularity (V3Partition cpLimit), not worker count.
+    # threads=12 (nproc) over-fragments this ~2x-parallelism OoO core into many
+    # small MTasks -> VlMTaskDoneMask sync tax; 2 is the measured optimum (§30).
     command = (f'export VERILATOR_ROOT={runtime} SOFT_LADDER_VERLIB={model} '
-               'SOFT_LADDER_BUILD_TARGET=g6lc64_ooo_int2 SOFT_LADDER_VERILATOR_THREADS=12 '
+               'SOFT_LADDER_BUILD_TARGET=g6lc64_ooo_int2 SOFT_LADDER_VERILATOR_THREADS=2 '
                'SOFT_LADDER_BUILD_PGO=0 SOFT_LADDER_BUILD_JOBS=8; bash verif/regress/soft-ladder-build-harness.sh B')
     rc = bash(command, out / 'build.log', repo, 3600)
     assert rc == 0, 'initial-edge full-model build'

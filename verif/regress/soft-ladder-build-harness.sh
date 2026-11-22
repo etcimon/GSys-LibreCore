@@ -260,18 +260,25 @@ if [[ "$VLT_FLAVOUR" == "g6lc" && "${SOFT_LADDER_BUILD_UNROLL:-1}" == "1" \
 fi
 
 # --- Host ISA for the generated C++ (SOFT_LADDER_BUILD_MARCH) ----------------
-# Default for the g6lc flavour on an x86-64 host with AVX2: `x86-64-v3`
-# (AVX2+BMI2, every 2013+ x86), measured on g6lc64_ooo at -51% host
-# instructions and -39% I1 misses per cycle with an identical RVFI stream
-# (performance guide §10); the fork runtime's word-vector kernels take 256-bit
-# chunks there. `native` binds the model to the build host (AVX-512 on the
-# builder; add -DVL_SIMD_PREFER_512 through SOFT_LADDER_BUILD_CXXFLAGS for
-# 16-word kernels); `none` is the baseline x86-64 recipe of every measurement
-# before §10 and stays the pinned flavour's default so the qualification
-# reference recipe is unchanged. Models are built and run on the same host
-# here; one copied to another machine must match its ISA.
+# Default for the g6lc flavour on an x86-64 host with full AVX-512: `x86-64-v4`
+# plus `-mavx512vbmi2` when the host exposes avx512_vbmi2 — the 16-word SIMD
+# tier (VL_SIMD_PREFER_512) and the _VL_HW_FUNNEL vpshrdvd fast path in
+# verilated_types.h (x86-64-v4 omits VBMI2, so it is added explicitly; verified
+# __AVX512VBMI2__ stays undefined under bare -march=x86-64-v4 on gcc-16).
+# Falls back to `x86-64-v3` (AVX2+BMI2, measured on g6lc64_ooo at -51% host
+# instructions / -39% I1 misses, performance guide §10) on AVX2-only hosts,
+# then `none` (the baseline x86-64 recipe of every pre-§10 measurement and the
+# pinned flavour's default so the qualification reference is unchanged).
+# `native` still binds the model to the build host; `none` is selectable via
+# SOFT_LADDER_BUILD_MARCH. Models are built and run on the same host here; one
+# copied to another machine must match its ISA.
 if [[ -z "${SOFT_LADDER_BUILD_MARCH:-}" ]]; then
   if [[ "$VLT_FLAVOUR" == g6lc && "$(uname -m)" == x86_64 ]] \
+     && grep -qw avx512f /proc/cpuinfo 2>/dev/null && grep -qw avx512vl /proc/cpuinfo 2>/dev/null \
+     && grep -qw avx512bw /proc/cpuinfo 2>/dev/null && grep -qw avx512dq /proc/cpuinfo 2>/dev/null; then
+    BUILD_MARCH="x86-64-v4"
+    grep -qwE 'avx512_?vbmi2' /proc/cpuinfo 2>/dev/null && BUILD_MARCH="$BUILD_MARCH -mavx512vbmi2"
+  elif [[ "$VLT_FLAVOUR" == g6lc && "$(uname -m)" == x86_64 ]] \
      && grep -qw avx2 /proc/cpuinfo 2>/dev/null && grep -qw bmi2 /proc/cpuinfo 2>/dev/null; then
     BUILD_MARCH="x86-64-v3"
   else
@@ -283,6 +290,10 @@ fi
 if [[ "$BUILD_MARCH" != "none" ]]; then
   BUILD_CXXFLAGS="${BUILD_CXXFLAGS} -march=${BUILD_MARCH}"
 fi
+# AVX-512 march: opt into the 16-word SIMD helper tier (guarded separately from
+# __AVX512F__ so non-512 targets keep the 8/4-word tiers).
+[[ "$BUILD_MARCH" == x86-64-v4 || "$BUILD_MARCH" == *avx512* || "$BUILD_MARCH" == native ]] \
+  && BUILD_CXXFLAGS="${BUILD_CXXFLAGS} -DVL_SIMD_PREFER_512"
 log "host ISA: march=${BUILD_MARCH}"
 
 # --- C++ optimisation level and profile-guided optimisation ----------------
@@ -464,14 +475,20 @@ if [[ -n "${SOFT_LADDER_EMIT_FLIST:-}" ]]; then
   log "emit overlay flist=$FLIST from $SOFT_LADDER_EMIT_FLIST"
 fi
 
-# Model threads: 4 by default -- the measured point for the 8-hart server
-# (guide §4b.2: 4 threads deliver 1.9-2.0x, the partition is synchronisation-
-# bound, so more threads on this host were not a win); the review runners pass
-# 1 explicitly (their qualification compare requires a single-thread model).
-# '$(nproc)' is still accepted and evaluated here.
-VTHREADS="${SOFT_LADDER_VERILATOR_THREADS:-4}"
+# Model threads: 2 by default. --threads sets V3Partition cpLimit
+# (= totalGraphCost*3/(threads*5)), i.e. it coarsens the MTask graph toward
+# `threads`-way parallelism; it is NOT the runtime worker count (that is
+# VerilatedContext::threads()). For these ~2x-parallelism cores threads=2
+# yields the coarse partition that wins on cycles+insns, while threads=4
+# over-fragments into ~59 tasks/149 dep-edges and pays a VlMTaskDoneMask sync
+# tax (AGENTS-verilator-performance.md §30; supersedes the older §4b.2 note
+# that 4 was "the measured point" — that sweep predated the partition-
+# granularity analysis). The review runners still pass 1 explicitly (their
+# qualification compare requires a single-thread model). '$(nproc)' is still
+# accepted and evaluated here, but resolves to the same safe default.
+VTHREADS="${SOFT_LADDER_VERILATOR_THREADS:-2}"
 if [[ "$VTHREADS" == "$(nproc)" ]] || [[ "$VTHREADS" == "\$(nproc)" ]]; then
-  VTHREADS=$( (command -v nproc >/dev/null && nproc) || echo 4)
+  VTHREADS=2
 fi
 
 log "target=$TARGET ver-library=$VERLIB_DIR jobs=$JOBS vthreads=$VTHREADS"
@@ -531,6 +548,11 @@ make -s verilate \
   >"$BUILD_LOG" 2>&1
 rc=$?
 set -e
+
+# Record the partition granularity for the proxy's DI worker sizing
+# (testharness_proxy.py greps 'vthreads=' from build.log -> .vthreads).
+# --threads is partition granularity, not runtime workers (perf guide §30).
+echo "vthreads=$VTHREADS" >>"$BUILD_LOG"
 
 warnings=$(grep -cE "%Warning|Warning" "$BUILD_LOG" 2>/dev/null || true)
 errors=$(grep -cE "%Error|Error" "$BUILD_LOG" 2>/dev/null || true)

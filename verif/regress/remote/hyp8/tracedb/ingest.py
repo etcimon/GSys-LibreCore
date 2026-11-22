@@ -199,6 +199,7 @@ class Run:
         self.counts = {}
         self.threads = {}
         self.verdict = None
+        self.prog_exit = None
 
     def ev(self, cls, etype, exact=True, core=None, hart=None, addr=None, pc=None,
            aux=None, detail=None, raw=''):
@@ -379,6 +380,21 @@ def parse_log(run):
                     t.update(max_gap=int(mg.group(2)), wfi=int(mg.group(3)))
                 if 'mc_verdict' in s:
                     run.ev('verdict', 'verdict.mc', exact=False, aux=name[:120], raw=s)
+                    # `program exit code N` is the ELF's authoritative exit
+                    # (tracer_exit[31:1]); the model overlays 125/126/127 for
+                    # held/hung/silent peers on top of a done primary. Correct a
+                    # held-125 banner the same way the directed runner does: a
+                    # held-125 with progExit=0 is a pass, not an RTL failure.
+                    pm = re.search(r'program exit code (\d+)', s)
+                    if pm:
+                        run.prog_exit = int(pm.group(1))
+                        if run.verdict and run.verdict.startswith('fail(tohost='):
+                            tv = run.verdict[len('fail(tohost='):-1]
+                            if tv == '125':
+                                run.verdict = ('pass' if run.prog_exit == 0
+                                               else f'fail(progExit={run.prog_exit})')
+                            # 126/127 stay fail: a hung or silent-unheld peer is
+                            # a real multicore anomaly regardless of progExit.
             elif '*** SUCCESS ***' in s or '*** FAILED ***' in s:
                 mv = re.search(r'\*\*\* (SUCCESS|FAILED) \*\*\* \(tohost = (\S+)\) after (\d+) cycles(.*)', s)
                 if mv:

@@ -37,7 +37,11 @@ module g6lc_testharness #(
   parameter int unsigned NUM_WORDS         = 2**25,         // memory size
   parameter bit          StallRandomOutput = 1'b0,
   parameter bit          StallRandomInput  = 1'b0,
-  parameter int unsigned DramLatency       = 0
+  parameter int unsigned DramLatency       = 0,
+  // Secondary-core boot-hold length forwarded to g6lc_cluster.BootHoldCyc.
+  // Default 200000 preserves release timing; directed benches may override
+  // via -G...BootHoldCyc to shorten the held-secondary wait.
+  parameter logic [17:0] BootHoldCyc       = 18'd200000
 ) (
   input  logic                           clk_i,
   input  logic                           rtc_i,
@@ -1414,6 +1418,7 @@ module g6lc_testharness #(
     .NR_CORES       ( NR_CORES            ),
     .L2_ENABLE      ( G6LCCfg.L2En        ),
     .IDENTITY_FAST  ( 1'b1                ),
+    .BootHoldCyc    ( BootHoldCyc         ),
     // Inclusive L1 (+ L2 when L3En) back-inval on LLC victim — stream plane
     // × multicore coherence for U6.2 / L3 hierarchy. The TB override is off;
     // policy comes from G6LCCfg.L3InclusiveEn.

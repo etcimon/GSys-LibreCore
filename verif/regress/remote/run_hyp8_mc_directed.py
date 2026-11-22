@@ -56,6 +56,16 @@ TESTS = [
     # (mhartid1) gets the core; hart1 is the census reader. Distinguishes
     # starvation-under-busy-primary from never-activated sibling.
     ('mc_smt_sibling_yield',  'mc_smt_sibling_yield.S',  [], 'pass'),
+    # SMT-sibling liveness probe: hart0 runs a register-only delay (no D$
+    # poll stalls) then a single census. Separates "hart1 starved by the
+    # memory-poll" from "hart1 never eligible" (smt_hart_seen_q/ipi_i[1]).
+    ('mc_smt_sibling_both_present','mc_smt_sibling_both_present.S', [], 'pass'),
+    # SMT-sibling liveness probe -- ILP variant: hart0 delays with 4 independent
+    # counters (backend ILP keeps the IF->ID fetch accept flowing) instead of a
+    # serially-dependent countdown that saturates the OoO backend. If hart1 then
+    # stores flags[1], the starvation is fetch-quantum freeze under backend
+    # pressure, not an eligibility/seen bug.
+    ('mc_smt_sibling_ilp',     'mc_smt_sibling_ilp.S',     [], 'pass'),
     ('mini_ipi_hart1_sp',     'mini_ipi_hart1_sp.S',     [], 'pass'),
     ('mini_wfi_noipi_hart1',  'mini_wfi_noipi_hart1.S',  [], 'pass'),
     # --- shared-line / coherence ------------------------------------------
@@ -72,6 +82,31 @@ TESTS = [
     ('mc_cbo_contended',      'mc_cbo_contended.S',       [], 'pass'),
     ('mc_cbo_ewt',            'mc_cbo_ewt.S',             [], 'pass'),
     ('mc_cbo_zero_probe',     'mc_cbo_zero_probe.S',      [], 'pass'),
+    # --- OoO store-queue / speculation / eWT / L2 (isolated coverage) ---------
+    # Bare-metal self-checking probes shared with the DI/soft-ladder suites;
+    # they pin the same OoO LSQ/WT-dcache/L2-L3 mechanisms the ooo_mem_min
+    # STAGE=17..52 cases exercise on g6lc64_ooo_server, on the 8-hart boot part.
+    # mini_spo_st_fwd: same-core speculative store->load forward (OoO RAW).
+    ('mini_spo_st_fwd',       'mini_spo_st_fwd.S',         [], 'pass'),
+    # mini_stq_*: store-queue forwarding/flush under alias, mispredict and an
+    # SMT sibling doing store bursts + AMOs (OpenSBI offset_ptr/getprop shapes;
+    # I16/I17/I22). mini_stq_alias_jal parks hart1 (shared-SP race otherwise).
+    ('mini_stq_alias_jal',    'mini_stq_alias_jal.S',      [], 'pass'),
+    ('mini_stq_flush_fwd',    'mini_stq_flush_fwd.S',      [], 'pass'),
+    ('mini_stq_press_smt',    'mini_stq_press_smt.S',      [], 'pass'),
+    # mc_wrongpath_window: T19 two-hart wrong-path I$ install window (the
+    # ooocoh-t18 boot failure shape) on the dual-hart SMT cores.
+    ('mc_wrongpath_window',   'mc_wrongpath_window.S',     [], 'pass'),
+    # mini_wt_delay_ld: write-through write-around / dropped wr_ack (eWT).
+    ('mini_wt_delay_ld',      'mini_wt_delay_ld.S',        [], 'pass'),
+    # mini_l2set_stride / mini_l2_hot_scan: L2/L3 set-conflict churn + hot-scan
+    # replacement (bisect pair for mc_l3_evict_inclusion).
+    ('mini_l2set_stride',     'mini_l2set_stride.S',       [], 'pass'),
+    ('mini_l2_hot_scan',      'mini_l2_hot_scan.S',        [], 'pass'),
+    # mc_chase / mc_branchy: pointer-chase DRAM/L2/L3 latency chain + branchy
+    # speculation pressure (single active hart, peers park).
+    ('mc_chase',              'mc_chase.S',                [], 'pass'),
+    ('mc_branchy',            'mc_branchy.S',              [], 'pass'),
     # --- LR/SC / AMO / atomics --------------------------------------------
     ('mc_lrsc_set_zombie',    'mc_lrsc_set_zombie.S',     [], 'pass'),
     ('mini_lrsc_d',           'mini_lrsc_d.S',            [], 'pass'),
@@ -192,10 +227,18 @@ def main():
         log = out / f'{name}.log'
         run_cmd = [str(model), f"+tohost_addr={entry['tohost']}", '+debug_disable',
                    f'+max-cycles={budget}', *extra, str(elf)]
-        with log.open('w') as fh:
-            p = subprocess.run(run_cmd, stdout=fh, stderr=subprocess.STDOUT,
-                               cwd=out, timeout=7200)
-        text = log.read_text(errors='replace')
+        timed_out = False
+        try:
+            with log.open('w') as fh:
+                p = subprocess.run(run_cmd, stdout=fh, stderr=subprocess.STDOUT,
+                                   cwd=out, timeout=7200)
+        except subprocess.TimeoutExpired:
+            # A wall-clock kill is not a verdict: record it and keep going so
+            # one heavy test (e.g. mini_l2_hot_scan) cannot lose the whole
+            # suite's results. `final` never ran, so there is no progExit.
+            timed_out = True
+            p = subprocess.CompletedProcess(run_cmd, 124, '', '')
+        text = log.read_text(errors='replace') if log.is_file() else ''
         verdict = [l for l in text.splitlines() if '***' in l]
         m = re.search(r'\*\*\* SUCCESS \*\*\*.*after (\d+) cycles', text)
         fail = re.search(r'\*\*\* FAILED \*\*\*.*tohost = (\S+)', text)
@@ -213,7 +256,25 @@ def main():
         prog_exit = int(pe.group(1)) if pe else None
         held_mask = hm.group(1) if hm else None
         retired_mask = hm.group(2) if hm else None
-        if m:
+        # The model overlays a held(125)/hung(126)/silent(127) exit code on top
+        # of a completed primary tohost write; `program exit code` is the ELF's
+        # authoritative result (tracer_exit[31:1]). Grade on progExit, not on
+        # the overlay banner -- a held-125 with progExit=0 is a pass, while a
+        # hung(126)/silent-unheld(127) peer is a real multicore anomaly.
+        budget_cap = 'cycle budget reached' in text
+        peer_hung = 'stopped retiring' in text        # mc_any_hung -> exit 126
+        peer_silent = 'retired no instruction' in text  # non-held silent -> 127
+        peer_held = 'still clock-held' in text          # held peers -> 125 (benign)
+        peer_bad = peer_hung or peer_silent
+        if timed_out:
+            state = 'timeout'
+        elif budget_cap:
+            state = 'wedged'          # +max-cycles cap, no tohost verdict
+        elif peer_bad:
+            state = 'peer_anomaly'    # ELF may exit 0 but a peer hung/never-ran
+        elif prog_exit is not None:
+            state = 'pass' if prog_exit == 0 else 'fail'
+        elif m:
             state = 'pass'
         elif fail:
             state = 'fail'
@@ -221,28 +282,43 @@ def main():
             state = 'wedged'
         if state == 'pass' and (bus_err or uart_rd or model_err):
             state = 'log_dirty'
-        # oracle-negative: the deliberate fail code is the discrimination proof
+        # oracle-negative: the deliberate fail code is the discrimination proof.
+        # Prefer the ELF's progExit; fall back to the banner tohost value.
+        oracle_code = prog_exit
+        if oracle_code is None and tohost_val is not None:
+            try:
+                oracle_code = int(tohost_val)
+            except ValueError:
+                oracle_code = None
         oracle = ''
         if kind == 'oracle_neg':
-            oracle = 'oracle_ok' if (state == 'fail' and tohost_val not in (None, '0')) else 'oracle_bad'
+            oracle = 'oracle_ok' if (state == 'fail' and oracle_code not in (None, 0)) else 'oracle_bad'
+        cyc_m = re.search(r'\*\*\* (?:SUCCESS|FAILED) \*\*\*.*after (\d+) cycles', text)
+        cycles = int(cyc_m.group(1)) if cyc_m else None
         entry.update({'state': state, 'kind': kind, 'oracle': oracle,
                       'progExit': prog_exit, 'heldMask': held_mask,
-                      'retiredMask': retired_mask,
-                      'tohostVal': tohost_val, 'cycles': int(m.group(1)) if m else None,
+                      'retiredMask': retired_mask, 'peerHeld': peer_held,
+                      'tohostVal': tohost_val, 'cycles': cycles,
                       'busErrors': bus_err, 'uartReads': uart_rd,
                       'walkErrors': walk_err, 'modelErrors': model_err,
                       'verdict': verdict[-1:] if verdict else [],
                       'log': log.name, 'argv': run_cmd})
-        # a pass-kind test that fails/wedges, or an oracle that doesn't
-        # discriminate, is a suite failure; info entries never gate.
+        # a pass-kind test that fails/wedges/anomalies, or an oracle that
+        # doesn't discriminate, is a suite failure; info never gates.
         bad = (kind == 'pass' and state != 'pass') or \
               (kind == 'oracle_neg' and oracle != 'oracle_ok')
         if bad:
             rc_all = 1
         summary['tests'][name] = entry
+        # Write incrementally: a later crash/kill must not lose earlier verdicts.
+        blob = json.dumps(summary, indent=2)
+        (out / 'mc-directed-results.json').write_text(blob)
+        (out / 'smokes-results.json').write_text(blob)
         print(f"{name}: {state}{('/' + oracle) if oracle else ''} "
-              f"cycles={entry['cycles']} tohost={tohost_val} rc={p.returncode} "
-              f"bus_err={bus_err} uart_rd={uart_rd} walk_err={walk_err} model_err={model_err}")
+              f"cycles={cycles} tohost={tohost_val} progExit={prog_exit} "
+              f"rc={p.returncode} "
+              f"bus_err={bus_err} uart_rd={uart_rd} walk_err={walk_err} model_err={model_err}",
+              flush=True)
     blob = json.dumps(summary, indent=2)
     (out / 'mc-directed-results.json').write_text(blob)
     # tracedb ingest discovers runs by results-file name; smokes-results.json
