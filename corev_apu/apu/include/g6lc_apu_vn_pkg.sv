@@ -3243,7 +3243,7 @@ package g6lc_apu_vn_pkg;
     48'h030800000009, // HANDLE a=8 b=0x9 srcBuffer:LOOKUP
     48'h031000000009, // HANDLE a=16 b=0x9 dstBuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 regionCount
-    48'h070000000000, // ARRAY a=0 b=0x0 pRegions
+    48'h070000000006, // ARRAY a=0 b=0x6 pRegions
     48'h05000000006A, // STYPE a=0 b=0x6A sType
     48'h060000000270, // PNEXT a=0 b=0x270 pNext
     48'h02FF00000000, // U64 a=127 b=0x0 srcOffset KEEP

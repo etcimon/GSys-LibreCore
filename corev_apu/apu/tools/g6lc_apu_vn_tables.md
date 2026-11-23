@@ -3396,7 +3396,7 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 | HANDLE | 8 | 0x9 | srcBuffer:LOOKUP |
 | HANDLE | 16 | 0x9 | dstBuffer:LOOKUP |
 | U32 | 0 | 0x0 | regionCount |
-| ARRAY | 0 | 0x0 | pRegions |
+| ARRAY | 0 | 0x6 | pRegions |
 | STYPE | 0 | 0x6A | sType |
 | PNEXT | 0 | 0x270 | pNext |
 | U64 | 127 | 0x0 | srcOffset **KEEP** |
