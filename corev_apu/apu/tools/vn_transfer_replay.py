@@ -198,7 +198,7 @@ class TransferReplay:
                         data = payload(record, size // 4, 4)
                         append(Transfer('update', owner, binding + offset, size,
                                         data=b''.join(w.to_bytes(4, 'little') for w in data)))
-                elif name == 'vkCmdCopyBuffer':
+                elif name in ('vkCmdCopyBuffer', 'vkCmdCopyBuffer2'):
                     count = record['imm'][0]
                     if not 0 < count <= engine.transfers.max_operations - len(operations):
                         raise MemoryError('replay copy-region budget exhausted')

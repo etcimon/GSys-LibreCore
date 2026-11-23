@@ -2985,7 +2985,7 @@ class FrontModel(ObjectTable, PayloadMemory):
         def a64(i):
             return (ar.get(abase + i, 0) |
                     (ar.get(abase + i + 1, 0) << 32))
-        if ct == T['vkCmdCopyBuffer']:
+        if ct in (T['vkCmdCopyBuffer'], T.get('vkCmdCopyBuffer2', -1)):
             se = self._xfer_extent(r['handle'][0], r['kind'][0])
             de = self._xfer_extent(r['handle'][1], r['kind'][1])
             if se is None or de is None:
@@ -5631,12 +5631,19 @@ class FrontModel(ObjectTable, PayloadMemory):
                                 session['T'].get('vkCmdBindIndexBuffer2'),
                                 session['T']['vkCmdPipelineBarrier'],
                                 session['T']['vkCmdCopyBuffer'],
+                                session['T'].get('vkCmdCopyBuffer2', -1),
                                 session['T']['vkCmdFillBuffer'],
                                 session['T']['vkCmdUpdateBuffer'],
                                 session['T']['vkCmdCopyBufferToImage'],
+                                session['T'].get('vkCmdCopyBufferToImage2', -1),
                                 session['T']['vkCmdCopyImageToBuffer'],
+                                session['T'].get('vkCmdCopyImageToBuffer2', -1),
                                 session['T']['vkCmdCopyImage'],
+                                session['T'].get('vkCmdCopyImage2', -1),
                                 session['T'].get('vkCmdBlitImage', -1),
+                                session['T'].get('vkCmdBlitImage2', -1),
+                                session['T'].get('vkCmdResolveImage', -1),
+                                session['T'].get('vkCmdResolveImage2', -1),
                                 session['T']['vkCmdClearColorImage'],
                                 session['T'][
                                     'vkCmdClearDepthStencilImage']):

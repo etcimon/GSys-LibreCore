@@ -465,6 +465,14 @@ VkBufferImageCopy = 256
 VkImageBlit = 256
 VkImageResolve = 256
 VkClearRect = 256
+# *2 region structs (VK_KHR_copy_commands2): same element layout as the
+# base region types plus sType/pNext; bounds mirror the base entries so
+# array_bound() resolves the same element cap instead of the default.
+VkBufferCopy2 = 1024
+VkImageCopy2 = 256
+VkBufferImageCopy2 = 256
+VkImageBlit2 = 256
+VkImageResolve2 = 256
 VkViewport = 16
 VkRect2D = 16
 VkSpecializationMapEntry = 1024

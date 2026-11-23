@@ -122,6 +122,28 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(self.state.aperture.read(self.owner.base + 2048, 1024),
                          b'last' + b'abcd' * 255)
 
+    def test_copy_buffer2_struct_wrapper_replays_like_base(self):
+        # vkCmdCopyBuffer2 carries the copy in a VkCopyBufferInfo2 struct
+        # (sType/pNext + src/dst handles + regionCount + VkBufferCopy2
+        # regions).  The decoder strips the struct headers so the record
+        # is identical to vkCmdCopyBuffer: same region payload, same
+        # extent/overlap checks, same copied bytes.
+        self.begin()
+        self.fill()
+        region = self.wire.structure(
+            'VkBufferCopy2', srcOffset=0, dstOffset=2048, size=1024)
+        info = self.wire.structure(
+            'VkCopyBufferInfo2', pNext=[], srcBuffer=self.BUFFER,
+            dstBuffer=self.BUFFER, regionCount=1, pRegions=[region])
+        self.command('vkCmdCopyBuffer2', commandBuffer=self.CB,
+                     pCopyBufferInfo=info)
+        self.end()
+        job = self.enqueue()
+        self.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertEqual(self.state.aperture.read(self.owner.base + 2048, 1024),
+                         b'abcd' * 256)
+
     def test_begin_and_idle_wait_for_actual_replay_retirement(self):
         self.recorded()
         self.enqueue()
