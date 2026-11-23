@@ -103,6 +103,7 @@ module wt_dcache_wbuffer
     output logic miss_nc_o,  // request to I/O space
     output logic [2:0] miss_size_o,  //
     output logic [G6LCCfg.MEM_TID_WIDTH-1:0]          miss_id_o,       // ID of this transaction (wbuffer uses all IDs from 0 to DCACHE_MAX_TX-1)
+    output logic [2:0] miss_prot_o,  // Storamic C1 access-origin AXI prot
     // write responses from memory
     input logic miss_rtrn_vld_i,
     input logic [G6LCCfg.MEM_TID_WIDTH-1:0] miss_rtrn_id_i,  // transaction ID to clear
@@ -1361,6 +1362,36 @@ module wt_dcache_wbuffer
       }
   );
   assign miss_nc_o = !cache_en_i || is_nc_miss;
+
+  logic [2:0] e_prot;
+  logic       e_nc;
+  if (G6LCCfg.StoramicCheckpointEn) begin : gen_wbuf_prot
+    logic [G6LCCfg.WtDcacheWbufDepth-1:0][2:0] prot_q;
+    logic [2:0] w3_prot_q;
+    logic       w3_nc_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        prot_q    <= '0;
+        w3_prot_q <= '0;
+        w3_nc_q   <= 1'b0;
+      end else begin
+        if (HypCfg.WbufPipelined) begin
+          if (e_accept) begin
+            w3_prot_q <= e_nc ? e_prot : 3'b000;
+            w3_nc_q   <= e_nc;
+          end
+          if (w3_vld_q) begin
+            prot_q[w3_ptr_q] <= w3_nc_q ? w3_prot_q : 3'b000;
+          end
+        end else if (e_accept) begin
+          prot_q[wr_ptr] <= e_nc ? e_prot : 3'b000;
+        end
+      end
+    end
+    assign miss_prot_o = is_nc_miss ? prot_q[dr_ptr] : 3'b000;
+  end else begin : gen_no_wbuf_prot
+    assign miss_prot_o = '0;
+  end
   // Non-idempotent if request goes to NI region
   assign is_ni = config_pkg::is_inside_nonidempotent_regions(
       G6LCCfg,
@@ -2001,6 +2032,7 @@ module wt_dcache_wbuffer
       logic [G6LCCfg.XLEN-1:0]               w1_wdata_q;
       logic [(G6LCCfg.XLEN/8)-1:0]           w1_be_q;
       logic [G6LCCfg.DCACHE_USER_WIDTH-1:0]  w1_wuser_q;
+      logic [2:0]                            w1_prot_q;
       logic [G6LCCfg.WtDcacheWbufDepth-1:0]  w1_hit_oh_q;
       logic [$clog2(G6LCCfg.WtDcacheWbufDepth)-1:0] w1_hit_ptr_q, w1_next_ptr_q;
       logic                          w1_full_q;
@@ -2046,6 +2078,7 @@ module wt_dcache_wbuffer
           w1_wdata_q    <= req_port_i.data_wdata;
           w1_be_q       <= req_port_i.data_be;
           w1_wuser_q    <= req_port_i.data_wuser;
+          w1_prot_q     <= req_port_i.data_prot;
           w1_hit_oh_q   <= wbuffer_hit_oh;
           w1_hit_ptr_q  <= hit_ptr;
           w1_next_ptr_q <= next_ptr;
@@ -2063,6 +2096,8 @@ module wt_dcache_wbuffer
       assign e_wdata  = w1_wdata_q;
       assign e_be     = w1_be_q;
       assign e_wuser  = w1_wuser_q;
+      assign e_prot   = w1_prot_q;
+      assign e_nc     = w1_nc_q;
       assign e_is_ni  = w1_is_ni_q;
       // hyp8 r5: a live W3 pending write answers the coalesce select
       // (same-tag store merges into the pending slot) and holds its array
@@ -2092,6 +2127,8 @@ module wt_dcache_wbuffer
       assign e_wdata  = req_port_i.data_wdata;
       assign e_be     = req_port_i.data_be;
       assign e_wuser  = req_port_i.data_wuser;
+      assign e_prot   = req_port_i.data_prot;
+      assign e_nc     = req_nc;
       assign e_is_ni  = is_ni;
       assign wr_ptr   = (|wbuffer_hit_oh) ? hit_ptr : next_ptr;
       assign rdy      = (|wbuffer_hit_oh) ? !req_nc : (~full);

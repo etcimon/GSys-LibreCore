@@ -248,6 +248,7 @@ module g6lc_core
       logic [HART_ID_BITS-1:0]          hart;
       logic                             is_speculative_load;
       logic                             is_speculative_load_miss;
+      logic [2:0]                       data_prot;
     },
 
 
@@ -303,6 +304,7 @@ module g6lc_core
       logic                                  kill_req;
       logic                                  tag_valid;
       cbo_t                                  cbo_op;
+      logic [2:0]                            data_prot;
     },
 
     localparam type dcache_req_o_t = struct packed {
@@ -501,7 +503,10 @@ module g6lc_core
     input  logic        l2_pf_useful_i,
     // Hub snoop-filter effectiveness (PMU group-2 indices 11/12)
     input  logic        coh_sf_filtered_i,
-    input  logic        coh_sf_broadcast_i
+    input  logic        coh_sf_broadcast_i,
+    // Storamic C4/C5/W2/W4 pause/drain provider (inert unless origin_supported)
+    input  logic        storamic_pause_i,
+    output logic        storamic_drained_o
 );
 
   // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
@@ -1088,6 +1093,11 @@ assign irq_active = irq_i[smt_active_hart];
   logic hfence_vvma_commit_controller;
   logic hfence_gvma_commit_controller;
   logic halt_ctrl;
+  // Storamic C4/C5/W2/W4 pause/drain + counted-drain-aware resync signals.
+  logic storamic_pause_gated, storamic_halt_q, storamic_pause_q, storamic_amo_head;
+  logic resync_flush_i, resync_squash, resync_squash_nopc, resync_done;
+  logic resync_dack, resync_held, resync_active, resync_commit_step, resync_finish;
+  logic resync_was_setpc_q;
   logic halt_frontend;
   logic halt_csr_ctrl;
   logic [G6LCCfg.NrHarts-1:0] smt_csr_hart_halt;
@@ -1331,6 +1341,7 @@ assign irq_active = irq_i[smt_active_hart];
 `ifdef G6LC_FETCH_B
       .commit_hart_i      (hart_commit_fe),
       .mem_replay_pc_i    (mem_replay_pc_ctrl_pcgen),
+      .commit_step_i      (resync_commit_step),
       .peer_restart_valid_i (peer_restart_active),
       .peer_restart_pc_i    (peer_restart_pc),
 `endif
@@ -2096,7 +2107,8 @@ assign irq_active = irq_i[smt_active_hart];
   assign smt_drain_safe = no_st_pending_commit &&
       sb_head_valid[smt_active_hart] &&
       !(lsu_commit_commit_ex && !lsu_commit_ready_ex_commit) &&
-      !(G6LCCfg.DebugEn && set_debug_pc);
+      !(G6LCCfg.DebugEn && set_debug_pc) &&
+      !(storamic_pause_gated || storamic_halt_q || resync_held);
 
   g6lc_thread_select #(
       .G6LCCfg(G6LCCfg),
@@ -2107,7 +2119,8 @@ assign irq_active = irq_i[smt_active_hart];
       .fetch_fire_i        (smt_fetch_fire),
       .issue_fire_i        (smt_issue_fire),
       .flush_i             (flush_ctrl_if),
-      .hold_i              (smt_switch_hold),
+      .hold_i              (smt_switch_hold || storamic_pause_gated ||
+                            storamic_halt_q || resync_held),
       // T6b seam: with SmtDrainedHandoff=1 the selector may switch only on a
       // drained backend (today's coarse handoff). With 0 the switch becomes a
       // fetch-slot policy and hart-tagged ownership (LSQ/store buffer/IQ) keeps
@@ -3703,7 +3716,8 @@ assign irq_active = irq_i[smt_active_hart];
       .rvfi_st_push_paddr_o    (rvfi_st_push_paddr),
       .rvfi_amo_push_valid_o   (rvfi_amo_push_valid),
       .rvfi_amo_push_tid_o     (rvfi_amo_push_tid),
-      .rvfi_amo_push_paddr_o   (rvfi_amo_push_paddr)
+      .rvfi_amo_push_paddr_o   (rvfi_amo_push_paddr),
+      .storamic_resync_i       (resync_active)
   );
 
   // ---------
@@ -4072,6 +4086,81 @@ assign irq_active = irq_i[smt_active_hart];
 `endif
 //pragma translate_on
 
+  // ------------------------------------------------------------------
+  // Storamic C4/C5/W2/W4 pause/drain + counted-drain-aware resync FSM
+  // ------------------------------------------------------------------
+  // Inert unless g6lc_storamic_origin_supported(G6LCCfg). In hyp8 the
+  // controller stretches commit-level flushes across DrainCycles (drain_req /
+  // drain_body); RESYNC_DRAIN holds storamic_halt_q, resync_held,
+  // storamic_resync_i, and commit_step_i across that drain window so the
+  // delayed set_pc_commit_o on drain_last still steps the head block once
+  // and no speculative store survives.
+  localparam logic [1:0] RESYNC_IDLE = 2'd0, RESYNC_FLUSH_D = 2'd1,
+                         RESYNC_WAIT_HEAD = 2'd2, RESYNC_DRAIN = 2'd3;
+  logic [1:0] storamic_resync_state_q;
+  assign storamic_pause_gated =
+      config_pkg::g6lc_storamic_origin_supported(G6LCCfg) ? storamic_pause_i : 1'b0;
+  assign storamic_amo_head = commit_instr_id_commit[0].valid &&
+                             g6lc_core_pkg::is_amo(commit_instr_id_commit[0].op);
+  assign resync_held        = (storamic_resync_state_q != RESYNC_IDLE);
+  assign resync_flush_i     = (storamic_resync_state_q == RESYNC_FLUSH_D);
+  assign resync_squash      = (storamic_resync_state_q == RESYNC_WAIT_HEAD) &&
+                              commit_instr_id_commit[0].valid;
+  assign resync_squash_nopc = (storamic_resync_state_q == RESYNC_WAIT_HEAD) &&
+                              !commit_instr_id_commit[0].valid &&
+                              (halt_csr_ctrl || smt_quiesce) && smt_sb_empty;
+  assign resync_done        = resync_squash || resync_squash_nopc;
+  assign resync_active      = resync_done || (storamic_resync_state_q == RESYNC_DRAIN);
+  assign resync_commit_step = resync_squash ||
+                              ((storamic_resync_state_q == RESYNC_DRAIN) && resync_was_setpc_q);
+  assign resync_finish      = (resync_done && !drain_req) ||
+                              ((storamic_resync_state_q == RESYNC_DRAIN) && !drain_body);
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin : p_storamic_resync
+    if (!rst_ni) begin
+      storamic_pause_q        <= 1'b0;
+      storamic_halt_q         <= 1'b0;
+      storamic_drained_o      <= 1'b0;
+      storamic_resync_state_q <= RESYNC_IDLE;
+      resync_was_setpc_q      <= 1'b0;
+    end else begin
+      unique case (storamic_resync_state_q)
+        RESYNC_IDLE: begin
+          resync_was_setpc_q <= 1'b0;
+          if (storamic_halt_q && !storamic_pause_gated)
+            storamic_resync_state_q <= RESYNC_FLUSH_D;
+        end
+        RESYNC_FLUSH_D: begin
+          if (resync_dack)
+            storamic_resync_state_q <= RESYNC_WAIT_HEAD;
+        end
+        RESYNC_WAIT_HEAD: begin
+          if (resync_done) begin
+            resync_was_setpc_q      <= resync_squash;
+            storamic_resync_state_q <= drain_req ? RESYNC_DRAIN : RESYNC_IDLE;
+          end
+        end
+        RESYNC_DRAIN: begin
+          if (!drain_body) begin
+            storamic_resync_state_q <= RESYNC_IDLE;
+            resync_was_setpc_q      <= 1'b0;
+          end
+        end
+        default: storamic_resync_state_q <= RESYNC_IDLE;
+      endcase
+      storamic_halt_q <= ((storamic_pause_gated || resync_held) &&
+                          (storamic_halt_q || !storamic_amo_head)) &&
+                         !(resync_finish && !storamic_pause_gated);
+      storamic_pause_q <= storamic_halt_q;
+      storamic_drained_o <= storamic_pause_q && halt_ctrl &&
+                            no_st_pending_commit &&
+                            !(lsu_commit_commit_ex && !lsu_commit_ready_ex_commit) &&
+                            !(G6LCCfg.DebugEn && set_debug_pc) &&
+                            !smt_switch &&
+                            !resync_held;
+    end
+  end
+
   controller #(
       .G6LCCfg(G6LCCfg),
       .HypCfg (HypCfg),
@@ -4106,6 +4195,11 @@ assign irq_active = irq_i[smt_active_hart];
       .flush_tlb_gvma_o      (flush_tlb_gvma_ctrl_ex),
       .halt_csr_i            (halt_csr_ctrl),
       .halt_acc_i            (halt_acc_ctrl),
+      .halt_storamic_i       (storamic_halt_q),
+      .resync_storamic_flush_i (resync_flush_i),
+      .resync_storamic_squash_i(resync_squash),
+      .resync_storamic_nopc_i  (resync_squash_nopc),
+      .resync_storamic_dack_o  (resync_dack),
       .halt_frontend_o       (halt_frontend),
       .halt_o                (halt_ctrl),
       .smt_switch_i          (smt_switch),

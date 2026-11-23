@@ -69,6 +69,11 @@ TESTS = [
     ('mc_smt_sibling_ilp',     'mc_smt_sibling_ilp.S',     [], 'pass'),
     ('mini_ipi_hart1_sp',     'mini_ipi_hart1_sp.S',     [], 'pass'),
     ('mini_wfi_noipi_hart1',  'mini_wfi_noipi_hart1.S',  [], 'pass'),
+    # Sleep-gate witness (CoreSleepGate=1 builds, e.g. g6lc64_hyp8_mc_sleep):
+    # CLINT mtimecmp, Sstc stimecmp and cross-core IPI wakes of fully gated
+    # cores, plus permanent gating of parked harts ([sleep] counters).
+    # On gate-less models the same program is the functional/RVFI reference.
+    ('mc_sleep_gate_wake',   'mc_sleep_gate_wake.S',   [], 'pass'),
     # --- shared-line / coherence ------------------------------------------
     ('mc_shared_line_xcore',  'mc_shared_line_coherence.S', ['-DPEER_HART=2'], 'pass'),
     ('mc_shared_line_sibling','mc_shared_line_coherence.S', ['-DPEER_HART=1'], 'pass'),
@@ -105,9 +110,12 @@ TESTS = [
     ('mini_l2set_stride',     'mini_l2set_stride.S',       [], 'pass'),
     ('mini_l2_hot_scan',      'mini_l2_hot_scan.S',        [], 'pass'),
     # mc_chase / mc_branchy: pointer-chase DRAM/L2/L3 latency chain + branchy
-    # speculation pressure (single active hart, peers park).
+    # speculation pressure (single active hart, peers park). mc_branchy runs
+    # two ITER passes at ~19 instr/round; default ITER=65536 needs ~19M cycles
+    # on hyp8 (ipc~0.13 under ~50% data-dependent mispredicts) — ITER=4096 keeps
+    # ~12k branch outcomes while fitting the standard 1.5-2M suite budget.
     ('mc_chase',              'mc_chase.S',                [], 'pass'),
-    ('mc_branchy',            'mc_branchy.S',              [], 'pass'),
+    ('mc_branchy',            'mc_branchy.S',              ['-DITER=4096'], 'pass'),
     # --- LR/SC / AMO / atomics --------------------------------------------
     ('mc_lrsc_set_zombie',    'mc_lrsc_set_zombie.S',     [], 'pass'),
     ('mini_lrsc_d',           'mini_lrsc_d.S',            [], 'pass'),

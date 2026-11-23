@@ -409,6 +409,10 @@ static const char *verilog_plusargs[] = {
     // page-table read's returned PTE per level — the mc_smode_shootdown lvl2
     // leaf-read discrepancy diagnostic. Same allowlist rule as above.
     "ptw_rd_trace",
+    // Native checkpoint composition (g6lc_testharness.sv, G6LC_STORAMIC_CKPT):
+    "storamic_ckpt_trace",
+    "storamic_ckpt_report",
+    "ckpt_preload_max",
     nullptr};
 
 // +mem_poke entries, applied inside the sim loop once main_time reaches cycle.
@@ -768,12 +772,24 @@ done_processing:
   // Partitioned model: i_dram_backend lives in the g6lc_testharness module
   // class (scope-relative member names, public_flat_rw so no __PVT__ prefix).
   // sram is the same VlUnpacked the flat model exposed as .m_storage.
+#if defined(G6LC_STORAMIC_CKPT_TB)
+#define MEM top->g6lc_testharness->i_ckpt_attach__DOT__gen_native_ckpt__DOT__i_native_ckpt__DOT__endpoint__DOT__gen_model__DOT__media__DOT__i_ram__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram.m_storage
+#elif defined(G6LC_STORAMIC_MODEL_TB)
+#define MEM top->g6lc_testharness->i_dram_backend__DOT__gen_storamic__DOT__i_storamic__DOT__gen_model_mem__DOT__i_sim_mem__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram.m_storage
+#else
 #define MEM top->g6lc_testharness->i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram.m_storage
 #define MEM_USER top->g6lc_testharness->i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__gen_mem_user__DOT__i_tc_sram_wrapper_user__DOT__i_tc_sram__DOT__sram.m_storage
+#endif
 #elif (VERILATOR_VERSION_INTEGER >= 5000000)
   // Verilator v5: Use rootp pointer and .data() accessor.
+#if defined(G6LC_STORAMIC_CKPT_TB)
+#define MEM top->rootp->g6lc_testharness__DOT__i_ckpt_attach__DOT__gen_native_ckpt__DOT__i_native_ckpt__DOT__endpoint__DOT__gen_model__DOT__media__DOT__i_ram__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram.m_storage
+#elif defined(G6LC_STORAMIC_MODEL_TB)
+#define MEM top->rootp->g6lc_testharness__DOT__i_dram_backend__DOT__gen_storamic__DOT__i_storamic__DOT__gen_model_mem__DOT__i_sim_mem__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram.m_storage
+#else
 #define MEM top->rootp->g6lc_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram.m_storage
 #define MEM_USER top->rootp->g6lc_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__gen_mem_user__DOT__i_tc_sram_wrapper_user__DOT__i_tc_sram__DOT__sram.m_storage
+#endif
 #else
   // Verilator v4
 #define MEM top->g6lc_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram
@@ -798,14 +814,15 @@ done_processing:
   // init_task.stack read 0 (kernel .data at +19 MB) and the kernel looped in its
   // trap entry. fesvr clamps the copy to the section's real size, so small ELFs
   // cost nothing more. +preload_bytes=<n> overrides (bounded by the model).
-  size_t mem_size = 0x10000000;
+  const size_t mem_cap = sizeof(MEM);
+  size_t mem_size = mem_cap;
   {
     const char *pb = nullptr;
     for (int i = 1; i < argc; i++)
       if (std::strncmp(argv[i], "+preload_bytes=", 15) == 0) pb = argv[i] + 15;
     if (pb) {
       const unsigned long long v = std::strtoull(pb, nullptr, 0);
-      if (v > 0 && v <= 0x10000000ULL) mem_size = (size_t)v;
+      if (v > 0 && v <= (unsigned long long)mem_cap) mem_size = (size_t)v;
     }
   }
   bool bulk_done = false;
@@ -851,6 +868,10 @@ done_processing:
         }
       }
     }
+#if !defined(G6LC_STORAMIC_CKPT_TB) && !defined(G6LC_STORAMIC_MODEL_TB)
+    // MEM_USER is only defined on the gen_sim_axi path: the storamic model and
+    // native-checkpoint compositions have no separate user-bit memory, so a
+    // PHDR landing at dram_user has nowhere distinct to go.
     if (addr == (long long)dram_user) {
       try {
         read_section_void(addr, (void *)MEM_USER, mem_size);
@@ -858,6 +879,7 @@ done_processing:
         std::cerr << "No user memory instantiated ...\n";
       }
     }
+#endif
   }
 
   // Publish the preloaded DRAM image to the I1-at-supply oracle. Done after all
@@ -867,6 +889,16 @@ done_processing:
   g6lc_dram_bytes = (uint64_t)mem_size;
   g6lc_dram_base  = dram_base;
 
+#ifdef G6LC_STORAMIC_CKPT_TB
+  std::vector<uint8_t> ckpt_image(reinterpret_cast<const uint8_t *>(MEM),
+                                  reinterpret_cast<const uint8_t *>(MEM) + mem_size);
+  long ckpt_preload_max = 1, ckpt_preload_count = 0;
+  for (int i = 1; i < argc; i++)
+    if (std::strncmp(argv[i], "+ckpt_preload_max=", 18) == 0)
+      ckpt_preload_max = std::strtol(argv[i] + 18, nullptr, 0);
+  bool ckpt_boot_ready_q = false;
+#endif
+
   // Optional mid-run MEM probe (set env CVA6_PRELOAD_PROBE=1)
   const bool probe = (std::getenv("CVA6_PRELOAD_PROBE") != nullptr);
   auto mem_half = [&](size_t off) -> uint16_t {
@@ -874,7 +906,7 @@ done_processing:
     return (uint16_t)bytes[off] | ((uint16_t)bytes[off + 1] << 8);
   };
   // Always report FDT magic after preload (hang-6: fw_fdt_bin @ 0x8001e000).
-  {
+  if (mem_size >= 0x1e004) {
     auto *bytes = reinterpret_cast<const uint8_t *>(MEM);
     const size_t fdt_off = 0x1e000;
     uint32_t b0 = bytes[fdt_off], b1 = bytes[fdt_off + 1], b2 = bytes[fdt_off + 2],
@@ -914,6 +946,24 @@ done_processing:
       top->rtc_i ^= 1;
     }
     main_time++;
+#ifdef G6LC_STORAMIC_CKPT_TB
+    {
+#if defined(G6LC_TB_PARTITIONED)
+      const bool br = top->g6lc_testharness->storamic_ckpt_boot_ready;
+#else
+      const bool br = top->rootp->g6lc_testharness__DOT__storamic_ckpt_boot_ready;
+#endif
+      if (br && !ckpt_boot_ready_q &&
+          (ckpt_preload_max < 0 || ckpt_preload_count < ckpt_preload_max)) {
+        std::memcpy(reinterpret_cast<uint8_t *>(MEM), ckpt_image.data(), mem_size);
+        ckpt_preload_count++;
+        std::cerr << "[preload] ckpt boot_ready load #" << ckpt_preload_count
+                  << " t=" << main_time << " bytes=0x" << std::hex << mem_size
+                  << std::dec << "\n";
+      }
+      ckpt_boot_ready_q = br;
+    }
+#endif
 #ifdef MEM
     // +mem_poke: backdoor 64-bit write straight into the DRAM array behind
     // every cache level — the non-coherent mutation a cbo.inval must expose.

@@ -142,6 +142,7 @@ module wt_dcache
   logic     [                      NumPorts-1:0][               G6LCCfg.PLEN-1:0] miss_paddr;
   logic     [                      NumPorts-1:0][                            2:0] miss_size;
   logic     [                      NumPorts-1:0][      G6LCCfg.MEM_TID_WIDTH-1:0] miss_id;
+  logic     [                      NumPorts-1:0][                            2:0] miss_prot;
   logic     [                      NumPorts-1:0]                                  miss_replay;
   logic     [                      NumPorts-1:0]                                  miss_rtrn_vld;
   logic     [         G6LCCfg.MEM_TID_WIDTH-1:0]                                  miss_rtrn_id;
@@ -206,6 +207,7 @@ module wt_dcache
       .miss_vld_bits_i(miss_vld_bits_o),
       .miss_size_i    (miss_size),
       .miss_id_i      (miss_id),
+      .miss_prot_i    (miss_prot),
       .miss_replay_o  (miss_replay),
       .miss_rtrn_vld_o(miss_rtrn_vld),
       .miss_rtrn_id_o (miss_rtrn_id),
@@ -308,6 +310,7 @@ assign rd_prio[k] = 1'b1;
           .miss_nc_o      (miss_nc[k]),
           .miss_size_o    (miss_size[k]),
           .miss_id_o      (miss_id[k]),
+          .miss_prot_o    (miss_prot[k]),
           .miss_replay_i  (miss_replay[k]),
           .miss_rtrn_vld_i(miss_rtrn_vld[k]),
           // used to detect readout mux collisions
@@ -337,6 +340,7 @@ assign rd_prio[k] = 1'b1;
       assign miss_nc[k] = 1'b0;
       assign miss_size[k] = 3'b0;
       assign miss_id[k] = {{G6LCCfg.MEM_TID_WIDTH} {1'b0}};
+      assign miss_prot[k] = 3'b000;
       assign rd_tag[k] = {{G6LCCfg.DCACHE_TAG_WIDTH} {1'b0}};
       assign rd_idx[k] = {{DCACHE_CL_IDX_WIDTH} {1'b0}};
       assign rd_off[k] = {{G6LCCfg.DCACHE_OFFSET_WIDTH} {1'b0}};
@@ -489,6 +493,7 @@ assign rd_prio[k] = 1'b1;
       .miss_nc_o      (miss_nc[NumPorts-1]),
       .miss_size_o    (miss_size[NumPorts-1]),
       .miss_id_o      (miss_id[NumPorts-1]),
+      .miss_prot_o    (miss_prot[NumPorts-1]),
       .miss_rtrn_vld_i(miss_rtrn_vld[NumPorts-1]),
       .miss_rtrn_id_i (miss_rtrn_id),
       // cache read interface

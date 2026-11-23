@@ -411,6 +411,10 @@ ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/l3_cache/g6lc_l3_top.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/src/g6lc_cluster.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/include/g6lc_ai_island_cfg_pkg.sv
+# Storamic AXI/AXIL type package: g6lc_ai_dram_backend.sv and
+# g6lc_testharness.sv reference g6lc_storamic_pkg:: types unconditionally;
+# all storamic module instances stay behind G6LCCfg.Storamic*En generates.
+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_storamic_8fo4/rtl/include/g6lc_storamic_pkg.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/src/g6lc_ai_dram_backend.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/src/g6lc_ai_litedram_wrap.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/src/g6lc_ai_dram_channels.sv

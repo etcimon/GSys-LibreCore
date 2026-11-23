@@ -136,12 +136,22 @@ module g6lc_hart import g6lc_core_pkg::*; #(
   input  logic                         ai_isl_retired_valid_i,
   input  logic [31:0]                  ai_isl_retired_ticket_i,
   input  logic [31:0]                  ai_isl_last_ticket_i,
-  input  logic [15:0]                  ai_isl_last_status_i
+  input  logic [15:0]                  ai_isl_last_status_i,
+  input  logic                         storamic_pause_i,
+  output logic                         storamic_drained_o
 );
 
-  // hyp8: two-flop synchronizers on the interrupt/debug inputs (H13). In the
-  // draft SoC these arrive on clk_uncore_i; when clk_uncore_i is a real async
-  // clock the double-flop stages below are the required CDC cells.
+  // hyp8: interrupt/debug synchronizers (H13). These sources are uncore-domain
+  // levels (CLINT/PLIC/SoC blocks all run on clk_uncore_i), so they are captured
+  // on clk_uncore_i — the always-on clock — not clk_i. Under G6LCCfg.CoreSleepGate
+  // clk_i is the gated core_clk: registering these on clk_i froze every external
+  // wake source (MSIP/IPI, PLIC irq, CLINT mtimecmp, debug) the moment a core
+  // gated, so wfi_wake_o could never re-assert and the core could never wake —
+  // a permanent sleep-gate deadlock (only the rtc_time_i-based Sstc comparators,
+  // which are ungated, still worked). clk_uncore_i == clk_i whenever the core
+  // clock runs, so normal-operation timing is unchanged; while gated the flops
+  // keep observing and wfi_wake_o (comb) re-opens the gate on the first pending
+  // source. Quasi-static level holds make the clk_uncore->clk_i crossing safe.
   localparam int unsigned NH = (G6LCCfg.NrHarts < 1) ? 1 : G6LCCfg.NrHarts;
 
   logic [NH-1:0][1:0] irq_sync_q;
@@ -149,7 +159,7 @@ module g6lc_hart import g6lc_core_pkg::*; #(
   logic [NH-1:0]      time_irq_sync_q;
   logic               debug_req_sync_q;
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin : p_irq_sync
+  always_ff @(posedge clk_uncore_i or negedge rst_ni) begin : p_irq_sync
     if (!rst_ni) begin
       irq_sync_q      <= '0;
       ipi_sync_q      <= '0;
@@ -280,7 +290,9 @@ module g6lc_hart import g6lc_core_pkg::*; #(
       .l2_pwhold_i          ( l2_pwhold_i               ),
       .l3_pwhold_i          ( l3_pwhold_i               ),
       .l2_pf_issue_i        ( l2_pf_issue_i             ),
-      .l2_pf_useful_i       ( l2_pf_useful_i            ), .coh_sf_filtered_i       ( coh_sf_filtered_i            ), .coh_sf_broadcast_i       ( coh_sf_broadcast_i            )
+      .l2_pf_useful_i       ( l2_pf_useful_i            ), .coh_sf_filtered_i       ( coh_sf_filtered_i            ), .coh_sf_broadcast_i       ( coh_sf_broadcast_i            ),
+      .storamic_pause_i     ( storamic_pause_i          ),
+      .storamic_drained_o   ( storamic_drained_o        )
     );
 
     if (G6LCCfg.CvxifEn) begin: gen_cvxif
@@ -515,7 +527,9 @@ module g6lc_hart import g6lc_core_pkg::*; #(
       .l2_pwhold_i          ( l2_pwhold_i               ),
       .l3_pwhold_i          ( l3_pwhold_i               ),
       .l2_pf_issue_i        ( l2_pf_issue_i             ),
-      .l2_pf_useful_i       ( l2_pf_useful_i            ), .coh_sf_filtered_i       ( coh_sf_filtered_i            ), .coh_sf_broadcast_i       ( coh_sf_broadcast_i            )
+      .l2_pf_useful_i       ( l2_pf_useful_i            ), .coh_sf_filtered_i       ( coh_sf_filtered_i            ), .coh_sf_broadcast_i       ( coh_sf_broadcast_i            ),
+      .storamic_pause_i     ( storamic_pause_i          ),
+      .storamic_drained_o   ( storamic_drained_o        )
     );
 
     g6lc_ara_attach #(

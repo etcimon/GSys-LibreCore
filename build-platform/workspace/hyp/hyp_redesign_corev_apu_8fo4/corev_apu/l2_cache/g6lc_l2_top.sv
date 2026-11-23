@@ -150,7 +150,13 @@ module g6lc_l2_top
     // B-acknowledged — under POSTED_WRITES that means the write tracker is
     // empty and the FSM is not in a bypass write state. The CMO engine gates
     // clean/flush completion on this.
-    output logic                          l2_write_idle_o
+    output logic                          l2_write_idle_o,
+    // Storamic W1 pause/drain and whole-cache resync. Inert when inputs are 0.
+    input  logic                          l2_quiesce_i,
+    input  logic                          l2_block_slv_i,
+    output logic                          l2_idle_o,
+    input  logic                          l2_inval_all_i,
+    output logic                          l2_inval_all_done_o
 );
 
   // Identity when disabled (should not be instantiated; safety net)
@@ -467,6 +473,10 @@ assign mst_req_o  = slv_req_i;
     assign l2_evict_addr_o  = '0;
     assign l2_back_inval_ready_o = 1'b1;
     assign l2_write_idle_o = 1'b1;
+    assign l2_idle_o = 1'b1;
+    assign l2_inval_all_done_o = l2_inval_all_i;
+    logic _unused_quiesce;
+    assign _unused_quiesce = l2_quiesce_i & l2_block_slv_i;
   end else begin : gen_l2
 
   localparam int unsigned LINE_BYTES  = LINE_WIDTH / 8;
@@ -585,6 +595,14 @@ assign mst_req_o  = slv_req_i;
   logic [MSHR_DEPTH-1:0]         fill_pf_q, fill_pf_d;
   logic                          head_pf, pf_retire;
 
+  // Storamic W1 whole-cache invalidation walk state (1 set/cycle once idle).
+  logic                          inval_all_act_q, inval_all_done_q;
+  logic [IDX_BITS-1:0]           inval_all_idx_q;
+  logic                          inval_all_block, slv_accept_block;
+  assign inval_all_block     = l2_inval_all_i || inval_all_act_q;
+  assign slv_accept_block    = l2_block_slv_i || inval_all_block;
+  assign l2_inval_all_done_o = inval_all_done_q;
+
   g6lc_l2_tag #(
       .NUM_SETS  (NUM_SETS),
       .SET_ASSOC (SET_ASSOC),
@@ -621,7 +639,9 @@ assign mst_req_o  = slv_req_i;
       .inval_match_i      (tag_match_inval),
       .inval_match_index_i(tag_match_index),
       .inval_match_tag_i  (tag_match_tag),
-      .inval_match_hit_o  (l2_selfinv_hit_o)
+      .inval_match_hit_o  (l2_selfinv_hit_o),
+      .inval_set_i        (inval_all_act_q),
+      .inval_set_index_i  (inval_all_idx_q)
   );
 
   logic data_a_req, data_a_we, data_b_req, data_b_we, bank_conflict;
@@ -818,6 +838,7 @@ assign mst_req_o  = slv_req_i;
   logic [7:0]                len_q, len_d;
   logic [2:0]                size_q, size_d;
   logic [3:0]                cache_q, cache_d;
+  logic [2:0]                prot_q, prot_d;
   logic [5:0]                atop_q, atop_d;  // AXI ATOP (AMOs / AMOCAS)
   logic                      lock_q, lock_d;
   logic                      burst_incr_q, burst_incr_d;
@@ -964,6 +985,11 @@ assign mst_req_o  = slv_req_i;
   logic [5:0]                              bfid_timer_q, bfid_timer_d;
   logic                                    bfid_busy;
   assign bfid_busy = bfid_rpend_q || (bfid_timer_q != '0);
+  // Full cache idle for Storamic W1 pause/drain.
+  assign l2_idle_o = l2_write_idle_o && (state_q == S_IDLE) &&
+                     (fifo_cnt_q == '0) && rdtrk_empty && !mst_r_ot_q &&
+                     !bfid_busy && !wr_inval_pend_q && !pf_probe_q &&
+                     !inval_all_act_q;
 
   // Derived fill-engine wires. fifo position = rd + offset wrapped; the
   // counters are distances from rd so the oldest outstanding entry is always
@@ -1353,7 +1379,7 @@ assign mst_req_o  = slv_req_i;
   // an inval-match steal re-launches. The probe evaluates — silently, one
   // cycle minimum after capture — on the first S_IDLE cycle that owns the
   // registered row.
-  assign pf_launch_ok  = PF_EN &&
+  assign pf_launch_ok  = PF_EN && !l2_quiesce_i && !inval_all_block &&
                          !(state_d == S_TAG) &&
                          !(WRITE_UPDATE && (state_q == S_IDLE) &&
                            (state_d == S_BYPASS_AW));
@@ -1559,6 +1585,7 @@ assign mst_req_o  = slv_req_i;
     len_d       = len_q;
     size_d      = size_q;
     cache_d     = cache_q;
+    prot_d      = prot_q;
     atop_d      = atop_q;
     lock_d      = lock_q;
     burst_incr_d = burst_incr_q;
@@ -1604,7 +1631,7 @@ assign mst_req_o  = slv_req_i;
           // A deferred self-invalidation must land before any later request can
           // look up the line it covers.
           state_d = S_IDLE;
-        end else if (slv_req_i.ar_valid && (serve_turn_q || !serve_pend) && !prefer_write) begin
+        end else if (!slv_accept_block && slv_req_i.ar_valid && (serve_turn_q || !serve_pend) && !prefer_write) begin
           // Prefer reads (MLP); accept write when no AR
           slv_resp_o.ar_ready = 1'b1;
           addr_d      = slv_req_i.ar.addr;
@@ -1612,6 +1639,7 @@ assign mst_req_o  = slv_req_i;
           len_d       = slv_req_i.ar.len;
           size_d      = slv_req_i.ar.size;
           cache_d     = slv_req_i.ar.cache;
+          prot_d      = slv_req_i.ar.prot;
           atop_d      = '0;
           // Exclusive LR (AxLOCK) must reach g6lc_axi_lrsc. Zeroing lock_d
           // here made LDEX a plain AR; STEX then saw no reservation (Vg6lc
@@ -1647,7 +1675,7 @@ assign mst_req_o  = slv_req_i;
           // A pf fill has no primary burst: waitered pf heads start at the
           // waiter pop; the waitless case is retired inline (pf_retire).
           state_d      = head_pf ? S_SERVE_POP : S_SERVE;
-        end else if (slv_req_i.aw_valid && wtrk_aw_ok) begin
+        end else if (!slv_accept_block && slv_req_i.aw_valid && wtrk_aw_ok) begin
           // Writes: write-through bypass (always push to memory); optional allocate
           slv_resp_o.aw_ready = 1'b1;
           addr_d      = slv_req_i.aw.addr;
@@ -1655,6 +1683,7 @@ assign mst_req_o  = slv_req_i;
           len_d       = slv_req_i.aw.len;
           size_d      = slv_req_i.aw.size;
           cache_d     = slv_req_i.aw.cache;
+          prot_d      = slv_req_i.aw.prot;
           // Preserve ATOP/lock — dropping them turns AMOCAS into a plain store
           // and the HPDCACHE UC FSM hangs waiting for the atomic R beat.
           atop_d      = slv_req_i.aw.atop;
@@ -1875,7 +1904,7 @@ assign mst_req_o  = slv_req_i;
         mst_req_o.ar.burst = axi_pkg::BURST_INCR;
         mst_req_o.ar.cache = cache_q;
         mst_req_o.ar.lock  = lock_q;
-        mst_req_o.ar.prot  = 3'b000;
+        mst_req_o.ar.prot  = prot_q;
         if (mst_req_o.ar_valid && mst_resp_i.ar_ready) begin
           if (id_q == FILL_ID) bfid_rpend_d = 1'b1;
           if (POSTED_WRITES && (id_q != FILL_ID) && !rdtrk_full &&
@@ -1930,6 +1959,7 @@ assign mst_req_o  = slv_req_i;
         mst_req_o.aw.size  = size_q;
         mst_req_o.aw.burst = axi_pkg::BURST_INCR;
         mst_req_o.aw.cache = cache_q;
+        mst_req_o.aw.prot  = prot_q;
         mst_req_o.aw.atop  = atop_q;
         mst_req_o.aw.lock  = lock_q;
         // Drop any L2 copy of this line — except under WRITE_UPDATE, where a
@@ -2236,7 +2266,9 @@ assign mst_req_o  = slv_req_i;
       pf_probe_d = 1'b1;
       pf_addr_d  = pf_cand_line;
     end
-    if (pf_probe_fire) begin
+    if (l2_quiesce_i || inval_all_block) begin
+      pf_probe_d = 1'b0;
+    end else if (pf_probe_fire) begin
       // Silent probe of the candidate's set/tag — no l2_hit_o/l2_miss_o
       // pulse. line0/MSHR lookup inputs are already muxed to pf_addr_q.
       tag_lookup = 1'b1;
@@ -2308,6 +2340,7 @@ assign mst_req_o  = slv_req_i;
       len_q       <= '0;
       size_q      <= '0;
       cache_q     <= '0;
+      prot_q      <= '0;
       atop_q      <= '0;
       lock_q      <= 1'b0;
       burst_incr_q <= 1'b0;
@@ -2368,6 +2401,7 @@ assign mst_req_o  = slv_req_i;
       len_q       <= len_d;
       size_q      <= size_d;
       cache_q     <= cache_d;
+      prot_q      <= prot_d;
       atop_q      <= atop_d;
       lock_q      <= lock_d;
       burst_incr_q <= burst_incr_d;
@@ -2421,6 +2455,27 @@ assign mst_req_o  = slv_req_i;
         fill_ferr_q[e]  <= fill_ferr_d[e];
         fifo_q[e]       <= fifo_d[e];
       end
+    end
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      inval_all_act_q  <= 1'b0;
+      inval_all_done_q <= 1'b0;
+      inval_all_idx_q  <= '0;
+    end else if (inval_all_act_q) begin
+      if (inval_all_idx_q == IDX_BITS'(NUM_SETS - 1)) begin
+        inval_all_act_q  <= 1'b0;
+        inval_all_done_q <= 1'b1;
+        inval_all_idx_q  <= '0;
+      end else begin
+        inval_all_idx_q <= inval_all_idx_q + 1'b1;
+      end
+    end else if (inval_all_done_q) begin
+      if (!l2_inval_all_i) inval_all_done_q <= 1'b0;
+    end else if (l2_inval_all_i && l2_idle_o) begin
+      inval_all_act_q <= 1'b1;
+      inval_all_idx_q <= '0;
     end
   end
 

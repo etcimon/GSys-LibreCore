@@ -8,6 +8,13 @@ The record codec/layout, owned word sequencer, reserved-media copy/recovery
 engine and untrusted word-port guard now exist as separate first-party leaves.
 The current source is under local validation; native activation remains off.
 
+Note (2026-11-23): SMARTr (`smartr-crash-fault-handling.md`) plans to move the
+checkpoint extent from this fixed slot/bank layout to a tape-line append log —
+one sequential frame per SAVE, random-access reads, whole-region erase of
+superseded frames (SR-5 manifest, SR-7 retained frames). The record codec,
+CRC/commit-marker discipline and identity/mapping checks here carry over into
+the frame format; the slot alternation does not.
+
 ## Replace the fixture, not the qualification boundary
 
 The C2 bench uses retained selector registers only as a participant fixture.

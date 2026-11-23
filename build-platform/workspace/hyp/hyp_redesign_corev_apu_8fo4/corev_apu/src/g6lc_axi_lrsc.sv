@@ -57,6 +57,8 @@ module g6lc_axi_lrsc #(
 ) (
     input  logic clk_i,
     input  logic rst_ni,
+    // Storamic C5: drop every reservation on restore/pause. Tie 0 if unused.
+    input  logic res_clr_i,
     AXI_BUS.Slave  slv,
     AXI_BUS.Master mst
 );
@@ -334,6 +336,8 @@ module g6lc_axi_lrsc #(
       end
       if (b_hs && !inj_b)
         aw_ex[mst.b_id] <= 1'b0;
+      // Ordered after the LR allocation so a clear always wins.
+      if (res_clr_i) res_v <= '0;
 
       // A failing SC had no entry by construction (`aw_drop` means `!aw_hit`),
       // so there is nothing to clear. The old code cleared the global

@@ -700,6 +700,7 @@ module g6lc_ptw
     kill_req_n              = kill_req_q;
     req_port_o.data_req     = 1'b0;
     req_port_o.data_size    = 2'(G6LCCfg.PtLevels);
+    req_port_o.data_prot    = 3'b000;
     req_port_o.data_we      = 1'b0;
     ptw_error_o             = 1'b0;
     ptw_error_at_g_st_o     = 1'b0;

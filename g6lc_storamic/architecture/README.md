@@ -17,6 +17,7 @@ owns product topology and SoC integration.
 | [verification](verification.md) | Remote evidence, first-party closure, g6lc_qemu boundary |
 | [implementation tasks](implementation-tasks.md) | Dependency-ordered ST-001..ST-041 backlog, code owners and completion gates |
 | [completion plan](completion-plan.md) | Current native CPU, ownership, physical and system qualification dependencies |
+| [SMARTr crash-fault handling](smartr-crash-fault-handling.md) | System-level fault-hibernate/rollback/refresher process on the checkpoint substrate; debugging platform deferred |
 | [development status](development-status.md) | Component evidence and historical failure analysis |
 | [block address validation](block-address-validation.md) | Sector-to-byte overflow and descriptor-table admission review |
 | [model interface](model-interface.md) | Executable-model implementation design (not a capability grant) |

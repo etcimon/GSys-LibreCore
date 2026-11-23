@@ -31,9 +31,17 @@ EXTRA_FILES = [
     'verif/regress/remote/hyp8/hyp8-build-harness.sh',
     'verif/regress/remote/hyp8/g6lc_native_isa.h',
     'verif/regress/remote/g6lc_hyp8_tuning.py',
+    'verif/regress/remote/g6lc_tuning_policy.py',
+    'verif/regress/remote/g6lc_tuning_driver.lua',
     'verif/regress/remote/g6lc_pack_generated_rows.py',
     'verif/regress/remote/g6lc_pack_columns.py',
+    'verif/regress/remote/g6lc_pack_predicates.py',
+    'verif/regress/remote/g6lc_pack_wrapped_columns.py',
     'verif/regress/remote/g6lc_column_tile.h',
+    'verif/regress/remote/analyze_objdump_hotpaths.py',
+    'verif/regress/remote/g6lc_hotpath_ingest.py',
+    'verif/regress/remote/g6lc_sentinel_index.py',
+    'verif/regress/remote/g6lc_sentinel_dataflow.py',
     # split_var controls the harness rewrites for the hyp module names, and
     # the fork installer whose PGO round trains on this closure
     'build-platform/scripts/verilator-split-loops.vlt',
@@ -58,9 +66,11 @@ EXTRA_FILES = [
     'build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/apu/g6lc_apu_fault_sup.sv',
 ]
 EXTRA_GLOBS = [
+    'verif/regress/remote/hyp8/policies/*.lua',
     'verif/regress/remote/hyp8/*.dts', 'verif/regress/remote/hyp8/*.dtsi',
     'verif/tests/custom/hyp8_*.S',
     'verif/tests/custom/multicore/*.S',
+    'verif/tests/custom/storamic/*',
     'verif/tb/core/tb_g6lc_hyp8_*.sv',
     'corev_apu/tb/dpi/*',
     'build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/neg/*.sv',

@@ -2770,7 +2770,8 @@ module cva6
       .decoded_instr_i_prev    (issue_entry_id_issue_prev),
       .orig_instr_i            (orig_instr_id_issue),
       .decoded_instr_valid_i   (issue_entry_valid_id_issue & {CVA6Cfg.NrIssuePorts{
-          !smt_quiesce && !(CVA6Cfg.NrHarts > 1 && halt_ctrl)}}),
+          !smt_quiesce && !(CVA6Cfg.NrHarts > 1 && halt_ctrl &&
+                            !(storamic_resync_state_q == RESYNC_WAIT_HEAD && !halt_csr_ctrl))}}),
       .is_ctrl_flow_i          (is_ctrl_fow_id_issue),
       .decoded_instr_ack_o     (issue_instr_issue_id),
       .g1fh_csr_a0_i           (g1fh_csr_a0),

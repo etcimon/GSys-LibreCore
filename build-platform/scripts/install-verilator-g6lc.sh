@@ -10,7 +10,7 @@
 set -euo pipefail
 REPO="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 SRC="${VLT_SRC:-$REPO/tools/verilator}"
-PIN="${VLT_PIN:-$(git -C "$REPO" ls-tree HEAD tools/verilator 2>/dev/null | awk '{print $3}')}"
+PIN="${VLT_PIN:-$(git -C "$REPO" ls-tree HEAD tools/verilator 2>/dev/null | awk '{print $3}' || true)}"
 FORK_URL="${VLT_FORK_URL:-https://github.com/etcimon/verilator.git}"
 PREFIX="${VLT_PREFIX:-/opt/testharness/toolchains/verilator-v5.008-g6lc}"
 PINNED_RUNTIME="${VLT_PINNED_RUNTIME:-/opt/testharness/runs/review-private-runtime-20260915/runtime}"
@@ -21,7 +21,7 @@ if [[ ! -f "$SRC/src/V3Const.cpp" ]]; then
   git clone -q "$FORK_URL" "$SRC"
 fi
 cd "$SRC"
-if [[ -n "$PIN" ]]; then
+if [[ -n "$PIN" && "${VLT_ALLOW_DIRTY:-0}" != "1" ]]; then
   git fetch -q origin g6lc || true
   git checkout -q "$PIN"
 fi
@@ -75,6 +75,7 @@ if [[ "$PGO" == "1" ]]; then
         VERILATOR_ROOT="$TRAIN_PREFIX/runtime" \
         SOFT_LADDER_BUILD_TARGET="${VLT_PGO_TRAIN_TARGET:-g6lc64_hyp8}" \
         SOFT_LADDER_VERILATOR_THREADS="${VLT_PGO_TRAIN_THREADS:-4}" \
+        SOFT_LADDER_BUILD_VLT_ARGS="${VLT_PGO_TRAIN_ARGS:-}" \
         SOFT_LADDER_VERLIB="$PGO_DIR/train-mdir" HYP8_BUILD_SPLIT_VLT=1 HYP8_BUILD_VERILATE_ONLY=1 \
         timeout --signal=TERM --kill-after=60 "${VLT_PGO_TRAIN_TIMEOUT:-5400}" \
         bash verif/regress/remote/hyp8/hyp8-build-harness.sh hyp8 > "$PGO_DIR/train.log" 2>&1 ) \
@@ -114,5 +115,12 @@ mkdir -p "$RT/bin"; cp -f "$PREFIX/bin/verilator_bin" "$RT/bin/verilator_bin"
 cp -f "$PREFIX/bin/verilator_bin_dbg" "$RT/bin/verilator_bin_dbg" 2>/dev/null || true
 # The perl driver too: a hierarchical build's child make runs $VERILATOR_ROOT/bin/verilator.
 cp -f "$PREFIX/bin/verilator" "$RT/bin/verilator"
+CAPS=""
+for cap in -fclock-skip-sink -fclock-skip -fdfg-peephole-pack-bitwise-mux -fdfg-peephole-pack-predicates -fdfg-peephole-pack-byte-plane; do
+  needle="$cap"
+  [[ "$needle" == -fdfg-peephole-* ]] && needle="${needle#-fdfg-peephole-}"
+  grep -Fq -- "$needle" "$PREFIX/bin/verilator_bin" 2>/dev/null && CAPS="${CAPS:+$CAPS }$cap"
+done
+echo "[vlt-g6lc] capabilities: ${CAPS:-<none>}"
 echo "[vlt-g6lc] runtime dir $RT (fork headers + fork verilator_bin); pinned runtime: $PINNED_RUNTIME"
 echo "[vlt-g6lc] installed at $PREFIX"

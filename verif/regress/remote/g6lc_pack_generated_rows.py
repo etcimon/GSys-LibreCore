@@ -143,6 +143,83 @@ class Expression:
             out.append(f"({enable} & {data})")
         return " | ".join(out)
 
+    @staticmethod
+    def terms_signed(node, bit):
+        """DNF with literal polarity (bit_id, negated) for bitwise muxes."""
+        if bit < 0 or not (node[3] >> bit) & 1:
+            return ()
+        op, a, b = node[:3]
+        sub = Expression.terms_signed
+        if op == "word":
+            return (((32 * a + bit, False),),)
+        if op == "~":
+            inner = a
+            bpos = bit
+            while inner[0] in ("cast", ">>", "<<"):
+                if inner[0] == ">>":
+                    bpos += inner[2]
+                elif inner[0] == "<<":
+                    bpos -= inner[2]
+                inner = inner[1]
+            if inner[0] != "word" or not 0 <= bpos < inner[4]:
+                raise Unsupported
+            return (((32 * inner[1] + bpos, True),),)
+        if op == "num":
+            return ((),)
+        if op == "cast":
+            return sub(a, bit)
+        if op in ("<<", ">>"):
+            return sub(a, bit - b if op == "<<" else bit + b)
+        lhs, rhs = sub(a, bit), sub(b, bit)
+        if op == "|":
+            if len(lhs) + len(rhs) > 64:
+                raise Unsupported
+            return lhs + rhs
+        if len(lhs) * len(rhs) > 64:
+            raise Unsupported
+        return tuple(x + y for x in lhs for y in rhs)
+
+    def packed_mux(self):
+        """Pack complemented-enable / 2-way bitwise mux rows: (en & a) | (~en & b)."""
+        products = []
+        counts = Counter()
+        saw_neg = False
+        for i in range(32):
+            for term in self.terms_signed(self.root, i):
+                if len(term) != 2:
+                    raise Unsupported
+                (a, na), (b, nb) = term
+                if na and nb:
+                    raise Unsupported
+                saw_neg |= na or nb
+                opts = []
+                if not nb:
+                    opts.append((a, na, b // 32, i - b % 32))
+                if not na:
+                    opts.append((b, nb, a // 32, i - a % 32))
+                if not opts:
+                    raise Unsupported
+                counts.update(opts)
+                products.append((i, tuple(opts)))
+        if not saw_neg or len(products) < 32:
+            raise Unsupported
+        masks = defaultdict(int)
+        for i, opts in products:
+            masks[max(opts, key=counts.__getitem__)] |= 1 << i
+        if len(masks) * 4 > len(products):
+            raise Unsupported
+        out = []
+        for (b, neg, word, shift), mask in masks.items():
+            w_en = self.words[b // 32]
+            bit_expr = f"((uint32_t({w_en}) >> {b % 32}) & 1U)"
+            broad = f"((0U - {bit_expr}) ^ 0xffffffffU)" if neg else f"(0U - {bit_expr})"
+            enable = f"({broad} & 0x{mask:x}U)"
+            data = f"uint32_t({self.words[word]})"
+            if shift:
+                data = f"({data} {'<<' if shift > 0 else '>>'} {abs(shift)})"
+            out.append(f"({enable} & {data})")
+        return " | ".join(out)
+
 
 def lower(source, header):
     widths = {k: int(w) for w, k in re.findall(r"VlWide<(\d+)>/\*[^*]*\*/\s+(\w+);", header)}
@@ -158,6 +235,37 @@ def lower(source, header):
             return m[0]
         try:
             rhs = Expression(m[5], widths).packed()
+        except (Unsupported, RecursionError):
+            return m[0]
+        count += 1
+        return f"{m[1]}{m[2]} = {rhs};"
+
+    return ASSIGN.sub(assign, source), count
+
+
+def lower_mux_rows(source, header):
+    """Lower complemented-enable / bitwise-mux wide word assignments."""
+    widths = {k: int(w) for w, k in re.findall(r"VlWide<(\d+)>/\*[^*]*\*/\s+(\w+);", header)}
+    for k, w in re.findall(r"VL_(?:IN|OUT|INOUT)W\((\w+),\d+,\d+,(\d+)\);", header):
+        widths[k] = int(w)
+    small = set()
+    for typ, name in re.findall(r"\b([CSIQ]Data)/\*[^*]*\*/\s+(\w+);", header):
+        widths[name] = -2 if typ == "QData" else -1
+        if typ in ("CData", "SData"):
+            small.add(name)
+    for k in re.findall(r"VL_(?:IN|OUT|INOUT)\((\w+),\d+,\d+\);", header):
+        widths[k] = -1
+    count = 0
+
+    def assign(m):
+        nonlocal count
+        if "~" not in m[5] or int(m[4][:-1], 0) >= widths.get(m[3], 0) or len(m[5]) < 500:
+            return m[0]
+        for read in re.finditer(r"vlSelf->(\w+)", m[5]):
+            if read[1] in small:
+                return m[0]
+        try:
+            rhs = Expression(m[5], widths, predicates=True).packed_mux()
         except (Unsupported, RecursionError):
             return m[0]
         count += 1

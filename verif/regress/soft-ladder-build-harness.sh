@@ -149,6 +149,8 @@ fi
 # Extra Verilator arguments (SOFT_LADDER_BUILD_VLT_ARGS, default none) pin a
 # reviewed compiler control to one candidate build. The split-loops .vlt is
 # handled separately below: it is the default control of the g6lc flavour.
+# SOFT_LADDER_BUILD_CLOCK_SKIP=off|auto|sink|causal enables clock-skip passes
+# opportunistically when the selected fork binary supports them.
 BUILD_VLT_ARGS="${SOFT_LADDER_BUILD_VLT_ARGS:-}"
 [[ -n "$BUILD_VLT_ARGS" ]] && log "extra verilator args: $BUILD_VLT_ARGS"
 LINKER="${SOFT_LADDER_BUILD_LINKER:-}"
@@ -489,6 +491,49 @@ fi
 VTHREADS="${SOFT_LADDER_VERILATOR_THREADS:-2}"
 if [[ "$VTHREADS" == "$(nproc)" ]] || [[ "$VTHREADS" == "\$(nproc)" ]]; then
   VTHREADS=2
+fi
+
+# Opportunistic clock-skip & Lua policy Verilator flags (capability-checked so
+# pinned upstream v5.008 builds are never affected).
+sl_vlt_supports() {
+  local bin="${VLT_HOME:-}/bin/verilator_bin"
+  [[ -x "$bin" ]] || bin="${VERILATOR_ROOT:-}/bin/verilator_bin"
+  local needle="$1"
+  [[ "$needle" == -fdfg-peephole-* ]] && needle="${needle#-fdfg-peephole-}"
+  [[ -x "$bin" ]] && grep -Fq -- "$needle" "$bin" 2>/dev/null
+}
+SL_CLOCK_SKIP="${SOFT_LADDER_BUILD_CLOCK_SKIP:-off}"
+if [[ "$VLT_FLAVOUR" == "g6lc" ]]; then
+  if [[ -n "${SOFT_LADDER_BUILD_TUNING_PLUGIN:-}" && -f "$SOFT_LADDER_BUILD_TUNING_PLUGIN" ]]; then
+    sl_planned=$(python3 "$ROOT/verif/regress/remote/g6lc_tuning_policy.py" \
+      --plan-vlt-flags --plugin "$SOFT_LADDER_BUILD_TUNING_PLUGIN" \
+      --prefix Variane_testharness --command "-D$TARGET --threads $VTHREADS" 2>/dev/null || true)
+    for fl in $sl_planned; do
+      if sl_vlt_supports "$fl"; then
+        BUILD_VLT_ARGS="${BUILD_VLT_ARGS:+$BUILD_VLT_ARGS }$fl"
+      else
+        log "warn: selected verilator_bin does not support policy flag $fl; skipping"
+      fi
+    done
+  fi
+  case "$SL_CLOCK_SKIP" in
+    auto|sink)
+      if sl_vlt_supports "-fclock-skip-sink"; then
+        BUILD_VLT_ARGS="${BUILD_VLT_ARGS:+$BUILD_VLT_ARGS }-fclock-skip-sink"
+        log "clock-skip: sink (-fclock-skip-sink)"
+      elif [[ "$SL_CLOCK_SKIP" == "sink" ]]; then
+        log "SOFT_LADDER_BUILD_CLOCK_SKIP=sink requires a fork supporting -fclock-skip-sink"; exit 2
+      fi ;;
+    causal)
+      if sl_vlt_supports "-fclock-skip"; then
+        BUILD_VLT_ARGS="${BUILD_VLT_ARGS:+$BUILD_VLT_ARGS }-fclock-skip"
+        log "clock-skip: causal (-fclock-skip)"
+      else
+        log "SOFT_LADDER_BUILD_CLOCK_SKIP=causal requires a fork supporting -fclock-skip"; exit 2
+      fi ;;
+    off) ;;
+    *) log "bad SOFT_LADDER_BUILD_CLOCK_SKIP=$SL_CLOCK_SKIP (want off|auto|sink|causal)"; exit 2 ;;
+  esac
 fi
 
 log "target=$TARGET ver-library=$VERLIB_DIR jobs=$JOBS vthreads=$VTHREADS"

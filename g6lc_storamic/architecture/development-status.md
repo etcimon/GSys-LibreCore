@@ -1,5 +1,38 @@
 # Storamic development and qualification lanes
 
+SMARTr planning (2026-11-23, no implementation): the crash-fault handling
+discipline — fault-hibernate SAVE with a CPU-state crash page, clean
+hibernate, periodic last-known-good refresh with cold rollback, checkpoint
+classes (REFRESH/FAULT/HIBERNATE) so a crash image never displaces the
+refresher image, a moving-window segmented checkpoint that scales to any
+RAM size, single-mode FAST tape streaming (sequential append frames with
+relative jumps over gaps, no journal-mode select — the frame protocol is
+the journal) with the tradeoff moved into runtime policy knobs,
+checkpoint-data access controls (export
+policy now, image confidentiality deferred), runtime feature/policy knobs,
+an N-generation ring, wear-aware policy, a patch carrier, and per-region
+tape journals for real-time journal-ahead protection of mission-critical
+workloads (SR-13) — is planned
+in `smartr-crash-fault-handling.md` with work rows SR-1..SR-12 in
+`completion-plan.md`. Its §3 fixes a tape-line write discipline for the
+checkpoint extent: sequential appends at a monotonic head (one frame per
+SAVE, segment sweep order = append order), random-access reads, whole-
+region erase reclaim of superseded frames. The second-hand debugging
+platform is explicitly
+deferred; its access-control contract (SR-11) is planned. First RTL deltas
+when work starts: SR-3 record class, SR-5 segment manifest, SR-6 frame /
+relative-jump append layout, SR-13 tape journal device + replay engine.
+
+W2 status (2026-11-23): in-order multi-hart/multi-core checkpointing
+(SMT2, SMT2+L3, `G6LC_STORAMIC_MC2`) committed as `283db4303` +
+`d7881eadf`. SMT2 cases pass remotely (`storamic-837c36f99341`:
+smt2-flow/mh/cold + smt2l3-mh all `tohost=0`); `ckpt-mc2` cases failed on
+a `check_cfg` snoop-filter assertion — the MC2 overlay set
+`SnoopFilterEn=1` but the package-default block reset
+`SnoopFilterEntries` to 0; fixed by reading the effective `cfg` value in
+`build_config_pkg.sv` (uncommitted). Rerun `storamic-056099bf7707` in
+progress.
+
 Latest C0 follow-up (CPU51, closed under the pinned-diagnostic rule): the
 full-core gate-level SCC/latch proof is a permanent registered stage
 (`core-scc`), and the strict full-CPU Verilator `UNOPTFLAT` diagnostic is a

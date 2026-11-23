@@ -28,7 +28,13 @@
 #                                 (cross-module debug traces out) unless 1
 #
 # Generated C++ (same recipe as soft-ladder-build-harness.sh, guide §4b.1):
-#   HYP8_BUILD_TUNING=auto|off|packed-tiled    native MC policy, see guide §64
+#   HYP8_BUILD_TUNING=auto|off|packed-tiled|lua    native policy, see guide §64
+#   HYP8_BUILD_TUNING_PLUGIN=<name>.lua        explicit hyp8/policies/ rule set
+#   HYP8_BUILD_CLOCK_SKIP=auto|sink|causal|off MT-safe sink-domain deferral
+#                                              (auto -> sink on sleep targets
+#                                              when supported by the fork)
+#   HYP8_BUILD_SENTINEL=0|1     emit --dumpi-sentinel 1 (DFG observer JSON); opt-in,
+#                                kept out of BUILD_VLT_ARGS so auto tuning still applies
 #   HYP8_BUILD_OPT=-O2            OPT_FAST/OPT_GLOBAL (verilated.mk default -Os)
 #   HYP8_BUILD_OPT_SLOW=-O1       OPT_SLOW (__Syms/init: not hot, -O2 costs hours)
 #   HYP8_BUILD_MARCH=native|<isa>|none   prefer native on AVX-512 + BMI2 fork hosts
@@ -138,8 +144,19 @@ case "$TARGET" in
     TARGET_NCORES=4
     FLIST_MC="verif/regress/remote/hyp8/Flist.hyp8_mc_sim"
     ;;
+  g6lc64_hyp8_mc_sleep)
+    # Sleep-gate qualification: identical mc build with -DG6LC_HYP8_MC_SLEEP
+    # -> CoreSleepGate=1 (per-core WFI ICG). Dedicated model only — the gate
+    # costs ~17% sim speed awake (T22), so it stays out of the boot-witness
+    # and default directed builds.
+    TARGET_VLT_DEFS="-DG6LC_HYP8_MC -DG6LC_HYP8_MC_SLEEP"
+    TARGET_CFLAGS="-DG6LC_TB_BANKED -DG6LC_TB_OOO"
+    TARGET_HARTS=8
+    TARGET_NCORES=4
+    FLIST_MC="verif/regress/remote/hyp8/Flist.hyp8_mc_sim"
+    ;;
   *)
-    echo "[hyp8-build] usage: SOFT_LADDER_BUILD_TARGET=g6lc64_hyp8|g6lc64_hyp8_smt2|g6lc64_hyp8_l3|g6lc64_hyp8_mc|g6lc64_hyp8_deep|g6lc64_hyp8_mmu_staged|g6lc64_hyp8_iqsteer2|g6lc64_hyp8_aes3 $0 hyp8 (got '${TARGET:-<unset>}')" >&2
+    echo "[hyp8-build] usage: SOFT_LADDER_BUILD_TARGET=g6lc64_hyp8|g6lc64_hyp8_smt2|g6lc64_hyp8_l3|g6lc64_hyp8_mc|g6lc64_hyp8_mc_sleep|g6lc64_hyp8_deep|g6lc64_hyp8_mmu_staged|g6lc64_hyp8_iqsteer2|g6lc64_hyp8_aes3 $0 hyp8 (got '${TARGET:-<unset>}')" >&2
     exit 2
     ;;
 esac
@@ -148,6 +165,21 @@ esac
 # the cluster emits. Single-core targets (NrCores=1) have only gen_core[0];
 # without the bound the C++ references gen_core[1..3] and fails to compile.
 TARGET_CFLAGS="$TARGET_CFLAGS -DG6LC_TB_NCORES=$TARGET_NCORES"
+if [[ "${HYP8_STORAMIC_CKPT:-0}" == "1" ]]; then
+  TARGET_VLT_DEFS="$TARGET_VLT_DEFS -DG6LC_STORAMIC_CKPT"
+  # The native endpoint needs the simulation model backing: without
+  # G6LC_STORAMIC_MODEL, g6lc_storamic_soc_cfg_pkg::make_cfg yields
+  # ProfileOff, the endpoint's ConfigLegal fails and it elaborates gen_refuse
+  # (no gen_model/media/i_ram) — the checkpoint silently refuses every
+  # command. HYP8_STORAMIC_MODEL=0 is the A/B escape hatch.
+  if [[ "${HYP8_STORAMIC_MODEL:-1}" != "0" ]]; then
+    TARGET_VLT_DEFS="$TARGET_VLT_DEFS -DG6LC_STORAMIC_MODEL"
+  fi
+  if [[ -n "${HYP8_STORAMIC_CKPT_WORDS:-}" ]]; then
+    TARGET_VLT_DEFS="$TARGET_VLT_DEFS -DG6LC_STORAMIC_CKPT_WORDS=$HYP8_STORAMIC_CKPT_WORDS"
+  fi
+  TARGET_CFLAGS="$TARGET_CFLAGS -DG6LC_STORAMIC_CKPT_TB"
+fi
 JOBS="${SOFT_LADDER_BUILD_JOBS:-$( (command -v nproc >/dev/null && nproc) || echo 8)}"
 if [[ "$JOBS" == "$(nproc)" ]] || [[ "$JOBS" == "\$(nproc)" ]]; then
   JOBS=$( (command -v nproc >/dev/null && nproc) || echo 8)
@@ -203,6 +235,17 @@ OBJCACHE="${SOFT_LADDER_BUILD_OBJCACHE:-}"
 BUILD_LDFLAGS="${SOFT_LADDER_BUILD_LDFLAGS:-}"
 BUILD_CXXFLAGS="${SOFT_LADDER_BUILD_CXXFLAGS:-}"
 BUILD_VLT_ARGS="${SOFT_LADDER_BUILD_VLT_ARGS:-}"
+
+# Sentinel observation is opt-in. It is carried in its own argv slot (never in
+# BUILD_VLT_ARGS) so it does not count as an "extra Verilator argument" for the
+# auto tuning-eligibility rule below.
+SENTINEL="${HYP8_BUILD_SENTINEL:-0}"
+case "$SENTINEL" in
+  0|1) ;;
+  *) log "bad HYP8_BUILD_SENTINEL=$SENTINEL (want 0|1)"; exit 2 ;;
+esac
+BUILD_SENTINEL_ARG=()
+[[ "$SENTINEL" == 1 ]] && BUILD_SENTINEL_ARG=(--dumpi-sentinel 1)
 
 if [[ -n "$OBJCACHE" ]]; then
   if ! command -v "$OBJCACHE" >/dev/null 2>&1; then
@@ -331,8 +374,38 @@ fi
 # Resolve the native profile before selecting ISA or starting expensive stages.
 TUNING="${HYP8_BUILD_TUNING:-auto}"
 TUNED_DIR="$VERLIB_DIR/hyp8-packed-tiled"
+PLUGIN_ARGS=()
+POLICY_FILE=""
+find_lua_bin() {
+  local cand
+  for cand in lua5.4 lua5.3 lua; do
+    command -v "$cand" >/dev/null 2>&1 && { command -v "$cand"; return 0; }
+  done
+  for cand in /opt/testharness/toolchains/lua*/bin/lua5.4 \
+              /opt/testharness/toolchains/lua*/bin/lua5.3 \
+              /opt/testharness/toolchains/lua*/bin/lua \
+              "$ROOT"/build-platform/workspace/tooling/lua*/bin/lua5.4 \
+              "$ROOT"/build-platform/workspace/tooling/lua*/bin/lua; do
+    [[ -x "$cand" ]] && { echo "$cand"; return 0; }
+  done
+  return 1
+}
+if [[ -n "${HYP8_BUILD_TUNING_PLUGIN:-}" ]]; then
+  [[ "$TUNING" == auto || "$TUNING" == lua ]] ||
+    { log "explicit Lua plugin conflicts with HYP8_BUILD_TUNING=$TUNING"; exit 2; }
+  [[ "$HYP8_BUILD_TUNING_PLUGIN" =~ ^[A-Za-z0-9_-]+\.lua$ ]] ||
+    { log "expected a Lua policy filename under hyp8/policies/"; exit 2; }
+  policy="$ROOT/verif/regress/remote/hyp8/policies/$HYP8_BUILD_TUNING_PLUGIN"
+  [[ -f "$policy" ]] || { log "missing tuning plugin $policy"; exit 2; }
+  if ! find_lua_bin >/dev/null 2>&1; then
+    log "explicit plugin requires Lua 5.3 or 5.4 on the build host"; exit 2
+  fi
+  POLICY_FILE="$policy"
+  PLUGIN_ARGS=(--plugin "$policy")
+  TUNING=lua
+fi
 eligible=0
-if [[ "$TARGET" == g6lc64_hyp8_mc && "$VTHREADS" == 2 && "$VLT_FLAVOUR" == g6lc ]]; then
+if [[ ( "$TARGET" == g6lc64_hyp8_mc || "$TARGET" == g6lc64_hyp8_mc_sleep ) && "$VTHREADS" == 2 && "$VLT_FLAVOUR" == g6lc ]]; then
   eligible=1
 fi
 case "$TUNING" in
@@ -346,12 +419,64 @@ case "$TUNING" in
       TUNING=packed-tiled
     fi ;;
   packed-tiled) [[ "$eligible" == 1 ]] || { log "packed-tiled requires two-lane g6lc Hyp8 MC"; exit 2; } ;;
+  lua) [[ ${#PLUGIN_ARGS[@]} != 0 ]] || { log "lua requires HYP8_BUILD_TUNING_PLUGIN"; exit 2; } ;;
   off) ;;
   *) log "bad HYP8_BUILD_TUNING=$TUNING"; exit 2 ;;
 esac
 if [[ "$TUNING" == off && -e "$TUNED_DIR" ]]; then
   log "refusing to reuse tuned objects with tuning off; select a fresh Mdir"; exit 2
 fi
+
+# Opportunistic / policy-driven Verilator compiler flags (clock-skip + DFG peepholes).
+# Capability-checked against the selected verilator_bin so older/pinned compilers stay safe.
+vlt_supports_flag() {
+  local bin="$VLT_HOME/bin/verilator_bin"
+  [[ -x "$bin" ]] || bin="$VERILATOR_ROOT/bin/verilator_bin"
+  local needle="$1"
+  [[ "$needle" == -fdfg-peephole-* ]] && needle="${needle#-fdfg-peephole-}"
+  [[ -x "$bin" ]] && grep -Fq -- "$needle" "$bin" 2>/dev/null
+}
+BUILD_POLICY_VLT_ARGS=()
+CLOCK_SKIP_REQ="${HYP8_BUILD_CLOCK_SKIP:-auto}"
+CLOCK_SKIP_EFFECTIVE="off"
+if [[ "$TUNING" == lua && -n "$POLICY_FILE" ]]; then
+  planned_flags=$(python3 "$ROOT/verif/regress/remote/g6lc_tuning_policy.py" \
+    --plan-vlt-flags --plugin "$POLICY_FILE" --prefix Vg6lc_testharness \
+    --command "$TARGET_VLT_DEFS --threads $VTHREADS" 2>/dev/null || true)
+  for fl in $planned_flags; do
+    if vlt_supports_flag "$fl"; then
+      BUILD_POLICY_VLT_ARGS+=("$fl")
+      [[ "$fl" == "-fclock-skip-sink" ]] && CLOCK_SKIP_EFFECTIVE="sink"
+      [[ "$fl" == "-fclock-skip" ]] && CLOCK_SKIP_EFFECTIVE="causal"
+    else
+      log "warn: selected verilator_bin does not support policy flag $fl; skipping"
+    fi
+  done
+fi
+case "$CLOCK_SKIP_REQ" in
+  auto)
+    if [[ "$CLOCK_SKIP_EFFECTIVE" == "off" && "$TARGET" == g6lc64_hyp8_mc_sleep && "$VLT_FLAVOUR" == g6lc ]]; then
+      if vlt_supports_flag "-fclock-skip-sink"; then
+        BUILD_POLICY_VLT_ARGS+=(-fclock-skip-sink)
+        CLOCK_SKIP_EFFECTIVE="sink"
+      fi
+    fi ;;
+  sink)
+    if [[ "$CLOCK_SKIP_EFFECTIVE" != "sink" ]]; then
+      vlt_supports_flag "-fclock-skip-sink" || { log "HYP8_BUILD_CLOCK_SKIP=sink requires a fork supporting -fclock-skip-sink"; exit 2; }
+      BUILD_POLICY_VLT_ARGS+=(-fclock-skip-sink)
+      CLOCK_SKIP_EFFECTIVE="sink"
+    fi ;;
+  causal)
+    if [[ "$CLOCK_SKIP_EFFECTIVE" != "causal" ]]; then
+      vlt_supports_flag "-fclock-skip" || { log "HYP8_BUILD_CLOCK_SKIP=causal requires a fork supporting -fclock-skip"; exit 2; }
+      BUILD_POLICY_VLT_ARGS+=(-fclock-skip)
+      CLOCK_SKIP_EFFECTIVE="causal"
+    fi ;;
+  off) ;;
+  *) log "bad HYP8_BUILD_CLOCK_SKIP=$CLOCK_SKIP_REQ (want auto|sink|causal|off)"; exit 2 ;;
+esac
+log "clock-skip: $CLOCK_SKIP_EFFECTIVE (requested $CLOCK_SKIP_REQ) policy_vlt_args=${BUILD_POLICY_VLT_ARGS[*]:-<none>}"
 
 # --- generated C++: optimisation level, host ISA, simulation PGO -------------
 BUILD_OPT="${HYP8_BUILD_OPT:--O2}"
@@ -472,7 +597,9 @@ set +e
   --exe "$TB_CPP" corev_apu/tb/dpi/SimDTM.cc corev_apu/tb/dpi/SimJTAG.cc \
          corev_apu/tb/dpi/remote_bitbang.cc corev_apu/tb/dpi/msim_helper.cc \
   ${SPLIT_ARGS[@]+"${SPLIT_ARGS[@]}"} \
+  ${BUILD_POLICY_VLT_ARGS[@]+"${BUILD_POLICY_VLT_ARGS[@]}"} \
   $BUILD_VLT_ARGS \
+  ${BUILD_SENTINEL_ARG[@]+"${BUILD_SENTINEL_ARG[@]}"} \
   -o Variane_testharness \
   >"$BUILD_LOG" 2>&1
 rc=$?
@@ -488,7 +615,7 @@ fi
 if [[ "$SPLIT_VLT_ON" == "1" ]]; then
   STATS="$VERLIB_DIR/Vg6lc_testharness__stats.txt"
   if [[ -f "$STATS" ]]; then
-    grep -E "SplitVar|Unroll, |MTask|Threads" "$STATS" | sed 's/^/[hyp8-build]   /' || true
+    grep -E "SplitVar|Unroll, |MTask|Threads|Clock skip|packed bitwise" "$STATS" | sed 's/^/[hyp8-build]   /' || true
   fi
   log "SPLITVAR refusals: $(grep -c '%Warning-SPLITVAR' "$BUILD_LOG" || true)"
 fi
@@ -505,20 +632,20 @@ fi
 
 MK_OPT=("OPT_FAST=$BUILD_OPT" "OPT_SLOW=$BUILD_OPT_SLOW" "OPT_GLOBAL=$BUILD_OPT")
 TUNING_MAKE=()
-if [[ "$TUNING" == packed-tiled ]]; then
+if [[ "$TUNING" == packed-tiled || "$TUNING" == lua ]]; then
   if [[ "$PGO_STAGE" == use && ! -d "$TUNED_DIR" ]]; then
     log "cannot use profiles from an untuned stage 1; start a fresh build"; exit 2
   fi
-  if python3 "$ROOT/verif/regress/remote/g6lc_hyp8_tuning.py" "$VERLIB_DIR" >>"$BUILD_LOG" 2>&1; then
+  if python3 "$ROOT/verif/regress/remote/g6lc_hyp8_tuning.py" "$VERLIB_DIR" "${PLUGIN_ARGS[@]}" >>"$BUILD_LOG" 2>&1; then
     TUNING_MAKE=(-f hyp8-packed-tiled/rules.mk)
   else
     rc=$?
     tail -5 "$BUILD_LOG"
-    if [[ $rc != 3 || "${HYP8_BUILD_TUNING:-auto}" != auto || -e "$TUNED_DIR" ]]; then exit "$rc"; fi
+    if [[ $rc != 3 || "$TUNING" == lua || "${HYP8_BUILD_TUNING:-auto}" != auto || -e "$TUNED_DIR" ]]; then exit "$rc"; fi
     TUNING=off
   fi
 fi
-log "native tuning=$TUNING (requested ${HYP8_BUILD_TUNING:-auto}); no experimental DFG flags added"
+log "native tuning=$TUNING (requested ${HYP8_BUILD_TUNING:-auto}) sentinel=$SENTINEL; no experimental DFG flags added"
 if [[ "$PGO" == "1" && "$PGO_STAGE" == "use" ]]; then
   # phase 1 was a previous invocation (HYP8_BUILD_PGO_STAGE=instrumented)
   [[ -x "$VERLIB_DIR/Variane_testharness" ]] || cp -a "$VERLIB_DIR/pgo-train/Variane_testharness.instrumented" "$VERLIB_DIR/Variane_testharness" 2>/dev/null || true
@@ -545,7 +672,7 @@ if [[ $rc -ne 0 || ! -x "$VERLIB_DIR/Variane_testharness" ]]; then
   exit 1
 fi
 
-printf 'native_tuning=%s\nverilator: %s\n' "$TUNING" "$("$VERILATOR" --version)" >>"$BUILD_LOG"
+printf 'native_tuning=%s\nclock_skip=%s\nsentinel=%s\nverilator: %s\n' "$TUNING" "$CLOCK_SKIP_EFFECTIVE" "$SENTINEL" "$("$VERILATOR" --version)" >>"$BUILD_LOG"
 
 if [[ "$PGO" == "1" && "$PGO_STAGE" == "instrumented" ]]; then
   log "BUILD OK (PGO stage 1 of 2): $VERLIB_DIR/Variane_testharness is the instrumented model; runs on it train the profile in $PGO_DIR"

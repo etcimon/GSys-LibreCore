@@ -64,8 +64,8 @@ enum {
 volatile uint64_t tohost __attribute__((section(".tohost"), aligned(64))) = 0;
 volatile uint64_t fromhost __attribute__((section(".tohost"), aligned(64))) = 0;
 
-static uint8_t stack0[4096] __attribute__((aligned(64)));
-static uint8_t stack1[4096] __attribute__((aligned(64)));
+uint8_t stack0[4096] __attribute__((used, aligned(64)));
+uint8_t stack1[4096] __attribute__((used, aligned(64)));
 
 static volatile uint64_t cdata[NDATA] __attribute__((aligned(64)));
 static volatile uint64_t peer_data[NDATA] __attribute__((aligned(64)));
@@ -146,7 +146,7 @@ static void finish(unsigned code) {
   for (;;) { }
 }
 
-void hart1_main(void) {
+__attribute__((used)) void hart1_main(void) {
   while (g_stage < 1U) { }
   fence();
   for (unsigned i = 0; i < NDATA; i++)
@@ -183,7 +183,7 @@ void hart1_main(void) {
   for (;;) { }
 }
 
-void hart0_main(void) {
+__attribute__((used)) void hart0_main(void) {
   uint32_t st = rd32(R_STATUS);
   if ((st & (ST_INIT | ST_META_OK | ST_PROT_OK | ST_CMD_READY)) !=
       (ST_INIT | ST_META_OK | ST_PROT_OK | ST_CMD_READY) ||

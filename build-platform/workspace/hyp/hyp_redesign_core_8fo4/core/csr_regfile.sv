@@ -5395,15 +5395,11 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
       end
     end
 
-    // hardwired extension registers
-    if (G6LCCfg.RVS || G6LCCfg.RVF || G6LCCfg.AiCfg.MatrixEn) begin
-      rf_mstatus_d.sd = (rf_mstatus_d.xs == riscv::Dirty) | (rf_mstatus_d.fs == riscv::Dirty);
-    end else begin
-      rf_mstatus_d.sd = 1'b0;
-    end
-    if (G6LCCfg.RVH) begin
-      rf_vsstatus_d.sd = (rf_vsstatus_d.xs == riscv::Dirty) | (rf_vsstatus_d.fs == riscv::Dirty);
-    end
+    // hardwired extension registers — sd is synthesized at read time in
+    // mstatus_extended/vsstatus_extended; the stored bit is dead state and
+    // csr_update leaves vsstatus_d.sd on the write path, so the reference
+    // must not tail-force it either (mirrors c21fd1b8c production change).
+    rf_mstatus_d.sd = 1'b0;
 
     // reserve PMPCFG bits 5 and 6 (hardwire to 0)
     for (int i = 0; i < G6LCCfg.NrPMPEntries; i++) rf_pmpcfg_d[i].reserved = 2'b0;

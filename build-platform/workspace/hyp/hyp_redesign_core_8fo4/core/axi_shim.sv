@@ -39,6 +39,7 @@ module axi_shim #(
     input logic [2:0] rd_size_i,
     input  logic [G6LCCfg.AxiIdWidth-1:0]   rd_id_i,   // use same ID for reads, or make sure you only have one outstanding read tx
     input logic rd_lock_i,
+    input logic [2:0] rd_prot_i,
     // read response (we have to unconditionally sink the response)
     input logic rd_rdy_i,
     output logic rd_last_o,
@@ -59,6 +60,7 @@ module axi_shim #(
     input logic [G6LCCfg.AxiIdWidth-1:0] wr_id_i,
     input logic wr_lock_i,
     input logic [5:0] wr_atop_i,
+    input logic [2:0] wr_prot_i,
     // write response
     input logic wr_rdy_i,
     output logic wr_valid_o,
@@ -153,6 +155,7 @@ module axi_shim #(
   logic [G6LCCfg.AxiIdWidth-1:0]                            aw_id_q;
   logic                                                    aw_lock_q;
   logic [5:0]                                               aw_atop_q;
+  logic [2:0]                                               aw_prot_q;
   logic [AxiNumWords-1:0][G6LCCfg.AxiDataWidth-1:0]          w_data_q;
   logic [AxiNumWords-1:0][G6LCCfg.AxiUserWidth-1:0]          w_user_q;
   logic [AxiNumWords-1:0][(G6LCCfg.AxiDataWidth/8)-1:0]      w_be_q;
@@ -165,6 +168,7 @@ module axi_shim #(
       aw_id_q   <= '0;
       aw_lock_q <= 1'b0;
       aw_atop_q <= '0;
+      aw_prot_q <= '0;
       w_data_q  <= '0;
       w_user_q  <= '0;
       w_be_q    <= '0;
@@ -175,6 +179,7 @@ module axi_shim #(
       aw_id_q   <= wr_id_i;
       aw_lock_q <= wr_lock_i;
       aw_atop_q <= wr_atop_i;
+      aw_prot_q <= wr_prot_i;
       w_data_q  <= wr_data_i;
       w_user_q  <= wr_user_i;
       w_be_q    <= wr_be_i;
@@ -208,7 +213,9 @@ module axi_shim #(
   assign axi_req_o.aw.size = (wr_state_q == IDLE) ? wr_size_i : aw_size_q;
   assign axi_req_o.aw.len  = (wr_state_q == IDLE) ? wr_blen_i : aw_blen_q;
   assign axi_req_o.aw.id   = (wr_state_q == IDLE) ? wr_id_i   : aw_id_q;
-  assign axi_req_o.aw.prot = 3'b0;
+  assign axi_req_o.aw.prot = G6LCCfg.StoramicCheckpointEn
+      ? ((wr_state_q == IDLE) ? wr_prot_i : aw_prot_q)
+      : 3'b000;
   assign axi_req_o.aw.region = 4'b0;
   assign axi_req_o.aw.lock = (wr_state_q == IDLE) ? wr_lock_i : aw_lock_q;
   assign axi_req_o.aw.cache = axi_pkg::CACHE_MODIFIABLE;
@@ -381,6 +388,7 @@ module axi_shim #(
   logic [2:0]                     ar_size_q;
   logic [G6LCCfg.AxiIdWidth-1:0]  ar_id_q;
   logic                          ar_lock_q;
+  logic [2:0]                    ar_prot_q;
 
   always_comb begin
     ar_pend_d = ar_pend_q;
@@ -396,6 +404,7 @@ module axi_shim #(
       ar_size_q <= '0;
       ar_id_q   <= '0;
       ar_lock_q <= 1'b0;
+      ar_prot_q <= '0;
     end else begin
       ar_pend_q <= ar_pend_d;
       if (!ar_pend_q && rd_req_i) begin
@@ -404,6 +413,7 @@ module axi_shim #(
         ar_size_q <= rd_size_i;
         ar_id_q   <= rd_id_i;
         ar_lock_q <= rd_lock_i;
+        ar_prot_q <= rd_prot_i;
       end
     end
   end
@@ -416,7 +426,7 @@ module axi_shim #(
   assign axi_req_o.ar.size   = ar_size_q;
   assign axi_req_o.ar.len    = ar_blen_q;
   assign axi_req_o.ar.id     = ar_id_q;
-  assign axi_req_o.ar.prot   = 3'b0;
+  assign axi_req_o.ar.prot   = G6LCCfg.StoramicCheckpointEn ? ar_prot_q : 3'b000;
   assign axi_req_o.ar.region = 4'b0;
   assign axi_req_o.ar.lock   = ar_lock_q;
   assign axi_req_o.ar.cache  = axi_pkg::CACHE_MODIFIABLE;

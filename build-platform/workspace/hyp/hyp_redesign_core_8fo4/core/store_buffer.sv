@@ -138,6 +138,9 @@ module store_buffer
     input logic [(G6LCCfg.XLEN/8)-1:0] be_i,  // byte enable in
     input logic [1:0] data_size_i,  // type of request we are making (e.g.: bytes to write)
     input cbo_t cbo_op_i,  // type of cache block operation
+    input logic [2:0] data_prot_i,  // Storamic C1 access-origin AXI prot
+    // Storamic W2/W4 resync: evict every speculative store (including fwd_keep)
+    input logic storamic_resync_i,
 
     // D$ interface
     input  dcache_req_o_t req_port_i,
@@ -229,6 +232,7 @@ module store_buffer
     logic [G6LCCfg.XLEN-1:0] data;
     logic [(G6LCCfg.XLEN/8)-1:0] be;
     logic [1:0] data_size;
+    logic [2:0] data_prot;
     cbo_t cbo_op;
     logic [G6LCCfg.TRANS_ID_BITS-1:0] trans_id;  // FSE S4: for younger-only cancel
     logic [HID_W-1:0] hart;  // T6b: owning hart (speculative queue only)
@@ -380,7 +384,9 @@ module store_buffer
       cancel_hit[i] = spec_valid_q[i] && cancelled_mask_i[speculative_queue_q[i].trans_id];
     lgcy_flush_keep = flush_i && LEGACY_SMT_KEEP;
     for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
-      if (LEGACY_SMT_KEEP) begin
+      if (storamic_resync_i) begin
+        spec_remove[i] = spec_valid_q[i];
+      end else if (LEGACY_SMT_KEEP) begin
 `ifdef G6LC_FETCH_B
         // I13 (B): on flush or cancel keep fwd_keep and the not-cancelled
         spec_remove[i] = spec_valid_q[i] && cancel_hit[i] && !speculative_queue_q[i].fwd_keep;
@@ -497,9 +503,9 @@ module store_buffer
       .cbo_t     (cbo_t),
       .AGE_EN    (G6LCCfg.OoOEn)
   ) i_stb_insert (
-      .clk_i, .rst_ni, .flush_i,
+      .clk_i, .rst_ni, .flush_i (flush_i || storamic_resync_i),
       .cancelled_mask_i,
-      .valid_i, .paddr_i, .data_i, .be_i, .data_size_i, .cbo_op_i,
+      .valid_i, .paddr_i, .data_i, .be_i, .data_size_i, .cbo_op_i, .data_prot_i,
       .trans_id_i, .st_hart_i,
       .fwd_keep_i (LEGACY_SMT_KEEP && load_paddr_valid_i &&
                    pa_eq(paddr_i, load_paddr_i)),

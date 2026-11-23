@@ -384,7 +384,10 @@ package g6lc_config_pkg;
 
       NrLoadPipeRegs: int'(G6LCConfigNrLoadPipeRegs),
       NrStorePipeRegs: int'(G6LCConfigNrStorePipeRegs),
-      DcacheIdWidth: int'(G6LCConfigDcacheIdWidth)
+      DcacheIdWidth: int'(G6LCConfigDcacheIdWidth),
+      StoramicEn: bit'(0),
+      StoramicCheckpointEn: bit'(0),
+      StoramicIoEn: bit'(0)
   };
 
   // The hyp8 redesign seam — every `// hyp8:` knob bound at compile time.

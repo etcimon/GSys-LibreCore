@@ -307,6 +307,53 @@ hold-up energy) are independent of this table and still need physical inputs.
 The hyp8 port can start after W0 from `hyp8-port-ledger.md` and does not have
 to wait for W1-W5.
 
+## SMARTr Crash-Fault Handling (2026-11-23, planning only)
+
+Nothing in this section is implemented. SMARTr — the S.M.A.R.T. Refresher
+process — is the system-level crash-fault discipline built on the native
+checkpoint composition: fault-hibernate SAVE with a CPU-state crash page,
+clean hibernate, periodic last-known-good refresh with cold rollback,
+checkpoint classes so a crash image never displaces the refresher image, a
+moving-window segmented checkpoint that scales to any RAM size, single-mode
+FAST tape streaming (sequential append + relative jumps, no journal-mode
+select — the frame protocol is the journal), checkpoint-data access
+controls, runtime feature/policy knobs, an N-generation ring, wear-aware
+policy, a patch carrier, and per-region tape journals giving real-time
+journal-ahead protection for mission-critical workloads. Design of
+record:
+`smartr-crash-fault-handling.md`, whose §3 fixes the governing write
+discipline: checkpoint writes are sequential appends at a monotonic head
+(tape-line), reads stay random-access — the SR-5 moving window's sweep
+order is the media append order, frames carry end-of-tape commit markers,
+and reclaim is whole-region erase of superseded frames. The second-hand
+debugging platform
+(stick transfer, reserved-extent export, source-correlated patch generation)
+is explicitly deferred there; its access-control contract (SR-11) is planned.
+
+| Item | Scope | Depends on |
+|---|---|---|
+| SR-3 checkpoint classes (REFRESH/FAULT/HIBERNATE) + recovery selection | Record-format delta in `g6lc_storamic_checkpoint_media`; recovery scan prefers REFRESH | C6 qualified profile |
+| SR-5 segment manifest (moving-window image) | Record/media delta: per-segment `{base,len,crc}` committed last; whole-image atomicity kept; segment sweep order = append order on media; relative jumps over non-image RAM holes (§3 tape discipline) | SR-3 record change |
+| SR-2 crash-context page | Reserved RAM page ABI; software writes CPU state before SAVE | SR-1 trigger path |
+| SR-1 fault-hibernate SAVE | Kernel fault-entry contract → control-page SAVE → power off | SR-2, qualified profile |
+| SR-10 clean hibernate | SAVE(class=HIBERNATE) → power off → explicit restore | SR-3 |
+| SR-4 periodic refresher + cold rollback | Scheduled SAVE; reset → boot recovery of newest REFRESH | SR-3 |
+| SR-6 single-mode FAST tape streaming | Frame/relative-jump append layout in record codec + media; no mode field — FAST is the only mode; commit marker last, torn tail truncated | SR-3, SR-5 |
+| SR-12 runtime feature/policy knobs | Control-register fields: checkpoint enable + refresher cadence, crash-context, class acceptance, export policy, segment geometry, retention depth; legal only while idle | SR-11 |
+| SR-11 checkpoint data access control | Level-1 export policy (`NEVER`/`KEYED`/`OPEN`) at the maintenance boundary using the existing unlock-key port; Level-2 image confidentiality deferred | SR-3 |
+| SR-8 wear-aware policy | Adaptive interval, erase-cycle hooks, wear budget | P0/P1 physical inputs for real accounting |
+| SR-9 patch carrier | Patch partition + boot-time apply/verify contract | SR-3 (class decides exportable images) |
+| SR-7 N-generation ring | N retained append-frames (§3 tape discipline) + newest-valid-per-class scan; capacity = N × total image; oldest-first whole-region reclaim | SR-5 |
+| SR-13 per-region tape journal | Tape device leaf per RAM region + controller journal port + journal-ahead store ordering + epoch commits + replay engine; recovery = base frame + journal tail | SR-5, SR-6, SR-4 |
+| SR-5b per-segment records → dirty-region tracking | Independent segment commits; incremental/dirty images | After SR-7; large change |
+
+Ordering inside SMARTr: SR-3 → SR-5 manifest + SR-6 frame layout →
+SR-2 → SR-1 → SR-10 → SR-4 → SR-13 → SR-12 → SR-11 → SR-8 → SR-9 →
+SR-7 → SR-5b. Each item gets
+a `native-ckpt` variant stage plus mutants on the remote testharness before
+its gate is claimed. W2 profile completion precedes any production claim;
+P0/P1 precedes wear-leveling and confidentiality claims.
+
 ## Backend Correctness Reassessment
 
 The source audit found that the small-capacity block fixtures did not cover

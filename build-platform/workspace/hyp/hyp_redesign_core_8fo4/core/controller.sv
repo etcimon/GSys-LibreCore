@@ -79,6 +79,13 @@ module controller
     input logic halt_csr_i,
     // Halt request from accelerator dispatcher - ACC_DISPATCHER
     input logic halt_acc_i,
+    // C4 storamic pause/drain provider: halt commit (inert when 0)
+    input logic halt_storamic_i,
+    // C5/W2 storamic resync-on-release hooks (inert when 0)
+    input logic resync_storamic_flush_i,
+    input logic resync_storamic_squash_i,
+    input logic resync_storamic_nopc_i,
+    output logic resync_storamic_dack_o,
     // Halt frontend during fence.i to prevent fetching stale instructions
     output logic halt_frontend_o,
     // Halt signal to commit stage - COMMIT_STAGE
@@ -222,11 +229,11 @@ module controller
                       flush_if_comb};
 
   assign refetch_flush  = set_pc_comb & flush_ex_comb;
-  assign kill_only_flush= drain_force_i;
+  assign kill_only_flush= drain_force_i | resync_storamic_nopc_i;
   assign exc_flush      = ex_valid_i | eret_i |
                           (G6LCCfg.DebugEn & set_debug_pc_i);
   assign drain_pending_o = (drain_cnt_q != '0) |
-                           (refetch_flush & (DRAIN_CYCLES > 1));
+                           ((refetch_flush | kill_only_flush) & (DRAIN_CYCLES > 1));
   assign pc_commit_hold_o = drain_pc_q;
   assign hart_commit_hold_o = drain_hart_q;
   assign drain_body_o = (drain_cnt_q != '0);
@@ -234,6 +241,7 @@ module controller
 assign commit_flush = ex_valid_i | eret_i
       | (G6LCCfg.DebugEn & set_debug_pc_i)
       | flush_csr_i | flush_acc_i | drain_force_i
+      | resync_storamic_squash_i | resync_storamic_nopc_i
       | ((G6LCCfg.RVA | G6LCCfg.OoOEn) & flush_commit_i)
       | fence_i | fence_i_i
       | (G6LCCfg.RVS & sfence_vma_i)
@@ -466,6 +474,20 @@ assign commit_flush = ex_valid_i | eret_i
       flush_id_comb          = 1'b1;
       flush_ex_comb          = 1'b1;
     end
+    // C5/W2 storamic resync-on-release: flush D$ first, then squash IF/ID/EX
+    // and I$ (with set_pc_commit when commit head is live, or without when
+    // empty-scoreboard WFI/quiesce).
+    if (resync_storamic_flush_i) begin
+      flush_dcache_comb      = 1'b1;
+    end
+    if (resync_storamic_squash_i || resync_storamic_nopc_i) begin
+      if (resync_storamic_squash_i) set_pc_comb = 1'b1;
+      flush_if_comb          = 1'b1;
+      flush_unissued_comb    = 1'b1;
+      flush_id_comb          = 1'b1;
+      flush_ex_comb          = 1'b1;
+      flush_icache_comb      = 1'b1;
+    end
   end
 
   // ----------------------
@@ -595,10 +617,12 @@ assign commit_flush = ex_valid_i | eret_i
   // ----------------------
   always_comb begin
     // halt the core if the fence is active
-    halt_o = halt_csr_i || halt_acc_i || ((G6LCCfg.DcacheFlushOnFence || G6LCCfg.DcacheFlushOnFenceI) && fence_active_q);
+    halt_o = halt_csr_i || halt_acc_i || halt_storamic_i || ((G6LCCfg.DcacheFlushOnFence || G6LCCfg.DcacheFlushOnFenceI) && fence_active_q);
     // Halt frontend during fence.i to synchronize ICache/DCache flushes
     halt_frontend_o = fence_i_active_q;
   end
+
+  assign resync_storamic_dack_o = resync_storamic_flush_i && flush_dcache_ack_i;
 
   // ----------------------
   // Registers

@@ -599,16 +599,20 @@ package build_config_pkg;
     cfg.L2PrefetchEn    = 1'b1;
     cfg.L2PfStrideEn    = 1'b1;
 `elsif G6LC_STORAMIC_MC2
-    cfg.WtAxiAllocEn    = 1'b1;
-    cfg.L2RoundRobinEn  = 1'b1;
-    cfg.L2WriteUpdateEn = 1'b1;
-    cfg.L2CmoEn         = 1'b1;
-    cfg.L2PostedWriteEn = 1'b1;
-    cfg.SnoopFilterEn   = 1'b1;
-    cfg.CohPolicy       = config_pkg::COH_FILTERED;
+    cfg.WtAxiAllocEn       = 1'b1;
+    cfg.L2RoundRobinEn     = 1'b1;
+    cfg.L2WriteUpdateEn    = 1'b1;
+    cfg.L2CmoEn            = 1'b1;
+    cfg.L2PostedWriteEn    = 1'b1;
+    cfg.SnoopFilterEn      = 1'b1;
+    cfg.CohPolicy          = config_pkg::COH_FILTERED;
 `endif
-    // Multi-core snoop-filter / prefetch defaults when left zero
-    if (cfg.NrCores > 1 && CVA6Cfg.SnoopFilterEn && CVA6Cfg.SnoopFilterEntries == 0)
+    // Multi-core snoop-filter / prefetch defaults when left zero. The check
+    // reads the effective cfg value, not the package field, so a profile
+    // overlay that enables the filter (G6LC_STORAMIC_MC2) still receives the
+    // documented 64-entries-per-core default instead of being reset to the
+    // package's zero.
+    if (cfg.NrCores > 1 && cfg.SnoopFilterEn && CVA6Cfg.SnoopFilterEntries == 0)
       cfg.SnoopFilterEntries = cfg.NrCores * 64;
     else
       cfg.SnoopFilterEntries = CVA6Cfg.SnoopFilterEntries;

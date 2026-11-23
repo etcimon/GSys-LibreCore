@@ -592,6 +592,22 @@ package build_config_pkg;
     cfg.X_DUALWRITE = 0;
     cfg.X_ISSUE_REGISTER_SPLIT = 0;
 
+    cfg.StoramicEn = G6LCCfg.StoramicEn;
+    cfg.StoramicCheckpointEn = G6LCCfg.StoramicCheckpointEn;
+    cfg.StoramicIoEn = G6LCCfg.StoramicIoEn || G6LCCfg.StoramicEn;
+`ifdef G6LC_STORAMIC
+    cfg.StoramicEn = 1'b1;
+    cfg.StoramicIoEn = 1'b1;
+`endif
+`ifdef G6LC_STORAMIC_IO
+    cfg.StoramicIoEn = 1'b1;
+`endif
+`ifdef G6LC_STORAMIC_CKPT
+    cfg.StoramicEn = 1'b1;
+    cfg.StoramicIoEn = 1'b1;
+    cfg.StoramicCheckpointEn = 1'b1;
+`endif
+
     return cfg;
   endfunction
 

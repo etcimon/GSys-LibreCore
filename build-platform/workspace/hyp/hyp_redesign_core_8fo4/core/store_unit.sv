@@ -149,7 +149,9 @@ module store_unit
     // Data cache request - CACHES
     input dcache_req_o_t req_port_i,
     // Data cache response - CACHES
-    output dcache_req_i_t req_port_o
+    output dcache_req_i_t req_port_o,
+    // Storamic W2/W4 resync: evict every speculative store
+    input logic storamic_resync_i
 );
 
   // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
@@ -350,6 +352,7 @@ assign result_o = lsu_ctrl_i.data;
   assign instr_is_amo = is_amo(lsu_ctrl_i.operation);
   // keep the data and the byte enable for the second cycle (after address translation)
   logic [G6LCCfg.XLEN-1:0] st_data_n, st_data_q;
+  logic [2:0] st_data_prot_q;
   logic [G6LCCfg.XLEN-1:0] st_data_cmp_q;  // Zacas expected (latched with st_data)
   logic [G6LCCfg.XLEN-1:0] st_data_hi_q, st_data_cmp_hi_q;  // AMOCAS.Q high
   logic                   st_is_quad_q;
@@ -823,6 +826,8 @@ assign result_o = lsu_ctrl_i.data;
       .cbo_op_i             (cbo_op_q),
       .be_i                 (st_be_q),
       .data_size_i          (st_data_size_q),
+      .data_prot_i          (st_data_prot_q),
+      .storamic_resync_i    (storamic_resync_i),
       .req_port_i           (req_port_i),
       .req_port_o           (req_port_o)
   );
@@ -875,6 +880,7 @@ assign result_o = lsu_ctrl_i.data;
       st_data_cmp_hi_q <= '0;
       st_is_quad_q  <= 1'b0;
       st_data_size_q <= '0;
+      st_data_prot_q <= '0;
       trans_id_q     <= '0;
       st_hart_q      <= '0;
       amo_op_q       <= AMO_NONE;
@@ -895,6 +901,7 @@ assign result_o = lsu_ctrl_i.data;
         st_data_hi_q <= G6LCCfg.RVZacas ? lsu_ctrl_i.data_hi : '0;
         st_data_cmp_hi_q <= G6LCCfg.RVZacas ? lsu_ctrl_i.data_cmp_hi : '0;
         st_is_quad_q <= G6LCCfg.RVZacas && (lsu_ctrl_i.operation == g6lc_core_pkg::AMO_CASQ);
+        st_data_prot_q <= G6LCCfg.StoramicCheckpointEn ? lsu_ctrl_i.data_prot : 3'b000;
       end
       trans_id_q     <= trans_id_n;
       st_hart_q      <= st_hart_n;

@@ -84,13 +84,81 @@ module g6lc_cluster
     input  logic                      ai_dma_inval_valid_i,
     input  logic [AXI_ADDR_WIDTH-1:0] ai_dma_inval_addr_i,
     output logic                      ai_dma_inval_ready_o,
-    output logic                      ai_dma_inval_done_o
+    output logic                      ai_dma_inval_done_o,
+    // Storamic VirtIO DMA-write invalidation (StoramicIoEn): shares CMO engine.
+    input  logic                      storamic_dma_inval_valid_i,
+    input  logic [AXI_ADDR_WIDTH-1:0] storamic_dma_inval_addr_i,
+    output logic                      storamic_dma_inval_ready_o,
+    output logic                      storamic_dma_inval_done_o,
+    // Storamic C4/C5/W1/W2/W4 cluster pause/drain/LLC-resync sideband.
+    input  logic                      storamic_pause_i,
+    output logic                      storamic_drained_o
 );
 
   localparam int unsigned NC = (NR_CORES < 1) ? 1 : NR_CORES;
   // Effective inclusion policy: TB override parameter OR package bit. The
   // testbench keeps INCLUSIVE_L3=0 so production packages own the policy.
   localparam bit INCL = INCLUSIVE_L3 || G6LCCfg.L3InclusiveEn;
+  // C4/C5/W1/W2/W4 storamic pause/drain and LLC resync provider across all NC
+  // cores (inert unless g6lc_storamic_origin_supported). Clock-held cores that
+  // have never exited BOOT_HOLD count as drained and stay held until release.
+  localparam bit HAS_LLC = L2_ENABLE || G6LCCfg.L2En;
+  localparam bit STO_PAUSE_EN = config_pkg::g6lc_storamic_origin_supported(G6LCCfg);
+  logic cluster_sto_pause;
+  logic [NC-1:0] core_boot_rel;
+  logic [NC-1:0] core_sto_drained_w, core_sto_drained_eff;
+  logic all_cores_drained;
+  logic hub_all_idle, l2_all_idle, l3_all_idle;
+  logic l2_inval_all_done, l3_inval_all_done;
+  logic incl_inv_busy;
+  logic llc_armed_q, llc_inval_q;
+  logic llc_inval_done, llc_release_pend, core_sto_pause;
+  logic llc_quiesce, l2_block_slv, hub_block_slv;
+
+  assign cluster_sto_pause = STO_PAUSE_EN ? storamic_pause_i : 1'b0;
+  for (genvar c = 0; c < NC; c++) begin : gen_sto_drn_eff
+    assign core_sto_drained_eff[c] = !core_boot_rel[c] || core_sto_drained_w[c];
+  end
+  assign all_cores_drained = &core_sto_drained_eff;
+
+  if (STO_PAUSE_EN && HAS_LLC) begin : gen_sto_llc_resync
+    assign llc_inval_done   = llc_inval_q && l2_inval_all_done && l3_inval_all_done;
+    assign llc_release_pend = llc_inval_q || (llc_armed_q && !cluster_sto_pause);
+    assign core_sto_pause   = cluster_sto_pause || llc_inval_q || llc_armed_q;
+    assign llc_quiesce      = core_sto_pause;
+    assign l2_block_slv     = (cluster_sto_pause && all_cores_drained) || llc_release_pend;
+    assign hub_block_slv    = l2_block_slv;
+    assign storamic_drained_o =
+        all_cores_drained && hub_all_idle && l2_all_idle && l3_all_idle &&
+        !incl_inv_busy && !llc_release_pend;
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        llc_armed_q <= 1'b0;
+        llc_inval_q <= 1'b0;
+      end else begin
+        if (cluster_sto_pause && storamic_drained_o)
+          llc_armed_q <= 1'b1;
+        else if (llc_inval_done)
+          llc_armed_q <= 1'b0;
+
+        if (!llc_inval_q && llc_armed_q && !cluster_sto_pause)
+          llc_inval_q <= 1'b1;
+        else if (llc_inval_done)
+          llc_inval_q <= 1'b0;
+      end
+    end
+  end else begin : gen_sto_no_llc_resync
+    assign llc_armed_q        = 1'b0;
+    assign llc_inval_q        = 1'b0;
+    assign llc_inval_done     = 1'b0;
+    assign llc_release_pend   = 1'b0;
+    assign core_sto_pause     = cluster_sto_pause;
+    assign llc_quiesce        = 1'b0;
+    assign l2_block_slv       = 1'b0;
+    assign hub_block_slv      = STO_PAUSE_EN && cluster_sto_pause && all_cores_drained;
+    assign storamic_drained_o = STO_PAUSE_EN ? (all_cores_drained && hub_all_idle) : 1'b0;
+  end
   localparam int unsigned LINE_B =
       (G6LCCfg.DCACHE_LINE_WIDTH != 0) ? G6LCCfg.DCACHE_LINE_WIDTH / 8
                                        : COH_DEFAULT_LINE_BYTES;
@@ -215,16 +283,20 @@ module g6lc_cluster
   localparam bit BOOT_HOLD = (NC > 1) && (G6LCCfg.NrHarts > 1);
   logic [17:0] boot_hold_q;
   logic [NC-1:0] ipi_seen_q;
+  logic [NC-1:0] boot_rel_q;
   logic [NC-1:0] core_clk;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       boot_hold_q <= '0;
       ipi_seen_q  <= '0;
+      boot_rel_q  <= '0;
     end else begin
-      if (BOOT_HOLD && (boot_hold_q != 18'h3ffff))
+      if (BOOT_HOLD && !core_sto_pause && (boot_hold_q != 18'h3ffff))
         boot_hold_q <= boot_hold_q + 18'd1;
       for (int unsigned c = 0; c < NC; c++) begin
         if (|ipi_i[c]) ipi_seen_q[c] <= 1'b1;
+        if (!core_sto_pause && ((boot_hold_q >= BootHoldCyc) || ipi_seen_q[c]))
+          boot_rel_q[c] <= 1'b1;
       end
     end
   end
@@ -306,19 +378,22 @@ module g6lc_cluster
     if (SLEEP_GATE || (BOOT_HOLD && (c != 0))) begin : gen_boot_icg
       logic rel;
       if (BOOT_HOLD && (c != 0)) begin : gen_boot_rel
-        assign rel = (boot_hold_q >= BootHoldCyc) || ipi_seen_q[c];
+        assign rel = STO_PAUSE_EN ? boot_rel_q[c]
+                                  : ((boot_hold_q >= BootHoldCyc) || ipi_seen_q[c]);
       end else begin : gen_boot_norel
         assign rel = 1'b1;
       end
+      assign core_boot_rel[c] = rel;
       tc_clk_gating #(
           .IS_FUNCTIONAL(1'b1)
       ) i_core_icg (
           .clk_i,
-          .en_i     (rel & ~core_sleep_ok[c]),
+          .en_i     (rel & (~core_sleep_ok[c] | core_sto_pause)),
           .test_en_i(1'b0),
           .clk_o    (core_clk[c])
       );
     end else begin : gen_boot_feed
+      assign core_boot_rel[c] = 1'b1;
       assign core_clk[c] = clk_i;
     end
 `ifdef G6LC_CORE_HB
@@ -394,7 +469,9 @@ module g6lc_cluster
         .ai_isl_retired_valid_i(ai_isl_retired_valid_i),
         .ai_isl_retired_ticket_i(ai_isl_retired_ticket_i),
         .ai_isl_last_ticket_i   (ai_isl_last_ticket_i),
-        .ai_isl_last_status_i   (ai_isl_last_status_i)
+        .ai_isl_last_status_i   (ai_isl_last_status_i),
+        .storamic_pause_i       (core_sto_pause),
+        .storamic_drained_o     (core_sto_drained_w[c])
     );
 
     g6lc_l1_inv_adapter #(
@@ -499,6 +576,7 @@ module g6lc_cluster
     assign inv_hub       = '{default: '0};
     assign coh_sf_filt_w  = 1'b0;
     assign coh_sf_bcast_w = 1'b0;
+    assign hub_all_idle   = 1'b1;
   end else begin : gen_hub
     g6lc_coherence_hub #(
         .NR_CORES             (NC),
@@ -544,7 +622,9 @@ module g6lc_cluster
         .hub_aw_sc_collide_o (),
         .hub_ar_wr_hold_o     (),
         .hub_aw_hold_slot_o   (),
-        .hub_aw_hold_other_o  ()
+        .hub_aw_hold_other_o  (),
+        .hub_block_slv_i      (hub_block_slv),
+        .hub_idle_o           (hub_all_idle)
     );
   end
 
@@ -621,7 +701,12 @@ module g6lc_cluster
         .l2_back_inval_valid_i (l2_back_inval_v),
         .l2_back_inval_addr_i  (l2_back_inval_a),
         .l2_back_inval_ready_o (l2_back_inval_ready),
-        .l2_write_idle_o       (l2_idle_w)
+        .l2_write_idle_o       (l2_idle_w),
+        .l2_quiesce_i          (llc_quiesce),
+        .l2_block_slv_i        (l2_block_slv),
+        .l2_idle_o             (l2_all_idle),
+        .l2_inval_all_i        (llc_inval_q),
+        .l2_inval_all_done_o   (l2_inval_all_done)
     );
   end else begin : gen_no_l2
     assign l2_mst_req   = hub_mem_req;
@@ -631,6 +716,8 @@ module g6lc_cluster
     assign l2_evict_a   = '0;
     assign l2_back_inval_ready = 1'b1;
     assign l2_idle_w    = 1'b1;
+    assign l2_all_idle  = 1'b1;
+    assign l2_inval_all_done = llc_inval_q;
     assign l2_pwhold_w  = 1'b0;
     assign l2_pf_iss_w  = 1'b0;
     assign l2_pf_use_w  = 1'b0;
@@ -700,7 +787,12 @@ module g6lc_cluster
         .l3_write_idle_o       (l3_idle_w),
         .l3_back_inval_valid_i (cmo_l3_v),
         .l3_back_inval_addr_i  (cmo_l3_a),
-        .l3_back_inval_ready_o (cmo_l3_rdy)
+        .l3_back_inval_ready_o (cmo_l3_rdy),
+        .l3_quiesce_i          (llc_quiesce),
+        .l3_block_slv_i        (l2_block_slv),
+        .l3_idle_o             (l3_all_idle),
+        .l3_inval_all_i        (llc_inval_q),
+        .l3_inval_all_done_o   (l3_inval_all_done)
     );
   end else begin : gen_no_l3
     assign l3_mst_req  = l2_mst_req;
@@ -711,6 +803,8 @@ module g6lc_cluster
     assign l3_evict_v  = 1'b0;
     assign l3_evict_a  = '0;
     assign l3_idle_w   = 1'b1;
+    assign l3_all_idle = 1'b1;
+    assign l3_inval_all_done = llc_inval_q;
     assign l3_pwhold_w = 1'b0;
     assign cmo_l3_rdy  = 1'b1;
   end
@@ -737,8 +831,7 @@ module g6lc_cluster
       .pf_train_o (pf_train_w)
   );
 
-  // Inclusive back-inval (parameter; default off)
-  logic incl_inv_busy;
+  // Inclusive back-inval (parameter; default off; incl_inv_busy declared above)
   g6lc_l3_inclusive_inv #(
       .InclusiveEn   (INCL),
       .NR_CORES      (NC),
@@ -809,8 +902,11 @@ module g6lc_cluster
   // inv_to_core at lowest priority (hub > inclusive victim > cmo).
   // The engine exists for the cores' CBOs (L2CmoEn) or for the island's DMA
   // invalidations (AiCfg.DmaInvalEn); both share it.
-  localparam bit CMO_EN = G6LCCfg.L2CmoEn || G6LCCfg.AiCfg.DmaInvalEn;
-  localparam int unsigned CMO_NW = NC + (G6LCCfg.AiCfg.DmaInvalEn ? 1 : 0);
+  localparam bit STO_INVAL = G6LCCfg.StoramicIoEn;
+  localparam bit CMO_EN = G6LCCfg.L2CmoEn || G6LCCfg.AiCfg.DmaInvalEn || STO_INVAL;
+  localparam int unsigned AI_CMO_IDX  = NC;
+  localparam int unsigned STO_CMO_IDX = NC + (G6LCCfg.AiCfg.DmaInvalEn ? 1 : 0);
+  localparam int unsigned CMO_NW = NC + (G6LCCfg.AiCfg.DmaInvalEn ? 1 : 0) + (STO_INVAL ? 1 : 0);
   logic [CMO_NW-1:0]         cmo_w_v, cmo_w_rdy, cmo_w_done;
   logic [1:0]                cmo_w_op   [CMO_NW];
   logic [AXI_ADDR_WIDTH-1:0] cmo_w_addr [CMO_NW];
@@ -823,13 +919,20 @@ module g6lc_cluster
       cmo_done[c]    = cmo_w_done[c];
     end
     if (G6LCCfg.AiCfg.DmaInvalEn) begin
-      cmo_w_v[CMO_NW-1]    = ai_dma_inval_valid_i;
-      cmo_w_op[CMO_NW-1]   = 2'd0;                 // inval only
-      cmo_w_addr[CMO_NW-1] = ai_dma_inval_addr_i;
+      cmo_w_v[AI_CMO_IDX]    = ai_dma_inval_valid_i;
+      cmo_w_op[AI_CMO_IDX]   = 2'd0;                 // inval only
+      cmo_w_addr[AI_CMO_IDX] = ai_dma_inval_addr_i;
+    end
+    if (STO_INVAL) begin
+      cmo_w_v[STO_CMO_IDX]    = storamic_dma_inval_valid_i;
+      cmo_w_op[STO_CMO_IDX]   = 2'd0;                // inval only
+      cmo_w_addr[STO_CMO_IDX] = storamic_dma_inval_addr_i;
     end
   end
-  assign ai_dma_inval_ready_o = G6LCCfg.AiCfg.DmaInvalEn ? cmo_w_rdy[CMO_NW-1]  : 1'b0;
-  assign ai_dma_inval_done_o  = G6LCCfg.AiCfg.DmaInvalEn ? cmo_w_done[CMO_NW-1] : 1'b0;
+  assign ai_dma_inval_ready_o       = G6LCCfg.AiCfg.DmaInvalEn ? cmo_w_rdy[AI_CMO_IDX]   : 1'b0;
+  assign ai_dma_inval_done_o        = G6LCCfg.AiCfg.DmaInvalEn ? cmo_w_done[AI_CMO_IDX]  : 1'b0;
+  assign storamic_dma_inval_ready_o = STO_INVAL                ? cmo_w_rdy[STO_CMO_IDX]  : 1'b0;
+  assign storamic_dma_inval_done_o  = STO_INVAL                ? cmo_w_done[STO_CMO_IDX] : 1'b0;
   if (CMO_EN) begin : gen_cmo
     g6lc_l3_inclusive_inv #(
         .InclusiveEn   (1'b1),

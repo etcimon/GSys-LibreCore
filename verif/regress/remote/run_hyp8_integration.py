@@ -391,6 +391,15 @@ def main():
                          VERILATOR_ROOT=str(RUNTIME),
                          SPIKE_INSTALL_DIR=SPIKE,
                          RISCV=RISCV)
+        # A same-tag rerun reuses out/model: a stale hyp8-packed-tiled manifest
+        # or partial objects make g6lc_hyp8_tuning.py refuse the Mdir
+        # ("generated source, tuning tool or overlay changed; use a fresh
+        # Mdir") because its identity hash covers the verilator command, which
+        # changes whenever build defines change. Non-resume builds always
+        # re-verilate, so drop the fully regenerable Mdir first.
+        # HYP8_RESUME_TAG is the sanctioned incremental path and is untouched.
+        if not resume_tag:
+            shutil.rmtree(out / 'model', ignore_errors=True)
         cmd = ['bash', HARNESS, 'hyp8']
         (out / 'command-build.json').write_text(json.dumps(
             {'argv': cmd,

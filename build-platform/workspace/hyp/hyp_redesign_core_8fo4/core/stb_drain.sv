@@ -64,6 +64,8 @@ module stb_drain
   assign req_port_o.data_wuser = '0;
   assign req_port_o.data_be = commit_queue_i[rd_ptr_i].be;
   assign req_port_o.data_size = commit_queue_i[rd_ptr_i].data_size;
+  assign req_port_o.data_prot = G6LCCfg.StoramicCheckpointEn
+      ? commit_queue_i[rd_ptr_i].data_prot : 3'b000;
 
   always_comb begin : store_if
     automatic logic [$clog2(DEPTH_COMMIT):0] commit_status_cnt;

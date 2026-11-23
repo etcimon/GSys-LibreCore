@@ -53,6 +53,7 @@ module wt_dcache_missunit
     input logic [NumPorts-1:0][G6LCCfg.DCACHE_SET_ASSOC-1:0] miss_vld_bits_i,
     input logic [NumPorts-1:0][2:0] miss_size_i,
     input logic [NumPorts-1:0][G6LCCfg.MEM_TID_WIDTH-1:0] miss_id_i,  // used as transaction ID
+    input logic [NumPorts-1:0][2:0] miss_prot_i,  // Storamic C1 access-origin AXI prot
     // signals that the request collided with a pending read
     output logic [NumPorts-1:0] miss_replay_o,
     // signals response from memory
@@ -606,6 +607,11 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
                                  ? amo_req_i.operand_a[G6LCCfg.PLEN-1:0]
                                  : miss_paddr_i[miss_port_idx];
   assign mem_req_c.paddr = paddrSizeAlign(tmp_paddr, mem_req_size);
+  assign mem_req_c.data_prot = (G6LCCfg.StoramicCheckpointEn &&
+                                !(G6LCCfg.RVA && (amo_sel || cas_amo_sel)) &&
+                                !config_pkg::is_inside_cacheable_regions(
+                                    G6LCCfg, {{{64 - G6LCCfg.PLEN} {1'b0}}, tmp_paddr}))
+                               ? miss_prot_i[miss_port_idx] : 3'b000;
 
   ///////////////////////////////////////////////////////
   // back-off mechanism for LR/SC completion guarantee

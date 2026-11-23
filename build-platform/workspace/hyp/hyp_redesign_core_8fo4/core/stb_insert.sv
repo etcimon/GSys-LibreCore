@@ -30,6 +30,7 @@ module stb_insert
     input  logic [(G6LCCfg.XLEN/8)-1:0]      be_i,
     input  logic [1:0]                       data_size_i,
     input  cbo_t                             cbo_op_i,
+    input  logic [2:0]                       data_prot_i,
     input  logic [G6LCCfg.TRANS_ID_BITS-1:0] trans_id_i,
     input  logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] st_hart_i,
     // G1ah fwd_keep at arrival (LEGACY_SMT_KEEP path; 0 under OoO)
@@ -97,6 +98,7 @@ module stb_insert
         s1_entry_q.data      <= data_i;
         s1_entry_q.be        <= be_i;
         s1_entry_q.data_size <= data_size_i;
+        s1_entry_q.data_prot <= data_prot_i;
         s1_entry_q.valid     <= 1'b1;
         s1_entry_q.cbo_op    <= cbo_op_i;
         s1_entry_q.trans_id  <= trans_id_i;

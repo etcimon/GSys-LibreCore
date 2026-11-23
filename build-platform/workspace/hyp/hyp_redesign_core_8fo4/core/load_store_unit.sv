@@ -237,7 +237,10 @@ module load_store_unit
     output logic [G6LCCfg.PLEN-1:0]        rvfi_st_push_paddr_o,
     output logic                           rvfi_amo_push_valid_o,
     output logic [G6LCCfg.TRANS_ID_BITS-1:0] rvfi_amo_push_tid_o,
-    output logic [G6LCCfg.PLEN-1:0]        rvfi_amo_push_paddr_o
+    output logic [G6LCCfg.PLEN-1:0]        rvfi_amo_push_paddr_o,
+    // Storamic C1 origin (debug unknown) + W2/W4 resync store-buffer clear
+    input  logic                           debug_mode_i,
+    input  logic                           storamic_resync_i
 );
 
   // data is misaligned
@@ -851,7 +854,8 @@ module load_store_unit
       .amo_resp_i,
       // to memory arbiter
       .req_port_i           (dcache_req_ports_i[2]),
-      .req_port_o           (dcache_req_ports_o[2])
+      .req_port_o           (dcache_req_ports_o[2]),
+      .storamic_resync_i    (storamic_resync_i)
   );
 
   // ------------------
@@ -1199,7 +1203,11 @@ module load_store_unit
     fu_data_sel.trans_id,
     fu_data_sel.hart,
     spec_load_sel,
-    1'b0
+    1'b0,
+    (config_pkg::g6lc_storamic_origin_supported(G6LCCfg) &&
+     !g6lc_core_pkg::is_amo(fu_data_sel.operation))
+        ? config_pkg::g6lc_storamic_data_prot(ld_st_priv_lvl_i, ld_st_v_i, debug_mode_i)
+        : 3'b000
   };
 
   lsu_bypass #(

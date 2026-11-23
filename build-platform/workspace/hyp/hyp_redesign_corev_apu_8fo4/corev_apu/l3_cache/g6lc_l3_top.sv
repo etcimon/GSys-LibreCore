@@ -87,7 +87,13 @@ module g6lc_l3_top
     // (single-cycle tag match on the inner engine's back-inval port).
     input  logic                       l3_back_inval_valid_i,
     input  logic [AXI_ADDR_WIDTH-1:0]  l3_back_inval_addr_i,
-    output logic                       l3_back_inval_ready_o
+    output logic                       l3_back_inval_ready_o,
+    // Storamic W1 pause/drain and whole-cache resync pass-through.
+    input  logic                       l3_quiesce_i,
+    input  logic                       l3_block_slv_i,
+    output logic                       l3_idle_o,
+    input  logic                       l3_inval_all_i,
+    output logic                       l3_inval_all_done_o
 );
 
   logic full, bank_cfl;
@@ -156,7 +162,12 @@ module g6lc_l3_top
       .l2_back_inval_valid_i (l3_back_inval_valid_i),
       .l2_back_inval_addr_i  (l3_back_inval_addr_i),
       .l2_back_inval_ready_o (l3_back_inval_ready_o),
-      .l2_write_idle_o       (l3_write_idle_o)
+      .l2_write_idle_o       (l3_write_idle_o),
+      .l2_quiesce_i          (l3_quiesce_i),
+      .l2_block_slv_i        (l3_block_slv_i),
+      .l2_idle_o             (l3_idle_o),
+      .l2_inval_all_i        (l3_inval_all_i),
+      .l2_inval_all_done_o   (l3_inval_all_done_o)
   );
 
 endmodule

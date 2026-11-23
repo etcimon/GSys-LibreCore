@@ -198,6 +198,77 @@ hyp8-specific design notes for W1:
 
 Qualification to repeat: `origin-profile`, `native-ckpt-l2l3` (7 cases + mutants `w1-no-l2-inval`, `w2-no-l3-inval`, `w3-no-l2-prot`).
 
+### 5c. hyp8 native checkpoint composition port (2026-11-23, in qualification)
+
+The W0–W2c native checkpoint path is wired into the hyp8 MC build behind
+`HYP8_STORAMIC_CKPT=1` (`-DG6LC_STORAMIC_CKPT -DG6LC_STORAMIC_MODEL`,
+`-DG6LC_STORAMIC_CKPT_TB` on the C++ side). Evidence run:
+`hyp8-storamic-aggregate-t1` (closure `closure-mc-storamic`, PGO g6lc
+fork); directed grading via `verif/regress/remote/run_hyp8_storamic_ckpt.py`
+mirroring `run_native_ckpt.py` (10 cases: boot/flow/oracles, provider
+negatives, cold recovery, dual-active mh).
+
+| hyp8 file | Content | Status |
+|---|---|---|
+| `corev_apu/tb/g6lc_testharness.sv` | `ifdef G6LC_STORAMIC_CKPT` native composition: bench triggers (`StoramicBase+0x3040..0x3078`), `g6lc_storamic_native_providers`, packed `ckpt_plat_in_t/out_t`, `g6lc_storamic_attach` with `CheckpointRequested/NativeBound/CkptBootRecovery`, pause/quiesce/restore-safe wiring, `STORAMIC_CKPT_STATE` final report, L2/L3/LLC hit counters. The ordinary `g6lc_ai_dram_backend` is instantiated only in the `else` arm | ported, lint-clean (scalar/smt2/mc `%Error: 0`), build qualification in progress |
+| `verif/regress/remote/hyp8/Flist.hyp8_mc_sim` | Full Storamic package+RTL set (cfg/checkpoint/pad pkgs, controller/IO/media/service/policy, AXI frontend+slot mux, discovery, VirtIO host, `g6lc_storamic_top`, soc cfg pkg, all `corev_apu/storamic/` attach/native/boot-recovery modules) ahead of `g6lc_ai_dram_backend` | ported |
+| `verif/regress/remote/hyp8/Flist.hyp8_sim` | `g6lc_storamic_pkg.sv` added before `g6lc_ai_dram_backend`/`g6lc_testharness` (they reference `axil_req_t`/`axil_resp_t` unconditionally) | ported |
+| `verif/regress/remote/hyp8/hyp8_tb.cpp` | `MEM` macro `G6LC_STORAMIC_CKPT_TB` arm pointing at `i_ckpt_attach__DOT__gen_native_ckpt__DOT__i_native_ckpt__DOT__endpoint__DOT__gen_model__DOT__media__DOT__i_ram__DOT__i_sram__DOT__…m_storage` (the `sram`/`tc_sram` `public_flat` array, same suffix as `gen_sim_axi`); deferred `ckpt_image` preload on `storamic_ckpt_boot_ready` (`+ckpt_preload_max`); plusargs `storamic_ckpt_report/trace` allowlisted; `MEM_USER` block fenced off (no user-bit memory in ckpt/model compositions) | ported |
+| `verif/regress/remote/hyp8/hyp8-build-harness.sh` | `HYP8_STORAMIC_CKPT=1` adds the three defines + `-DG6LC_STORAMIC_MODEL` (without it `make_cfg` yields `ProfileOff`→`gen_refuse`, no `gen_model`); `HYP8_STORAMIC_MODEL=0` is the A/B escape; `HYP8_STORAMIC_CKPT_WORDS` optional | ported |
+| `verif/regress/remote/run_hyp8_storamic_ckpt.py` | New directed runner (firmware matrix, state-line grading, provider negatives) | added |
+| `verif/regress/remote/run_hyp8_integration.py` | Non-resume builds now `rmtree(out/'model')` before verilating — a same-tag rerun otherwise hits `g6lc_hyp8_tuning.py` "generated source … changed; use a fresh Mdir" because the packed-tiled manifest identity covers the verilator command | fixed |
+
+Also already present in hyp8 (verified while porting): `g6lc_soc_pkg`
+`Storamic=11`/`StoramicBase=0x5000_0000`/`StoramicLength=0x4000`, the
+`gen_storamic_ctrl` block and `STORAMIC_IDX` xbar rule under
+`G6LCCfg.StoramicIoEn`, and the bench trigger decode on
+`gen_storamic_ctrl.storamic_axi_req.aw.addr`.
+
+Not yet ported (still open): `ariane_soc_pkg` PLIC IRQ sources 10/11 wiring
+to `g6lc_peripherals`, `G6LC_XBAR_LATENCY`, `STORAMIC_C2_PROFILE`
+monitor bind, DMI `sbcs.sberror` shim in the hyp8 `dm_top` path, C2 origin
+probe, `+storamic_sba_ctrl`/`+storamic_sba_probe` C++ probes (ariane-only;
+the debug-command-refused case is skipped on hyp8), W1 `G6LC_STORAMIC_L2/L3`
+qualification overlays in hyp8 `build_config_pkg.sv`, and the section-4
+`load_unit`/`store_buffer` items marked not-ported above.
+
+### 5d. Checkpoint widening W2: in-order multi-hart / multi-core (2026-11-23, in qualification)
+
+Committed as `283db4303` (core/corev_apu) + `d7881eadf` (Storamic
+verification). Widens `g6lc_storamic_origin_supported` to in-order WT
+multi-core and drained-handoff SMT (`NrHarts == 1 || SmtDrainedHandoff`);
+mixed-residency SMT, OoO, RVH, WB, AI island and `ServerPrefetchEn` remain
+refused. Remote evidence in progress: `storamic-837c36f99341` (SMT2/SMT2+L3
+cases pass; `ckpt-mc2` cases failed on a config assertion — fixed by the
+`build_config_pkg.sv` row below, rerun pending).
+
+| Main-tree file | Content | hyp8 counterpart | Status |
+|---|---|---|---|
+| `core/include/config_pkg.sv` | `g6lc_storamic_origin_supported`: admits `NrCores>1` in-order WT and `SmtDrainedHandoff` SMT | hyp8 `core/include/config_pkg.sv` | not ported |
+| `core/include/build_config_pkg.sv` | `G6LC_STORAMIC_MC2` overlay (NrCores=2 + coherence hub + L2 feature plane); snoop-filter default now reads effective `cfg.SnoopFilterEn` so the overlay's `En=1` gets the 64-per-core entries default instead of being reset to the package's 0 | hyp8 `build_config_pkg.sv` | not ported |
+| `core/controller.sv` | `resync_storamic_nopc_i`: a core parked in WFI or SMT drain-quiesce with an empty scoreboard flushes IF/ID/EX + I-cache without `set_pc_commit_o` instead of wedging in `RESYNC_WAIT_HEAD` | hyp8 controller equivalent | not ported |
+| `core/cva6.sv` | Resync FSM: WFI/SMT-drain nopc path; `i_smt_thread_select`/`smt_drain_safe` frozen during pause/resync; `storamic_drained_o` gated on `!smt_switch`; `storamic_resync_i` threaded to the store path; decode-validity gate during `RESYNC_WAIT_HEAD` | hyp8 `g6lc_core.sv` (name mapping unverified) | not ported |
+| `core/ex_stage.sv`, `core/load_store_unit.sv`, `core/store_unit.sv`, `core/store_buffer.sv` | `storamic_resync_i` evicts all speculative stores including `LEGACY_SMT_KEEP` `fwd_keep` entries (with assertion) | hyp8 store-buffer/LSU equivalents | not ported |
+| `corev_apu/coherence/g6lc_coherence_hub.sv` | `hub_block_slv_i` + `hub_idle_o` (AR/AW/W/hold/inval-bus empty) | hyp8 coherence hub | not ported |
+| `corev_apu/src/g6lc_cluster.sv` | Pause/resync fanned to all NC cores; `storamic_drained_o` requires every core drained plus `hub_all_idle` | hyp8 `corev_apu/src/g6lc_cluster.sv` | not ported |
+| `corev_apu/tb/ariane_testharness.sv`, `verif/tb/core/*.sv`, `verif/tb/{l2,uncore}/` | W2 tie-offs for new ports | hyp8 `g6lc_testharness.sv` + bench equivalents | not ported |
+
+hyp8-specific design notes for W2:
+- hyp8 has SMT2 (`g6lc64_hyp8_smt2`) and MC (`hyp8_mc`) profiles, so the
+  per-hart/per-core fan-out has real targets; the `g6lc_core.sv` mapping
+  for `cva6.sv` resync logic is unverified — read before porting.
+- `SmtDrainedHandoff` semantics in hyp8's SMT switch may differ; the
+  `!smt_switch` drain gate and frozen `smt_drain_safe` need re-derivation,
+  not copy-paste.
+- The `fwd_keep`/`LEGACY_SMT_KEEP` store-buffer entries are the highest-risk
+  port: hyp8's store buffer was restructured; verify retained-entry
+  eviction semantics before qualifying.
+
+Qualification to repeat: `origin-profile`, `origin-queue`,
+`stq-commit-flush`, `native-ckpt-w2` (SMT2, SMT2+L3, `G6LC_STORAMIC_MC2`
+flow/dual-active/cold/oracle + mutants `w4-no-core1-pause`,
+`w5-no-smt-l2-inval`).
+
 ## 6. Suggested port order
 
 1. Section 1 (config), with every hook still absent: hyp8 must elaborate and

@@ -79,6 +79,8 @@ module frontend
     input logic [G6LCCfg.VLEN-1:0] pc_commit_i,
     // Memory-order replay: refetch the committing PC instead of pc+4 - CONTROLLER
     input logic mem_replay_pc_i,
+    // C5 storamic resync: allow SRC_COMMIT to step once while commit is halted.
+    input logic commit_step_i,
     // Exception event - COMMIT
     input logic ex_valid_i,
     // Mispredict event and next PC - EXECUTE
@@ -311,6 +313,7 @@ module frontend
       .pc_commit_i,
       .halt_i,
       .mem_replay_pc_i,
+      .commit_step_i,
       .set_debug_pc_i,
       .smt_restore_i,
       .smt_npc_restore_i,

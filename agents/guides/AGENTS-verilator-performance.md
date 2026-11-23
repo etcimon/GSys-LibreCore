@@ -3685,6 +3685,1365 @@ Lesson: retired-instruction reduction that adds latency to a sync
 critical path is anti-productive. The spin overhead can only shrink via
 fewer/coarser barrier edges (partition-level work), not wait mechanics.
 
+## 47. Packed left shift: follow callers before choosing the SIMD path
+
+Evidence identity: `analyze_objdump_hotpaths.py` DB `/tmp/variane.db` on
+`ovh_calltorch`, from `devdeadz-ab/model/Variane_testharness`, SHA-256
+`fc3b5a89cb0795dc8f8c4a086daa37c69e8c104d8b5a29072ea78552f3073705`.
+These are **host call sites**, not guest PCs or execution counts. Reproduce the
+caller split (change the target substring for other helpers):
+
+```sql
+SELECT count(*) AS sites, count(DISTINCT caller_addr) AS callers,
+       sum(instr(f.name,'___stl_') > 0) AS settle_sites,
+       sum(instr(f.name,'___nba_') > 0) AS nba_sites
+FROM calls AS c JOIN functions AS f ON f.addr = c.caller_addr
+WHERE f.tier = 'HOT' AND instr(c.target_name,'SHIFTL_WWI') > 0;
+```
+
+The query returns **4,793 / 95 / 1,612 / 1,809**. By contrast, of 1,768,392
+mutable pointer-conversion sites matching `cvPjEv`, 1,724,917 are in settle
+and none has an NBA-named immediate caller. Symbol matches are not a dynamic
+denominator. A specific direct path is `__Vthread__nba__3` -> core 0
+`___nba_sequent...__331` -> left-shift helper (128 sites in this caller).
+The emitted C++ includes both constant multiplier-row shifts and variable
+200/224-bit shifts in fast TUs; a variable-only benchmark can miss regressions.
+
+The language contract is `AstShiftL::emitC` -> `VL_SHIFTL_WWI`. In a
+non-word-aligned packed shift the old destination is not an input, unlike a
+part-select assignment. For disjoint buffers, a sufficiently wide source,
+and more than two surviving source words, write the first word, funnel the
+adjacent source pairs, then mask the last word. The existing kernel dispatches
+to VBMI2 when available, otherwise vector shifts/OR or scalar code. Keep the
+constant-width clear: clearing just the variable-size prefix *reduced*
+instruction counts but *increased* cycles in the 200-bit leaf. Keep the old
+path for overlapping buffers and small tails: the 128-bit constant `<< 65`
+control regressed by ~13% in instructions without the small-tail exception.
+No design names, scheduler changes, ABI/layout changes or new ISA requirements.
+
+Pinned `perf stat -e instructions:u,cycles:u` leaf A/B/B/A, `g++ -O3
+-std=c++17 -march=native -DVL_SIMD_PREFER_512`, both sides using the local
+`350e57f24` word-kernel header (the builder checkout's copy differs). Four
+million calls to a noinline fixed-width wrapper, shift count `i % bits`,
+consume output word `i % words` into a rolling checksum and XOR the checksum
+into the corresponding input word. Counts include this identical caller.
+
+| Bits / count | Instructions, old -> new (millions) | Cycles, old -> new (millions, two runs each) |
+|---|---:|---:|
+| 128 / variable | 395.8 -> 290.3 | 110.8-110.9 -> 103.8-104.0 |
+| 200 / variable | 462.2 -> 330.5 | 139.0-145.0 -> 120.3-120.8 |
+| 518 / variable | 576.8 -> 405.5 | 201.6-203.0 -> 151.0-151.6 |
+| 2048 / variable | 662.4 -> 432.0 | 226.9-228.0 -> 153.7-154.4 |
+| 128 / constant 65 | 93.8 -> 93.8 | 36.4 -> 36.8-37.9 |
+
+Checksums matched in every pair. These figures describe the leaf, not boot
+time. A 10x harness improvement needs a net saving of 90% of **whole-run
+wall time**. Neither this DB nor this experiment establishes the fraction of
+time spent in shifts. The overlap guard refused a fresh model profile on the
+busy builder. Qualification still needs a same-generated-model/runtime-only
+A/B with a fixed firmware, affinity, cycle budget, matching RVFI/sidecars
+and a steady-state instruction profile. No change to verification defaults.
+
+## 48. From sampled spin loops to producer and consumer tasks
+
+Two historical `perf record -F 1999` captures on `calltorch` record
+**user cycles**, not retired instructions. Both commands specify the same
+MC `fw_payload.elf`, `+debug_disable +quiet_axi` and 60,000-cycle cap.
+`perf buildid-list` matches `readelf -n` on the respective executables:
+`hc.data` / `devclean-ab` = `f6c6a808a02e07c5477dc6e051f31663b8c873ad`;
+`hc2.data` / `devthr2-ab` = `872a9b61650503105ba234494a312000531a0c8c`.
+Do not join these IPs to the different `devdeadz-ab` ELF in the SQLite DB.
+
+`perf report --stdio --no-children --time 50%-100% -i <capture>` gives
+the following period-weighted self shares for the second half by elapsed
+time (575K / 329K samples, zero reported lost). This avoids treating ELF
+loading as model evaluation; it is not a matched guest-cycle window.
+
+| Build | Worker loop | Generated NBA lane wrappers, combined |
+|---|---:|---:|
+| devclean, 4 lanes | 37.71% | 13.53% |
+| devthr2, 2 lanes | 11.15% | 13.08% |
+
+The difference is not an isolated thread-count A/B. The two categories also
+mean different things. In `hc2`, full-capture `perf annotate --stdio
+--percent-type local-period` puts 97.24% of workerLoop's own cycles at the
+backedge of the queue poll. By contrast, three hot backedges **inside** the
+generated lane wrappers are waiting for specific publications. Decode the
+load/shift/low-bit/parity test on the retry path, then read the TLS `mtaskId`
+store on the success path. This distinguishes even repeated waits on the
+same bit. Cross-check against the generated `wait(mask); mtaskId(id);`:
+
+| Lane | Retry branch -> poll target | Producer -> consumer | Full-capture share *within that wrapper*, at retry branch |
+|---|---|---|---:|
+| 1 (main) | `14a545 -> 12ad59` | 25 -> 23 | 42.71% |
+| 1 (main) | `14a605 -> 130385` | 9 -> 22 | 42.14% |
+| 0 (worker) | `127c85 -> e0476` | 2 -> 1 | 42.47% |
+
+These ranges contain `pause`, a countdown and the acquire poll. Attribution
+to the branch does not imply branch misprediction. The first two shares are
+not percentages of total runtime. Nor does a late publication prove that
+the producer's *body* is slow: the whole prefix on its lane and OS scheduling
+contribute. Task numbers are evidence keys for one build, not compiler rules.
+
+**Two independent experiments, ranked by objective:**
+
+1. For wall time, inspect producer arrival on the critical path first.
+   `fillinCosts` already accepts body-hash keyed MTask costs, and
+   `PartPackMTasks` chooses earliest estimated start, breaking ties by
+   critical-path priority. Use the existing per-task profiling boundaries
+   (start is *after* dependency wait). Compare estimated body cost, actual
+   begin/end and consumer arrival by workload phase. Try measured costs
+   with the same input DAG before changing the packing heuristic. If gaps
+   follow descheduling rather than measured work, repacking is the wrong fix.
+2. For fewer atomic operations, reduce the graph **after lane assignment**.
+   In addition to explicit remote predecessors, every task follows its lane
+   predecessor. Drop remote bit `p` when the previous lane task, or another
+   required predecessor, already equals or transitively follows `p`.
+   Emit task signals only for bits still consumed; retain all thread-finish
+   signals and the final join. Census below uses emitted NBA lane functions,
+   validates each task ID against its signal, decodes the single-word masks,
+   and compares every task's ancestor set before and after reduction.
+
+| NBA schedule | Predecessor bits before -> after | Nonempty task waits | Task publications (excluding joins) |
+|---|---:|---:|---:|
+| devdeadz, 4 lanes | 113 -> 69 | 52 -> 43 | 58 -> 41 |
+| devclean, 4 lanes | 103 -> 64 | 53 -> 44 | 59 -> 32 |
+| devthr2, 2 lanes | 24 -> 12 | 20 -> 12 | 29 -> 12 |
+
+Example: in devthr2, lane 1 waits for bit 25 before tasks 23, 11 and 20.
+Only the first acquire is needed; it is precisely the one that actually
+spins. All three profiled hot edges survive. The reduction therefore
+predicts fewer release RMWs and fast-path loads, **not** the disappearance
+of the sampled waits. A production pass must also handle multiword masks,
+even/odd rounds and acquire/release ordering. Test pruning with a frozen
+schedule separately from repacking. Gate both on equal workload/RVFI and
+interleaved wall time, host cycles and retired instructions per simulated
+cycle; do not add their projected gains. No full-model speedup measured here.
+
+## 49. Lane-order pruning: short throughput A/B
+
+Implemented a limited form of §48 in `V3Partition::createThreadFunctions`,
+after packing. Number each task by its position on its producer lane. For
+each consumer lane, wait only for the latest still-needed position from
+each producer lane; emit a task publication only when some retained mask
+uses that bit. A release of a later task covers earlier tasks on its lane;
+an acquire on the consumer lane need not be repeated in that invocation.
+This does not reorder tasks, move message flushing, change the even/odd
+protocol or weaken the end-of-round join. It does not require computing a
+whole-graph transitive closure. ISA, model ABI, RTL timing and RVFI probes
+are unchanged.
+
+**Method.** Change only `V3Partition.o` in a scratch compiler link. First
+prune the old generated C++ offline and compare all task ancestor sets
+(explicit waits plus lane order). Then compare the real emitter's generated
+C++ files to this independently pruned output: byte-identical on both
+workloads. Use identical runtime headers, compiler flags and testbench.
+Pin the main and worker threads separately (Linux/WSL logical CPUs 0 and 2
+here). Time 250,000 full model clock cycles after 4,096 warmup cycles with
+a steady clock, excluding startup, teardown and the independent software
+oracle. Every cycle's digest contributes to the checked checksum. Six
+pairs per workload, alternating A/B and B/A. No concurrent builds in the
+timing window. The leaf is deliberately scheduler-sensitive.
+
+| Work per lane update | Task publications / waits, off -> on | Median simulated cycles/s, off -> on | Median paired speedup (range) | Checksum |
+|---|---|---:|---:|---|
+| 0 extra mixing rounds | 51 / 2 -> 2 / 2 | 282,240 -> 980,134 | 3.69x (2.42-5.59x) | `7308eb7e` |
+| 24 extra mixing rounds | 22 / 11 -> 2 / 2 | 567,103 -> 1,230,795 | 2.20x (2.00-2.54x) | `71e94024` |
+
+Compare A/B **within a row**: changing the payload also changes the
+partition. In the first row the wait count is unchanged: the gain does
+not require eliminating a spin loop. It is consistent with avoiding atomic
+RMWs on a shared done word and simplifying the retained masks. These
+tests measure throughput, not cache coherence events. The existing
+`t_mtask_mask` test also finished with a three-word mask including a
+multiword task wait and final join.
+
+Reproduce with the baseline and candidate `verilator_bin`, identical
+`VERILATOR_ROOT`, and fresh model directories; use separate output dirs
+for each compiler and each `rounds` value (`0`, `24`):
+
+```sh
+leaf=$repo/verif/regress/remote
+"$compiler" --cc --exe --threads 2 --top-module g6lc_mtask_bench \
+  -GRounds="$rounds" -CFLAGS "-O3 -DBENCH_ROUNDS=$rounds" --Mdir "$out" \
+  "$leaf/g6lc_mtask_bench.sv" "$leaf/g6lc_mtask_bench.cpp"
+make -s -C "$out" -f Vg6lc_mtask_bench.mk -j2 OPT_FAST=-O3
+taskset -c 0,2 timeout 12 "$out/Vg6lc_mtask_bench"
+```
+
+Applied offline to the *actual* Hyp8 schedules, this limited rule reaches
+the §48 counts on both `devthr2-ab` and `devdeadz-ab`. That is structural
+evidence only. Keep the emitter change for the measured leaf benefit;
+next gate for a harness throughput claim is a frozen two-lane Hyp8 A/B
+with matching simulated budget and RVFI. Do not infer a 2-4x boot speedup
+from a model with 24 small lanes.
+
+## 50. MC Hyp8: neutral pruning result, concentrated masked-row work
+
+**Control identity matters.** `devthr2-ab` uses the
+`hyp8-rfix131a-phantomprobe-aggregate-t2` source snapshot,
+`Flist.hyp8_mc_sim`, `G6LC_HYP8_MC`, two *host* lanes, `-march=x86-64-v3`,
+`-DVL_DEBUG`, `OPT_FAST=-O2`. Its NBA graph has 29 tasks and 53 edges.
+Recompile only the two generated worker TUs (root `he3e5f5a1__2` and
+`__3`) and relink private copies of the model archive. The first replay's
+`g++` was GCC 16.2, not the archived GCC 13.3. Do **not** pool those timings.
+With `/usr/bin/g++-13`, both control objects and the control executable
+matched the originals byte for byte. Control SHA-256
+`5eaf04f7a70e4fe9e1dd51912112386835bf51858cc0aab0261f003e84718c0b`;
+pruned `494101386a36669503e07f4329f2ce0ff75c90e93df4a4717c502414434b4673`.
+No change to payload logic, firmware, generated schedule or runtime headers
+between these two builds. Scratch artifacts: `ovh_calltorch:/tmp/hyp8-lane-ab.U2p5fd/`.
+
+**Measure a complete shared-line workload.** Build the existing
+`mc_multi_writer_line.S` with `ITERS=8` rather than stopping a long run
+before its oracle. Four guest cores write separate slots on one line,
+then AMO-add to the same counter. ELF SHA-256
+`3e6fc73f5a09696cd8a38d10ed76555fff55333a9ea00bc5f847a21c8b495882`.
+Pin to CPUs 2,4 (different physical cores), use the same debug-disable,
+quiet-AXI and cycle-stamped RVFI options. Time the whole process in BAAB
+order. All four runs passed tohost at cycle **4,649**, with byte-identical
+sidecars and eight identical per-hart trace files. RVFI retire counts
+for harts 0/2/4/6 were 356/236/220/208; the sidecar `[356,0]` alone does
+not describe all four cores.
+
+| Original-compiler run | Seconds | User instructions (billions) |
+|---|---:|---:|
+| B, pruned | 23.466 | 101.986 |
+| A, control | 23.566 | 101.932 |
+| A, control | 23.617 | 101.926 |
+| B, pruned | 23.565 | 102.014 |
+
+Control/pruned: **197.07 / 197.70 simulated cycles/s** (+0.32%); user
+instructions +0.07%. No material throughput win established. The removed
+17 publications and eight waits (§49) are not a proxy for saved work on
+the critical path. The short complete workload does not qualify Linux boot.
+
+**Follow the expensive task, not its symbol suffix.** Separately sample
+the matching GCC 13 control on the same passing ELF (`perf record -D 2000
+-e instructions:u -c 4000003`). 21,881 samples; the profiled run's traces
+matched the timed control. Join period-weighted *self* samples to generated
+leaf callees named in each `mtaskId` body. Exclude symbols called by multiple
+tasks from the unique attribution; this is static caller membership, not
+a dynamic call stack. Unique callee sets cover 82.62% of the sampled period.
+Task 19's account for **44.80%** vs 7.54% for task 9. Task 19 is last on
+the main lane. A core-0-named function can receive four different `vlSelf`
+pointers: classifying its samples as guest core 0 is wrong.
+
+Cross-check on the longer `ITERS=1500` ELF's first 8,000 cycles (a bounded
+prefix, not a verdict), using the GCC 16 worker replay: 39,599 native
+instruction samples, 43.74% in task 19's unique callees. **267 distinct
+bodies called on all four core instances** account for 42.63% of the whole
+sampled period. An instrumented diagnostic of that same replay timestamped
+both sides of each wait and the payload end every 251st NBA invocation.
+All 94 sampled invocations contained all 29 tasks; its RVFI traces matched.
+Task 19 is bimodal: 32 bodies exceeded 1 ms (median 2.10 ms among those);
+the median of the last 47 invocations was only 0.41 us. Task 19's body
+occupied 44.8% of summed sampled NBA spans, but only 22.2% was after the
+other lane finished. Even an ideal equal-speed helper that starts *only*
+when that lane is free could save half that tail (~1.125x on these NBA
+spans), not halve whole-model wall time. Work reduction inside the body
+can affect the overlapping interval too.
+
+On the **original-compiler, complete** run, group those 267 function bodies
+by their emitted assignment destinations. As shares of *all* sampled host
+instructions: `t1_faval_s` 18.02%, `t1_aval_s` 15.88%, `t1_mk_s` 5.49%,
+`t1_fmk_s` 4.09%, both mark arrays 0.18%. These are self samples for the
+entire functions, not just their AND/OR instructions. Together they put
+43.66% of samples in a much more specific category than "comb logic".
+Perfectly eliminating just that category with all other instruction counts
+unchanged would give an instruction-count ratio of about 1.77x. This is
+not a wall-time forecast.
+
+**A candidate with a language-level explanation.** Representative issue
+stage bodies (`...nba_comb...__637`, `__569`) implement rename-recovery
+publish rows: for each output bit, OR together that bit from each port
+ANDed with its row enable. The emitted C++ repeatedly extracts individual
+bits from packed words and rebuilds each destination word. Across adjacent
+output bits the enables are the same; the equivalent operation is a
+**packed mask-and-OR across ports**, not a priority encoder or an assumed
+one-hot select. It preserves zero and simultaneous hits. This is upstream
+of AVX-512/BMI2 instruction selection: first restore the contiguous data
+operation so a host compiler can optimize it.
+
+Isolated falsification leaf: `verif/regress/remote/g6lc_masked_row_bench.{sv,cpp}`.
+Verilate twice with `--cc --exe --threads 1`, identical `-march=x86-64-v3`
+and `OPT_FAST=-O2`, changing only `-GPackedRows=1'b0` / `1'b1` (quote each
+shell argument). Four 200-bit output rows, eight ports; independent bit
+oracle checks all 256 enable masks per row, then 500,000 evals with the
+same stimulus. On WSL, pinned CPU 0, three runs each: median **386,735 vs
+11,829,054 evals/s**; all checksums `6fceeffa`. Separate Callgrind runs
+counted 15.85B vs 0.772B Ir for the whole leaf, including the oracle.
+These are combinational evaluations, **not Hyp8 simulated cycles**.
+
+Next compiler experiment: in DFG optimization before wide expansion,
+recognize pure adjacent output bits with the same set of enable expressions
+and contiguous source slices per operand. Factor only proven groups; retain
+multi-hit OR semantics, bit ordering, tail masks, and scalar fallback.
+Do not rewrite the timing-oriented RTL or key on rename hierarchy.
+Before promotion, count matched groups in the sampled Hyp8 bodies, verify
+identical committed traces, and repeat the 4,649-cycle control. Neither
+the 30.6x leaf ratio nor a function's sample share is a harness speedup.
+
+## 51. Frozen MC model: packed masked-row lowering
+
+This experiment changes the *model executable*, not the RTL or the
+Verilator defaults. To isolate the transformation from scheduling, apply
+`g6lc_pack_generated_rows.py` after C++ emission. The matcher accepts only
+a single wide-word assignment of supported unsigned reads, casts,
+constant shifts, ANDs and ORs. It follows each demanded output bit to
+its input-bit products, accounting for truncation and shifts. Products
+sharing an enable bit, a source word and a source-to-destination offset
+can be computed together with `(-enable) & shifted_data & output_mask`.
+OR the groups. This preserves zero/multiple hits, without reordering
+assignments or assuming a port is active. Unsupported expressions retain
+their original C++; in particular the complemented-enable mark trees are
+not optimized in this experiment. No host extension beyond the control's
+`x86-64-v3` target is required.
+
+**Two checks before timing.** Applied the actual transformer (not a
+hand-written packed RTL variant) to the emitted §50 WSL diagnostic leaf:
+25 word assignments changed, the independent exhaustive enable-mask
+oracle passed, checksum `6fceeffa`. On the frozen MC model the profiled
+selection contained 267 function bodies. **211 TUs / 1,688 assignments**
+changed. Compile each TU separately with its recorded flags and GCC 13.3;
+replace only its object in a private copy of the original archive and
+relink. The model still has the original schedule, including its original
+signals. Do not attribute these results to §49 pruning.
+
+**Reproduction.** On `ovh_calltorch` use the remote proxy and a new scratch
+directory. With `scripts` pointing at the three `g6lc_*pack*.py` files from
+`verif/regress/remote` and `fw` the §50 `ITERS=8` ELF:
+
+```sh
+model=/opt/testharness/runs/devthr2-ab/model
+python3 "$scripts/g6lc_mc_pack_replay.py" "$model" /tmp/devthr2-build.log "$scratch/model" -j2
+python3 "$scripts/g6lc_mc_pack_ab.py" "$model/Variane_testharness" \
+    "$scratch/model/Variane_testharness" "$fw" "$scratch/pairs"
+```
+
+The runner rejects unexpected control/firmware identities and checks actual
+tohost success at cycle 4,649, all-core retirement, eight nonempty trace
+files and exact trace/sidecar equality. The normal mode refuses an active
+model; `--shared-host` explicitly measures the co-running case and records
+neighbor model PIDs at both ends of each run. Preserve the per-run
+`perf.csv`, `result.json` and logs. Artifacts for this experiment:
+`ovh_calltorch:/tmp/hyp8-lane-ab.U2p5fd/packed/ab`. Candidate SHA-256:
+`72ae9370aedb8c08f5fb1cdad6220f8435baaa1c067f153144410a7f82dc44f6`.
+An independent rebuild using the delivered replay script produced a
+byte-identical executable and a manifest of the same 1,688 assignments.
+
+**Measured result (shared host).** Process affinity `2,4`; same overlapping
+four-lane `hyp8-xbarprobe` model PID at the beginning and end of all six
+runs. No comparison against the quiet-host §50 timings. Whole-process
+wall time includes startup, tracing and exit; hardware counters are
+process-wide user-mode counts across threads.
+
+| Pair/order | A sim cycles/s | B sim cycles/s | B/A | User instructions, A / B (billions) | Host user cycles, A / B (billions) |
+|---|---:|---:|---:|---:|---:|
+| 1 AB | 97.26 | 130.48 | 1.342x | 106.859 / 72.877 | 358.290 / 298.157 |
+| 2 BA | 105.68 | 122.40 | 1.158x | 107.677 / 73.151 | 361.552 / 339.441 |
+| 3 AB | 110.31 | 120.62 | 1.093x | 106.589 / 72.491 | 330.277 / 346.784 |
+
+**Keep the opt-in lowering for this model.** Median throughput rose from
+105.68 to 122.40 simulated cycles/s (+15.8%); the slowest packed run was
+faster than the fastest control. Median retired host instructions fell
+31.8%. Host cycles did *not* fall in every pair, and aggregate IPC was
+lower in B; neither hardware counter is a substitute for the wall-time
+measurement. All six tests reached the actual pass verdict and had
+identical traces, including byte comparison with the archived §50 oracle.
+Same neighbor PID is not a guarantee of constant CPU or SMT-sibling
+contention: the evidence is a throughput increase in this co-running
+workload, not a quiet-host speedup. No RTL, timing, ISA, DTS, firmware
+or scheduling changes; neither a Linux boot nor an enabled-by-default
+Verilator DFG optimization is qualified here.
+
+## 52. After packing: follow task 22's wait through task 9 to the checkpoint rows
+
+**Identity and attribution.** Same §51 packed ELF (`72ae9370...`), §50
+eight-iteration MC ELF, two host lanes, CPUs 2 and 4. A fresh, delayed
+`perf record` produced 7,300 user-instruction and 39,928 user-cycle samples,
+zero reported lost samples. Use each event's actual period and its own
+denominator. The profile, the independent timestamp build, and the mask
+histogram build all passed at cycle 4,649 and matched the archived sidecar
+and eight traces. Shared host; these diagnostic runs are not timed A/Bs.
+
+1. Resolve sampled ELF symbol + offset; use the TID observed in each
+   `__Vthread__nba__N` function to identify the lane. Intersect the
+   generated direct callers of the symbol with tasks on that lane.
+   Attribute self samples only when one NBA task remains. This is
+   caller-set inference, not an inclusive stack trace. A `gen_core[0]`
+   callee name still does not identify its receiver. No static-site-count
+   weighting and no join against the older four-lane disassembly DB.
+2. The 29 task buckets account for **63.40% of instructions and 65.78%
+   of cycles**; ambiguous/unresolved NBA caller sets for 4.73% / 2.34%.
+   Lane dispatch/poll accounts for 16.71% / 20.43%, NBA orchestration
+   3.01% / 4.07%, worker loop 1.42% / 2.88%, trigger eval 1.64% / 0.67%,
+   libraries 0.71% / 0.35%, other symbols 5.99% / 5.86%.
+   Sampled IPs at the `pause; sub/dec; jne` retry loops account for ~83%
+   of the lane functions' own cycles. Do not also count those cycles as
+   producer work or assume deleting the poll advances the producer.
+3. In a separate packed-model run, timestamp both sides of each wait
+   and each payload end every 113th NBA invocation. All 120 sampled
+   invocations have all 29 tasks (353.13 ms of summed round spans). To
+   model a shorter payload, replay **both** lane order and the actual
+   emitted predecessor masks: begin at the later of lane arrival and
+   last required publication. Retain measured launch offsets, inter-task
+   gaps and post-ready delay. With no change the replay reproduces every
+   measured span exactly. This freezes the schedule, system delays and
+   other task durations; it does not predict a new partition or CPU load.
+
+| Task | Role in this schedule | Instructions / cycles (% of profile) | Predicted reduction in sampled NBA span if *whole task body* halves |
+|---|---|---:|---:|
+| 9 | Worker producer for main task 22 | 9.44 / 9.94 | 11.29% |
+| 27 | Late worker, predominantly LSQ in leading group | 2.52 / 1.84 | 2.95% |
+| 25 | Worker producer for main task 23 | 2.18 / 2.27 | 2.86% |
+| 26 | Worker producer for main task 15 | 2.47 / 2.98 | 2.59% |
+| 15 | Main producer for worker task 29 | 3.63 / 4.47 | 2.53% |
+| 19 | Terminal main task, many replicated mark computations | 17.56 / 8.84 | 0.25% |
+
+The most useful discriminator: **55.85 ms of task 22's 55.87 ms waiting
+overlapped task 9's own body** (41 late arrivals). In contrast, of 28.00
+ms late on 25 -> 23, 20.21 ms overlapped task 25's body and 7.79 ms
+preceded it. Rebalancing earlier work might help the latter, but simply
+dispatching task 9 sooner is not the first hypothesis for the former.
+Host descheduling inside a measured body is still possible. A task's
+CPU sample share and its marginal wall-time value are different.
+
+**Source mechanism.** Task 9 calls `...nba_sequent...__291` and siblings.
+`__291` builds 128-bit columns from a 32,768-bit packed checkpoint map;
+successive extracted bits in one emitted word use source word indices
+`0x1ff`, `0x1f7`, `0x1ef`, ... at the same bit offset: a 32-byte stride,
+not a contiguous slice. The RTL is `col[s] = ckpt_fmap_q[s][a][b]`,
+then `g_fmap[a][b] = |(rec_oh_q & col)`; integer maps and allocation rows
+use the same construction (`g6lc_rename_recover.sv`, `gen_gmap`,
+`gen_galloc`, `gen_gfalloc`). For the actual receiver column `[28][7]`
+the emitted sources include multiple scheduled readers/writers as well
+as settle/reset references. A wait-edge ID alone does not identify those
+data uses. A local rewrite of the reduction that leaves the column
+producers executing cannot claim their savings.
+
+Among the profiled tasks examined, sampled recovery functions principally
+writing `col` account for 7.81% instructions / 7.74% cycles in task 9,
+2.73% / 3.35% in 15, and 1.52% / 1.85% in 26. These are whole-symbol
+weights, not an attribution of every instruction to a single expression.
+The task-9 IPs themselves corroborate the shape: ~50% of instruction
+samples at bitwise logic, ~25% at shifts. In task 19, bodies writing
+`t1_mk_s` or `t1_fmk_s` account for 13.58% instructions but only 5.95%
+cycles; the previously packed allocation bodies now account for just
+2.10% / 0.62%.
+
+**Which lowering to test.** Measure the actual four-word `rec_oh_q`
+immediately before the `g_fmap` assignments in four active consumer
+functions. Across 15,300 consumer evaluations, **1,400 masks empty,
+13,900 single-bit, none multi-bit**. This is a workload observation,
+not a compiler invariant. Fuse the pure transpose-plus-reduction while
+the DFG still has both sides: in word-sized chunks of the mask, iterate
+set bits and OR each selected **contiguous payload row** into the result.
+Empty naturally yields zero, one selected row is a copy, and multi-hit
+preserves OR semantics, including partial final words. Prove the original
+data epoch, enable/trigger behavior, alias safety and lack of remaining
+observable uses before removing an intermediate. If a column is traced,
+shared at another epoch, or otherwise not dead, retain it or decline.
+Do not alter the timing-oriented RTL or assume `rec_oh_q` by name.
+
+A separate single-CPU, 4 KiB hot-table kernel used 128 rows of eight
+32-bit words, GCC 13.3 `-O2`, two million calls, three reps per variant,
+all outputs independently checked. Sparse fixture: one empty mask in
+eleven, otherwise one selected bit; dense control: 64 selected bits.
+At `x86-64-v3`, set-bit iteration retired **80 / 528 instructions per
+call** (sparse / dense, process totals normalized by calls); a full masked
+row scan took 1,473 / 1,474. Pre-counting bits to specialize on exactly
+one took 88 / 586. Disassembly of the simple loop already has BMI1
+`tzcnt`/`blsr` and AVX2 `vpor` on YMM rows. `x86-64-v4` still used YMM,
+not ZMM, and saved about one instruction per call. This is not a
+measurement of the current Verilated producer or of MC throughput.
+`pext` alone cannot extract bits spread over distinct strided words.
+Eliminate the transpose before considering a wider instruction for it.
+
+**Priority and gate.** First test producer/consumer fusion on the frozen
+two-lane model, ahead of complemented-enable packing in terminal task 19
+or changing the wait primitive. As a sensitivity exercise only, if the
+identified transpose-family fraction of each of tasks 9, 15, 26 is
+uniform across rounds and proportional to its cycle-sample mix, speeding
+that fraction up 2x / 4x reduces the replayed NBA spans by 13.0% / 18.4%.
+These are **not whole-run speedups**, cannot be added to spin shares, and
+do not account for new consumer work. Require matches in the sampled
+producers, actual removal of column construction, identical RVFI and a
+paired simulated-cycles/s improvement. Also exercise real recovery plus
+zero-, multi-hit and observable-intermediate controls before promotion.
+
+Reanalysis artifacts on `ovh_calltorch` under
+`/tmp/hyp8-lane-ab.U2p5fd/postpack.yOnwfD/`: `samples.data`, `paths.py`
+and `attrib.json` (both events), `source.json`/`family.txt` (source grouping),
+`uses.txt` (example consumer chain), `ops.txt` (sampled instruction decode),
+`probe/stamp-*.txt`, `critical.py`, `late.txt`, `lanes.txt` (all 29 tasks,
+including predecessors and single-task sensitivity), `sweep.txt`,
+`mask/*.hist`, and `kernels/{fold.cpp,run.sh,results,summary.txt}`.
+
+## 53. Shorten the checkpoint producer without changing data epochs
+
+The §52 row-selection proposal would move a read from a producer into a
+consumer. An NBA task edge establishes an order, **not** that a read made
+after that edge sees the same version of the source table. The column
+also has multiple readers and settle/reset references. Rather than assume
+away either issue, optimize the producer itself. This is a different
+transformation from sparse gather fusion: it retains every output column,
+even when the current repair mask is empty. No dependency is removed.
+
+`g6lc_pack_columns.py` follows each of the 32 output bits of a generated
+word assignment back through the unsigned casts, constant shifts and
+logic. It requires exactly one source bit per output bit, one in-bounds
+wide input field and a constant positive byte stride. Within uninterrupted
+assignments from that field, group columns which read different bit planes
+of the **same 32 bytes**. Do not cross unknown statements, control flow or
+a write to the source. Keep partial groups with fewer than four distinct
+planes unchanged. Store the original destination words in their original
+order; do not require adjacent output addresses or a particular RTL name.
+
+The tile helper loads the 32 proven source words in four AVX2 groups.
+It shifts and packs their selected bytes, undoes the within-lane ordering
+of x86 packs, then extracts each required column with a movemask. In the
+originally sampled `__453` object this gives 16 static `vpgatherdd` and
+124 `vpmovmskb` sites. These are code-generation checks, not dynamic event
+counts. Without AVX2 it uses four 8x8 shift/mask transposes; no BMI2,
+AVX-512, aligned input, or read past the final source word is required.
+The standalone test exercises all 256 basis bits with an unaligned
+29-byte stride, a source update between batches, and an alias rejection.
+Both scalar and AVX2 builds passed. This changes host code only, not
+silicon timing, RTL, DTS, firmware, trigger order or observability.
+
+**Replay.** Use the original generated model directory, the §51 packed
+directory (archive, changed TUs and ELF), and a fresh output directory.
+`g6lc_mc_column_replay.py` relinks the input archive first and requires
+an exact match to the packed control hash. Compile changed TUs with
+their original GCC 13.3 flags; replace only their objects in a private
+archive copy. The profile-specific input list selects the §52 recovery
+column callees from tasks 9, 15 and 26. It is *not* a rule used by the
+expression matcher. To reconstruct `inputs.txt` for this frozen ELF:
+
+```sh
+for i in 72 74 75 355 376; do
+  echo "Vg6lc_testharness_g6lc_core__pi37__DepSet_h53a8106c__${i}.cpp"
+done >inputs.txt
+for i in {447..474} {988..999} {1056..1069} 1227 {1250..1264} {1468..1481} {1538..1551}; do
+  echo "Vg6lc_testharness_g6lc_core__pi37__DepSet_h7486aa93__${i}.cpp"
+done >>inputs.txt
+python3 "$scripts/g6lc_mc_column_replay.py" "$original" "$packed" /tmp/devthr2-build.log \
+  inputs.txt "$scratch/model" -j3
+python3 "$scripts/g6lc_mc_pack_ab.py" "$packed/Variane_testharness" \
+  "$scratch/model/Variane_testharness" "$fw" "$scratch/pairs"
+```
+
+On `ovh_calltorch` the test artifacts are under `/tmp/hyp8-lane-ab.U2p5fd/tile1`;
+selector: 103 TUs, 101 with matches, **11,678 word projections** changed.
+The measured baseline is the packed model (`72ae9370...`), **not** the
+original model or the pruned-scheduler build. The timing runs used
+`--shared-host`; per-run `result.json`, `perf.csv`, traces and sidecars
+are under `ab/`.
+
+| Order | Packed control cycles/s | Tiled cycles/s | Paired ratio | User instructions, control / tile (billions) | User host cycles, control / tile (billions) |
+|---|---:|---:|---:|---:|---:|
+| AB | 99.96 | 110.15 | 1.102x | 75.800 / 62.485 | 406.269 / 366.674 |
+| BA | 102.55 | 112.78 | 1.100x | 75.211 / 63.805 | 396.807 / 335.420 |
+| AB | 103.07 | 130.37 | 1.265x | 74.934 / 61.253 | 400.711 / 304.155 |
+
+**Keep for this MC build:** median **+10.0% simulated cycles/s, -16.9%
+retired host instructions**. Timed ELF `b8c6cdea3e6478e3815bf512f342c722633110e87add4431c35f81d2b29527be`.
+All six timed runs reached the real tohost pass at cycle 4,649, with four
+cores retiring, eight identical trace files and the same sidecar as the
+archived oracle. Process affinity 2,4. No other model was identified by
+the runner at the run boundaries, but the box was loaded; the paired
+ratios are more informative than the best individual timing. Do not
+compound this percentage with a different session's §51 median.
+
+**Why the throughput changed.** Separately link the *same* two sampled
+worker objects from §52 against each payload archive and run ABBA. Each
+diagnostic matched the traces and sidecar. All have the same 120 sampled
+NBA invocation IDs and all 29 tasks. Numbers below are sums in ms over
+those 120 invocations, not totals for the whole run:
+
+| Diagnostic | Task 9 body | Task 22 waiting | Task 15 body | Task 26 body | NBA span |
+|---|---:|---:|---:|---:|---:|
+| Control | 84.41 | 57.31 | 32.46 | 25.69 | 349.43 |
+| Tile | 26.87 | 2.93 | 11.24 | 11.88 | 272.68 |
+| Tile | 28.53 | 5.91 | 10.92 | 11.50 | 294.09 |
+| Control | 83.11 | 55.02 | 34.41 | 26.99 | 374.16 |
+
+The 9 -> 22 delay largely disappeared **without weakening the acquire
+or changing lane order**. Task 19 still consumed 61-63 ms of sampled
+tiled payload time. The largest remaining measured late edge was
+**25 -> 23** (28.87 and 33.83 ms); that is not a new regression, but a
+previously smaller delay now exposed. Replaying hypothetical halved task
+bodies no longer identifies one dominant target: task 25 would shorten
+sampled tiled spans by 3.11-4.97%, with tasks 27-29 also contenders.
+Next discriminate task 25's body from work preceding it in its lane;
+do not replace the wait or extrapolate to an OpenSBI/Linux boot.
+
+**Delivered replay check.** The final matcher also refuses unbraced
+conditional sites and scopes its C++ temporaries. The resulting executable
+had a different SHA-256 (`0a717957fba55e06a85cc8b6c51bec32f213023ffeb6817e05f61af311b7a727`),
+so we repeated acceptance rather than attributing prototype timings to it.
+In `tile1/final-ab` the AB / BA / AB pairs gave control vs delivered
+**104.40 / 133.16**, **83.65 / 118.37**, **88.02 / 117.97** simulated
+cycles/s. Median 88.02 -> 118.37 (+34.5%); median retired instructions
+77.085B -> 62.155B (-19.4%). All six passed the same cycle, four-core
+and exact-trace gates. Do not pool the wall-time ratios from the two
+sessions or attribute their difference to temporary scoping: host load
+and control timings changed. The producer timestamps above are from the
+first build; the final build's timing is uninstrumented.
+
+## 54. Sentinel: separate expression, storage and execution evidence
+
+`--dumpi-sentinel 1` makes two **independent**, read-only observations in
+the C++ compiler. Neither enables a rewrite. The unit of analysis depends
+on the question; a task is not the root of this index.
+
+| Question | Owning pass / record | What the record does not establish |
+|---|---|---|
+| Which SV bits compose this value? | `V3DfgOptimizer::optimize`, after `astToDfg`: opcode, operand slots, result width, constant select LSB, file and line. Vertex IDs are local to one module and phase. | Execution count, physical host addresses, or a mapping to a later task. |
+| Is the intermediate shared or observable? | The same DFG snapshot includes variable name, reference/keep flags, fanout through operand edges, packed driver offsets and unpacked driver indices. | A false keep flag is not proof that reads at different simulation epochs are interchangeable. This is not a sequential/NBA state-transition graph. |
+| Which work must precede which other work? | `V3Partition::createThreadFunctions`, after lane allocation but before moving bodies: full graph predecessors (including same-lane), actual retained waits, lane order, cost and body profile key. | A graph edge is not a source-level def/use; estimated cost isn't elapsed time. |
+| Which improvement could shorten an observed invocation? | Offline replay of per-lane arrivals, post-acquire starts and body ends. Split the latest dependency's lateness into body overlap and prefix delay. | CPU occupancy vs descheduling within a body; consequences of a changed cache footprint or new worker assignment. |
+
+Use `g6lc_sentinel_index.py SNAPSHOT` on a `*_sentinel_dfg.json` even for
+`--threads 1`. It walks concatenations in SV result-bit order, stops at
+variables rather than traversing feedback or partial drivers, and reports
+actual source-bit mappings and storage boundaries. Static classifications
+include contiguous slices, monotonic extracts inside one 64-bit word,
+contiguous byte planes, strided columns and reduction of an AND. These
+are **probe candidates**, not instructions selected for emission.
+Combinational logic not admitted to the DFG is outside this snapshot.
+Do not add counts from pre- and post-inline snapshots or join DFG vertex
+IDs to task IDs. Both snapshots can be large; dump on a bounded leaf first.
+
+Use `g6lc_sentinel_index.py SCHEDULE.json CAPTURE_A CAPTURE_B` for timing.
+Each capture contains `stamp-LANE.txt` with rows `round task arrival_ns
+body_start_ns body_end_ns` from a common monotonic clock. Use captures from
+the **same instrumented executable, same region, same workload**; archive
+the compiler snapshot and corresponding ELF digest together. Historical
+stamps do not authenticate their source ELF. Incomplete rounds, inverted
+timestamps and compiler edges not covered by emitted synchronization
+plus lane order are refused. Only a supplied full compiler DAG enables
+reorder exploration. The search tries one adjacent swap on one lane at a
+time, preserves semantic edges and existing wait edges, rejects cycles,
+selects on the first capture, and reports the prediction on the others.
+It holds launch/inter-task gaps at the same lane positions. This is a
+bounded experiment, not a global optimum, scheduler policy or code patch.
+
+**Test the mechanism before promoting it.** On the pinned EPYC host, three
+two-million-call probes of a 4 KiB hot table, extracting the high bit of
+each of 64 contiguous bytes, gave median **19.6 / 142.3 / 426.9 / 461.0
+M rows/s** for portable / BMI2 PEXT / two AVX2 movemasks / AVX-512BW byte
+mask (`g++-13 -O2`, CPU 2). All passed a per-input-bit oracle and had
+checksum `94d15c65decf6bc6`. BMI2 processes one machine word at a time;
+the AVX-512 result is only ~8% over AVX2 here. This is not the strided MC
+checkpoint layout and not an MC benchmark. Do not select AVX-512 from
+the label "bit gather" without a layout proof.
+
+**MC reanalysis.** Applying the indexer to the two tiled §53 diagnostic
+captures (240 matched rounds) attributes 62.70 ms late on 25 -> 23:
+**45.37 ms inside the producer body and 17.33 ms before its start**.
+The equivalent totals on the two pre-tile captures were 49.06 and
+18.55 ms. Thus this delay already existed; it was exposed, not created,
+when 9 -> 22 shrank. Hypothetically halving task 25 saves 4.00% of
+sampled tiled NBA span versus 3.80% for task 27. The old `attrib.json`
+has emitted waits, not full predecessors: **no MC reorder proposed**.
+
+**C++ implementation sequence and gates:**
+
+1. Capture the structural leaf using the least complex model exhibiting
+   the SV idiom. Require dataflow evidence without threading. Compare
+   model `.cpp` and `.h` bytes with the sentinel off/on. This is the
+   observer regression, not a throughput test.
+2. For a recognized expression, start at `V3DfgPeephole` *before*
+   `V3Expand`, not at a scheduler barrier. Specify the demanded bit map,
+   signedness, partial-word behavior and all other users. Preserve or
+   decline on traced/public/multi-driver/epoch-sensitive intermediates.
+   If a transform can be expressed using existing packed DFG operations,
+   prefer that over introducing a target-specific IR vertex.
+3. Isolate physical layout and ISA in the emitter/runtime. Require a
+   portable bit oracle plus disabled-feature fallback. Benchmark the
+   actual width, stride, tail and mask density against the best existing
+   lowering, not merely a bit-serial reference. Promote only if it
+   reduces dynamic work on the relevant path.
+4. For scheduling, change `PartPackMTasks` only after a full-graph
+   holdout replay motivates it. Recompute publications and joins from the
+   **new** schedule; do not apply a predicted order to the old masks.
+   Repacking and payload lowering need separate model identities and A/Bs.
+5. For a connection across phases, preserve source provenance through
+   lowering and verify it against generated call sites and exact-ELF
+   sampled IPs. Cross-phase expression identity, trigger/state epochs
+   and dynamic memory alias tracking are **not implemented** in v1.
+   Acceptance remains an actual MC pass, matching RVFI and higher
+   simulated cycles/s. No new end-to-end speedup claimed for the observer.
+
+The remote scratch compiler replaced only `V3Partition.o` and
+`V3DfgOptimizer.o`. `test_g6lc_sentinel_compiler.py` verifies packed
+bit order and masked reduction, both without and with worker tasks;
+all emitted C++ and headers were byte-identical with observation off/on.
+Fixtures, isolated kernels and replay tests are in `verif/regress/remote/`;
+remote evidence in `/tmp/hyp8-lane-ab.U2p5fd/sentinel-v1/`.
+
+## 55. From sentinel observation to a controlled DFG rewrite
+
+An emitted DFG snapshot can now suggest one **build-level** experiment:
+
+```sh
+python3 g6lc_sentinel_index.py "$snapshot" --write-controls candidate.f
+# Pass -f candidate.f on the next invocation of the same Verilator build.
+```
+
+The new file contains only `-fdfg-peephole-pack-byte-plane` or its
+explicit negative. No snapshot text becomes executable code; an existing
+response file is not overwritten. The JSON report lists the candidate
+vertex IDs in that snapshot. IDs do **not** authorize an edit, denote
+execution frequency, or carry over to the next build. The compiler
+rematches every site. With no control file or explicit flag the rewrite
+is **off**, even if `--dumpi-sentinel 1` is enabled. With the flag it
+works without a dump; `--stats` reports the actual applications.
+
+**Implementation and proof.** In an acyclic component after X handling
+and before the existing DFG component optimizer, walk an eight-bit concat
+LSB first. Require unshared intermediate concats/selects, single-bit
+slices, one identical 64-bit packed variable, and offsets exactly
+`p, p+8, ..., p+56` (`0 <= p < 8`). Do not traverse a variable's drivers.
+Replace only the concat's result with the high byte of the following
+unsigned 64-bit product:
+
+```
+(((row >> p) & 0x0101010101010101) * 0x0102040810204080) modulo 2^64
+```
+
+The multiplier sets positions `56-7*j` for `j=0..7`. The partial product
+from input byte `i` and multiplier term `j` lands at `56+8*i-7*j`.
+No two such positions coincide (a nonzero difference in `j` cannot be
+a multiple of eight). Exactly `i=j` contributes in positions 56..63.
+Thus there are no carries between useful bits. Mixed variables,
+descending order, shared intermediate cuts, wrong widths and other
+strides stay on the existing path. No change to ISA requirements, task
+edges, trigger order, RTL, firmware, or the meaning of X initialization.
+
+**Separate runtime correction.** At `-O3` even the *baseline* failed a
+combinational model's input/output oracle, sometimes returning the prior
+projection. `VlTriggerVec` wrote flags via `uint64_t` but read and
+modified the same storage via `EData*` (32-bit), violating C++ aliasing
+rules. `-fno-strict-aliasing` isolated the failure; it is not the fix.
+`any`, `set`, `andNot` now operate on the declared word type, with no
+layout change. Recompiling the original failing control with just the
+corrected private runtime passed at `-O3`. Also checked empty vectors,
+31/32, 63/64 and 129 boundaries, and overlapping operands. This is a
+host control-flow correctness change; it does not change the wait
+protocol. Recompile model/runtime objects consistently to pick it up.
+
+**Measured generated-model experiment.** Same corrected runtime on both
+sides, same compiler and native `OPT_FAST=-O3`, CPU 2, four million evals
+of the scalar input / eight-plane fixture, two extra nonmatching outputs,
+alternating AB/BA/AB. Each run first passed an independent oracle covering
+all 256 selected-bit combinations for each of the eight offsets with other
+bits set, including reversed and mixed-source outputs. All timed checksums
+were `5c54f13def63aaed`; rewrites off/on: **0 / 8**.
+
+| Pair | Off / on (million evals/s) | Off / on user instructions (billions) |
+|---|---:|---:|
+| AB | 34.81 / 58.41 | 2.251 / 1.271 |
+| BA | 32.36 / 58.29 | 2.252 / 1.271 |
+| AB | 28.77 / 42.25 | 2.251 / 1.271 |
+
+Native instruction totals fell **43.6%**; median *paired* throughput
+ratio was **1.68x**. These are short, host-sensitive leaf timings, not
+Monte Carlo confidence bounds, Hyp8 cycles/s or a BMI2/AVX-512 speedup.
+The earlier hierarchical fixture in `plane-flow/` did not qualify:
+zero matches, and the unrepaired baseline failed its oracle. No timings
+from it enter this table. Standalone regression:
+
+```sh
+VERILATOR_ROOT="$patched_runtime" python3 test_g6lc_plane_control.py \
+    "$scratch_compiler" "$new_output_dir"
+```
+
+Scratch artifacts on `ovh_calltorch` are under
+`/tmp/hyp8-lane-ab.U2p5fd/sentinel-v1/plane-flow/scalar/`: `plane.f`,
+`on/*stats.txt`, `strict.log`, `f0.perf`..`f5.perf`, `qualified/`.
+Before considering default enablement, measure actual matches in a
+profiled MC payload and test that model at fixed cycles with identical
+RVFI. This small one-word projection is not the strided checkpoint
+column tile from §53.
+
+## 56. Native sentinel ingest and empty deferred-deletion check
+
+Build the static native index once from the actual, unstripped model ELF
+(Linux/binutils; link with `-Wl,--build-id`). For each capture, create a
+small separate database instead of reparsing the disassembly:
+
+```sh
+python3 analyze_objdump_hotpaths.py --elf "$model" --db native.db
+perf record -e instructions:u --buildid-all -o capture.perf -- "$model" ...
+python3 analyze_objdump_hotpaths.py --elf "$model" --native-db native.db \
+  --db capture.db --perf capture.perf --sentinel "$dfg" --sentinel "$schedule" \
+  --bindings provenance.json --report report.json
+```
+
+Both `--sentinel` and `--bindings` are optional. Bindings are **reviewed
+inputs**, not inferred from matching line numbers, task IDs or symbol
+substrings. Manifest shape: `{"elf_sha256":"...", "bindings":[
+{"snapshot_sha256":"...", "vertex":37, "symbol":"<exact mangled name>",
+"evidence":"<source to generated caller evidence>"}]}`. Use `task_id`
+instead of `vertex` for a schedule. A snapshot without a mapping is
+searchable static evidence, not credited with any IP samples. For a
+wrapper shared by four instances, a function-level binding does not
+distinguish the four instances or their threads.
+
+The sidecar joins ELF SHA-256 to the native DB, perf's recorded DSO
+build ID to the ELF, and symbol plus offset to an exact instruction owned
+by that symbol. This does not depend on ASLR load addresses. Nonmodel
+and unresolved samples remain in the event denominator. Reported paths
+are shortest **possible** paths over direct calls and inter-function
+direct tail jumps, not sampled stacks. The half-self estimate is half
+of the symbol's own weighted event share: useful for sizing a hypothesis,
+not a wall-time model. Neither the callee's descendants nor all DSO mutex
+samples belong to the caller. `region_context` / `task_context` report
+**containing-function** weight, which must not be summed across bindings.
+Legacy disassembly DBs without authenticated ELF identity remain suitable
+for static queries only. Inputs and outputs should have distinct paths.
+
+**Experiment.** Indexed the repaired hierarchical control from §55 and
+a candidate linked with the same generated C++, compiler flags and affinity
+(CPU 2). In the baseline capture, 660 instruction samples mapped into the
+model ELF and 1,465 were outside it. A reviewed binding links DFG vertex 37
+(leaf output `bits`, SV line 7) to the generated `plane[0U]` assignment
+and its ICO function. But the separate path `eval_step -> VlDeleter::deleteAll
+-> VerilatedMutex::lock` suggested a simpler lever: the model checks for
+deferred deletion even when no object has been enqueued. The native
+`devdeadz` database `/tmp/variane.db` also has a direct call to `deleteAll`
+from `eval_step`; that is **reachability only**. Current compiler emission
+is conditional on `hasClasses()`; an executable without this call should
+not benefit. The short periodic profiles varied sharply between builds;
+do not extrapolate the fraction of time spent in libc from them.
+
+**Runtime change.** `VlDeleter::put` sets an atomic pending bit after a
+successful enqueue, while holding the queue mutex. The drainer can return
+on an acquire load of false. It clears the bit only while swapping the
+queue under that same mutex. The locked slow path, ordering of queued
+destruction and loop for destructor-generated work are unchanged. A
+separate test runs two posting threads, drains concurrently, cascades a
+second enqueue from each destructor, and checks the final destructor drain
+(16,002 destructions). Rebuild model and runtime objects together because
+`VlDeleter` layout changes. No RTL, SoC timing/config/ISA or DTS change.
+
+| Shared host, matched pair | Baseline / candidate M eval/s | User instructions, billions |
+|---|---:|---:|
+| AB | 24.632 / 28.224 | 1.664 / 1.480 |
+| BA | 24.573 / 28.541 | 1.664 / 1.480 |
+| AB | 21.039 / 28.462 | 1.664 / 1.480 |
+
+All six timed runs passed the oracle with checksum `3ffcc5a3eee3e186`.
+Median paired speedup **1.16x**; retired instructions **-11.1%**. This
+isolates empty-disposal overhead, not the eight-plane rewrite. It does not
+measure a class-allocation-heavy design, Linux boot, or MC cycles/s. The
+next model gate is to verify a steady-state call on the exact MC executable
+and qualify cycles/s plus RVFI, not multiply this result by §55.
+Remote artifacts under `sentinel-v1/plane-flow/native-ingest/` include both
+ELFs/build IDs, captures, SQLite indexes, binding manifests, raw counters
+and the read-only reuse test (`reuse/`). The mismatched ELF and mismatched
+perf capture were both rejected.
+
+## 57. MC shortlist after tiling: age-matrix transpose versus issue wake predicates
+
+**Question:** which *part of a caller*, on which lane, can shorten an MC
+invocation? Rechecked the delivered tiled executable SHA-256 `0a717957...`
+and `eight.elf` `3e6fc73f...`; all six archived §53 final A/B sidecars
+report cycle 4,649. No new full-model timing or trace qualification in
+this pass. The worker timestamps are the §53 first tiled build (`1B`,
+`2B`), **not** the uninstrumented final ELF. The native weights are §52
+packed-model samples; use them only as hypotheses about unchanged code.
+No `deleteAll` self samples appeared in `attrib.json`. This does not rule
+out inlining or callees, but does not justify transferring the §56 speedup.
+
+**Check the extrapolator against a known change.** `--retain-body T=X`
+on the sentinel CLI replays a fraction of a task's body with all observed
+gaps, waits and other work fixed. Repeat for several tasks; replay jointly,
+never add the resulting savings. Get a separate result per capture.
+On one §53 control/tile pair, learn the ratios of total body times for
+tasks 9, 15 and 26, then predict the *other* pair's sampled NBA span:
+
+| Train -> check (control, tile) | Projected span reduction | Observed |
+|---|---:|---:|
+| (0A, 1B) -> (3A, 2B) | 21.35% | 21.40% |
+| (3A, 2B) -> (0A, 1B) | 22.60% | 21.96% |
+
+This is a backtest of the scheduling arithmetic when body changes are
+**measured**. It does not validate predicting body cost from native symbol
+weights, nor show sub-percent precision on a new workload.
+
+**Where to look.** Divide the whole-symbol cycle weight attributed to each
+component by that task's own attributed cycle weight, excluding objects
+listed as changed by the final tile manifest. Component names come from
+dominant generated source references/writes (not exclusive time in the
+named expression). For the archive's partially classified task set,
+hypothetically halving all classified LSQ callers gives **4.07% / 2.86%**
+less sampled span in 1B / 2B; issue queue **4.03% / 2.74%**; commit bundle
+**1.09% / 1.48%**; task-19 mark logic **0.24% / 0.22%**. The first two
+are effectively tied at family scope. Do not sum the cases, or call these
+projected model speedups. Many tasks/symbols lack classifications. Even in
+unchanged objects the input distribution, cache and overlap may differ.
+
+**Two measured operations, not just source labels:**
+
+- **Task 27, LSQ age matrix.** `___nba_...__559` and `__531` build
+  `i_vio_red.age_col` from `vio_age_q`. The age matrix packs 40 bits per
+  row: destination word 0 reads input bits `0,40,...,1240`; word 1
+  reads `1280,...,1560` then `1,41,...,921`. The §53 regular 32-bit
+  matcher found **zero** word tiles in these callers. Matching four
+  eight-bit fragments per destination word handles the column wrap without
+  padding or changing the layout. `g6lc_pack_wrapped_columns.py` uses
+  only proven in-range pure reads, batches within the same source epoch,
+  and keeps all destination stores in order. Scalar 8x8 transposition
+  requires no ISA extensions. **120 rewritten words in each caller.**
+- **Task 25, issue wake qualification.** `__244` in TU `h53a8106c__65`
+  emits the SV idiom `wk_v[k] && !(wk_lo[k] && !e_alu_cons[e])` bit by
+  bit. In word 0 the low eight bits of this particular store are zero;
+  the next 24 validity bits align with output bits 8..31. Replicate
+  the single predicate bit and compute packed `valid & ~(enable & veto)`
+  with exact shifts and masks. `g6lc_pack_predicates.py` demands that
+  structure at each live bit and leaves unrecognized expressions alone.
+  **42 words** matched in `__244`, zero in the next seven profiled callers.
+  Their surrounding wake/tag comparisons, bypass and FPU logic are not
+  accelerated by this transformation.
+
+Both are opt-in, generated-C++ experiments; neither pattern matcher selects
+by RTL name. Names are used only to choose measured test inputs. Extract
+*original emitted expressions*, compile the original and replacement with
+GCC 13 `-O2 -march=x86-64-v3`, pin to CPU 2, run AB/BA/AB:
+
+| MC slice | Independent oracle | Control / candidate median throughput | Process instructions |
+|---|---|---:|---:|
+| LSQ, ten adjacent output words | all 1,600 input basis bits, both functions | 12.23 / 26.63 M batches/s | 3.092B / 1.782B |
+| IQ, one output word | 8,192 randomized input sets, per-bit reference, both functions | 96.93 / 742.96 M words/s (first series) | 1.813B / 0.157B |
+
+All six runs per slice had matching checksums. The LSQ transformation is
+linear, so a basis checks the complete bit map. The IQ test includes
+arbitrary multi-bit validity/veto masks and high bits in the gate operand.
+One existing column oracle also passed on remote scalar and AVX2 builds.
+These tests don't measure full function cost. The host had multiple other
+models active; do not take short wall timings as idle-machine results.
+
+**Effort decision.** The more transferable first trial is the *slower*
+LSQ leaf: **688 words across eight unchanged, sampled callers** in a
+screen restricted to principal `age_col` writers. Those callers cover
+18.37% of task 27 and 4.22% of task 19's previously attributed cycles.
+If **whole matched functions** halve, replay gives **0.88% / 0.60%**
+less tiled NBA span. For `__244` alone (4.42% of task 25) the equivalent
+numbers are **0.22% / 0.14%**. Neither is a bound for unexamined sites.
+Thus the large IQ leaf ratio is not evidence for making it a compiler
+default or changing the task-23 wait. For a bigger end-to-end target,
+sample the exact tiled ELF inside the remaining LSQ `t1_ref_unres_d`
+and issue-queue `lf1/lf2` callers before widening either matcher.
+
+```sh
+python3 g6lc_mc_age_probe.py "$original" "$fresh/age"
+python3 g6lc_mc_predicate_probe.py "$original" "$fresh/wake"
+python3 g6lc_mc_age_screen.py "$postpack" "$tile1/final/manifest.json" \
+  "$original/Vg6lc_testharness_g6lc_core__pi37.h" \
+  "$tile1/latency/1B" "$tile1/latency/2B"
+```
+
+Artifacts on `ovh_calltorch`: `/tmp/hyp8-lane-ab.U2p5fd/predicate-v1/`
+and `measured/` there (`qualified.json`, `age-leaf/`, `confirm-leaf/`,
+`families.py`, `calibrate.py`). No model binaries, RTL, clocks, SoC
+timing, firmware or DTS were changed. Before promoting either lowering:
+relink against the **tiled** control, compare sidecar and all eight RVFI
+traces, and require an interleaved MC cycles/s result distinguishable
+from host noise.
+
+## 58. From the IQ wake word to an opt-in compiler pass
+
+`-fdfg-peephole-pack-predicates` lowers a concat of 8..64 independent
+`valid & ~(veto & gate)` bits before DFG inlining/expansion. It requires
+an in-bounds ascending veto slice of one packed variable and a common
+one-bit gate. Valid bits are concatenated in original order, not assumed
+contiguous. The usual optimizer can then simplify this concat. The pass
+never traverses storage drivers, never runs on SCCs, and does not move
+work across tasks. Host software change only; no production RTL, silicon
+timing, `.dts`, ISA, or config changes. Default off, independent of
+sentinel dumps; `--stats` counts groups, not lanes.
+
+**Coverage before timing:** The first compiler iteration matched the SV
+fixture but **zero** groups on the archived IQ bank. `wk_v` has named
+one-bit wires, and the gate is a distinct inversion of a distinct select
+of the same bit in each lane. Accepting identical scalar reads and keeping
+valid wires in order produced **two pre-inline groups** on the bank.
+`--debug-check` passed on the fixture and `t_dfg_pack_predicates` reached
+its self-checking `$finish`. One pre-inline group on the fixture, none
+post-inline: the descending veto control stayed scalar. The final
+bounds-guard build emitted byte-identical C++ and headers to the timed
+candidate for both tests when invoked with the same input paths.
+
+| Isolated model, off/on | Paired throughput (AB, BA, AB; off/on) | Process retired instructions |
+|---|---|---|
+| 56-bit SV fixture, M eval/s | 21.246/56.683; 21.463/53.474; 21.395/56.180 | 3.807B/1.422B |
+| Archived IQ bank, simulated bank cycles/s | 146270/146760; 148602/150342; 151834/154001 | 6.156B/6.066B |
+
+Pinned CPU 2, `OPT_FAST=-O3`, same corrected runtime and generated
+driver on both sides. The first model checked both outputs against an
+independent per-bit reference over 8,192 trials, then timed 4M evals;
+all checksums `f423f571e990a11e`. The second clocked a bank for 60,000
+cycles, hashed every output at both edges, and drove deterministic
+pseudorandom inputs; checksums `dc30f6209823bf12`. First bank series
+discarded: user C++ omitted `Verilated::commandArgs` and the final block
+reported an error. Only the corrected, clean series is in the table.
+The bank used the archived MC file list, `NTAKE=8 NXW=64` (72 wake bits,
+four entries, as in the generated MC header), but otherwise standalone
+defaults including the empty top-level config. This is a differential
+bank stress test, not legal firmware traffic or the exact MC configuration.
+The **1.46% bank instruction reduction** is more relevant than the
+**2.63x fixture throughput**, but neither authorizes a whole-MC claim.
+
+**Next candidate: remove the transpose, rather than just tile it.**
+On the archived `g6lc_lsq_reduce` with `NLEAF=40 DIR=1`, the compiler
+sees 25 consecutive 64-bit concat drivers of `age_col`. All 40 consumers
+are `SEL[40] -> AND(same cand) -> REDOR`, both pre- and post-inline;
+the sentinel reports `keep=false`. For a proven transpose this means
+all 40 reduction results equal the OR of the original rows selected by
+`cand`. The winner mask is `cand & ~selected_rows_or`. This is valid
+for zero, one, or many candidates, not just a one-hot case.
+
+An isolated exact-layout test packs each 40-bit row across two 32-bit
+words, checks both algorithms against the scalar column oracle and tests
+candidate densities separately. GCC 13 `-O3 -march=x86-64-v3`, CPU 2,
+four million reductions, AB/BA. Fixed row scan vs set-bit iteration:
+single-bit **19.2-19.6 / 391.9-433.5** M eval/s; random mask
+**18.4-19.9 / 38.2-40.7**; full mask **17.8-19.1 / 21.3-22.5**.
+These compare two candidate row algorithms, **not compiled MC or a
+transpose baseline**. Check the actual mask density at the LSQ consumers
+(rename-recovery density is irrelevant), prove that the input row version
+is still available at each reduction, and check for observers/aliases
+before eliminating storage. In particular do not use `keep=false` alone
+to justify erasing a partial driver or crossing a scheduler publication.
+
+Artifacts under `/tmp/hyp8-lane-ab.U2p5fd/sentinel-v1/plane-flow/wake-flow/bank-pass/`:
+`qual.sh`, `check.sh`, `ok.log`, `leaf-?.perf`, `ok-?.perf`, `lsq40/`,
+and `guard/` (scratch compiler SHA-256 `3ffe2ab1399514f2b53bf250ea92e5e85996e8f5884d066378afbea008490cc5`).
+Replay via proxy shell only: invoke `--cc --exe --stats` on
+`g6lc_wake_pack.sv` and `g6lc_wake_pack.cpp`, toggle the peephole flag;
+for the bank, generate the driver with `g6lc_wake_bank_probe.py`. The
+LSQ density experiment is `g6lc_age_reduce_probe.cpp` with arguments
+`dense|sparse` and `single|random|full`. No new MC/RVFI run this pass.
+
+## 59. Tiled MC LSQ occupancy and a consumer-only empty-mask guard
+
+**Dynamic evidence.** Reproduced the tiled executable by relinking its archive
+with the archived companion objects. Recompiled the original consumer TU
+(`h7486aa93__852.cpp`) with the logged GCC 13 command; its object matched the
+original and the tiled archive member. Sampled immediately before the eight
+`i_vio_red.win_mask` assignments in the task-27 `__1238` function. Each RHS
+reads that site's own 40-bit `cand` and `age_col`; no sampling at a producer,
+no reads of another lane's live input row. Counts are function evaluations
+across receiver instances, not guest cycles, per-hart rates, or unique masks.
+
+| LSQ site | Empty | One bit | Two or more |
+|---|---:|---:|---:|
+| 0 | 4,865 | 7 | 0 |
+| 1 through 7 (each) | 4,872 | 0 | 0 |
+| Total | 38,969 | 7 | 0 |
+
+**Compiler intervention.** New opt-in `-fdfg-peephole-guard-empty-mask`
+puts a conditional around a group of expensive scalar reductions. The compiler
+requires 8..64 one-bit results packed in order, each gated by the corresponding
+bit of the same full-width variable, each inner OR reduction ANDed with that
+same mask. Shared internal ops, mixed masks and cyclic components are excluded.
+A nonempty mask takes the original path, including for dense/multihit data.
+No transpose, state update, scheduling dependency or trace point is removed.
+Default off. The archived 40-entry LSQ reducer and the isolated SV fixture
+each applied one guard pre-inline, none post-inline. The generated C++ uses
+a lazy conditional. The dedicated compiler regression checked mixed masks and
+ran to `$finish` with `--debug-check`.
+
+**Density control.** 4,096 independent per-bit oracle trials precede four
+million single-threaded model evals, `-O3`, CPU 2, AB/BA/AB. Counts include
+the driver and oracle. The empty-heavy fixture has 127 empty masks per 128
+evals; this is not presented as a replay of MC inputs.
+
+| Inputs | Off / on M eval/s in three pairs | Off / on retired instructions |
+|---|---|---:|
+| Empty-heavy | 23.04/82.78; 23.76/82.02; 23.90/86.91 | 3.474B / 0.921B |
+| Random dense | 24.91/23.98; 22.40/23.94; 25.04/23.89 | 3.469B / 3.489B |
+
+**Model qualification, not a throughput claim.** A separate frozen-TU replay
+wrapped the same eight reviewed original RHSs in an empty-mask guard. The
+occupancy and guarded builds both passed `tohost` at cycle 4,649 with metrics
+and all eight retirement traces byte-identical to the tiled reference. Control
+SHA `0a717957...`, instrumented `7b41c90b...`, guarded `7933a3a0...`, guest
+`3e6fc73f...`. This does not qualify a fresh full-model Verilation or establish
+an MC cycles/s improvement. In the older packed native capture, this entire
+caller accounted for 0.063% of all sampled cycles, 3.40% of task 27's attributed
+cycles. Even *removing the whole caller* with that weight gives only 0.31% /
+0.21% sampled NBA-span reduction in the two tiled replays. The skipped
+reductions are a subset. Do not spend a noisy shared-host A/B on this caller
+alone or claim the instrumentation's wall time as performance evidence.
+
+**Producer gate.** Sentinel now reports `masked_transpose_reductions` only
+after checking a complete bit map and the consumers. On `lsq40`, pre- and
+post-inline, all 1,600 bits match one square transpose across 25 disjoint
+drivers; all 40 full-column slices feed masked reductions of the same mask.
+The intermediate has no reported keep/module/external references. This is a
+static witness in an isolated elaboration, **not** proof that a generated
+consumer may read the current `vio_age_q` instead of the published columns.
+For a larger gain, match the witness inside an acyclic compiler component
+before scheduling, prove single-version reads/driver ownership there, and
+verify that the actual sampled column builders disappear.
+
+Raw artifacts: `/tmp/hyp8-lane-ab.U2p5fd/lsq-occupancy/{run,guard-run,compiler}`.
+Reproduce through the remote proxy in fresh output directories:
+
+```sh
+python3 g6lc_mc_lsq_occupancy.py "$model" "$tile1/final" "$build_log" \
+  "$guest" "$tile1/final-ab/1B" "$new_counts"
+python3 g6lc_mc_lsq_occupancy.py "$model" "$tile1/final" "$build_log" \
+  "$guest" "$tile1/final-ab/1B" "$new_guard" --guard
+```
+
+For the compiler A/B, Verilate `g6lc_empty_mask.sv` with `--cc --exe
+--stats --debug-check` and `g6lc_empty_mask.cpp`, toggle only the guard
+option and run each model with `z` and `d`. This is a host optimization;
+no production RTL, ISA, synthesis timing, or device-tree impact.
+
+## 60. Longer Hyp8 MC writer: nine full-model runs, separate cumulative and incremental gains
+
+Increased `mc_multi_writer_line.S` from 8 to **64 iterations per phase and
+writer**, without changing the firmware source, oracle, or trace options.
+This is a bounded, complete four-core test, not the default 1,500-iteration
+soak or a boot benchmark. The 8-iteration rebuild and archived `eight.elf`
+have identical `objcopy -O binary` images (different ELF hashes); use the
+64-iteration pinned ELF on *all* sides here. `tohost` remains `0x80001000`.
+
+Compared three exact two-host-thread executables: **O** = archived
+`devthr2-ab` original, **T** = packed masked rows + tiled columns, **G** =
+T plus the eight frozen consumer guards from §59. These are whole
+executable comparisons, not a fresh MC Verilation with a compiler flag.
+Only G/T evaluates the incremental LSQ guard. One model at a time,
+`taskset -c 2,4` (distinct physical cores), nine independent processes,
+three rotated blocks so each build occupies each run position once.
+No other `Variane_testharness` was observed at any run's start or end;
+this is not a reservation of the host. Time the whole process, including
+startup, tracing, finalization and the perf wrapper.
+
+| Run order | O sim cycles/s | T sim cycles/s | G sim cycles/s | T/O | G/T |
+|---|---:|---:|---:|---:|---:|
+| T G O | 168.45 | 280.84 | 280.56 | 1.6672 | 0.9990 |
+| G O T | 167.49 | 283.23 | 280.83 | 1.6911 | 0.9915 |
+| O T G | 168.25 | 282.38 | 280.02 | 1.6783 | 0.9917 |
+
+| Median per build | Sim cycles/s | Retired host instructions | Host cycles (both lanes) |
+|---|---:|---:|---:|
+| O | 168.25 | 321.101B | 700.519B |
+| T | 282.38 | 180.979B | 436.384B |
+| G | 280.56 | 181.275B | 439.027B |
+
+All nine passed `tohost` at **13,431 cycles**; the metrics sidecar and
+eight per-hart trace files matched byte for byte across all nine. At the
+two loop-body PCs from the guest disassembly (`0x80000140`/`0064b023`
+and `0x800001e4`/`0069b02f`), RVFI records independently confirmed
+**64 slot stores and 64 shared-counter AMOs per hart** on harts 0,2,4,6.
+These are 256 stores and 256 AMOs, not just a matching final cycle count.
+
+**Decision:** keep T as the MC baseline. T/O delivered **+67.83%**
+median within-block throughput with 43.64% fewer median instructions.
+G/T delivered **-0.83%** median within-block throughput; median instructions
+increased 0.16% and host cycles increased 0.61%. Three blocks on one host
+do not prove a general regression of that size. They do show no MC gain
+from promoting the eight-site guard here, despite the isolated fast path.
+Do not transfer §59's mask histogram from the shorter guest as if it had
+been measured on this workload. The better next candidate is removal of
+the transpose producer before task scheduling, not further guard tuning.
+
+Replay via the remote proxy, with a new output directory:
+
+```sh
+cc=/opt/testharness/toolchains/xpack-riscv-none-elf-gcc-14.2.0-3/bin/riscv-none-elf-gcc
+custom=/opt/testharness/runs/hyp8-rfix131a-phantomprobe-aggregate-t2/output/source/verif/tests/custom
+$cc -march=rv64imafdc_zicsr_zifencei -mabi=lp64d -mcmodel=medany -O2 \
+  -nostdlib -nostartfiles -DITERS=64 -T "$custom/common/link_verilator.ld" \
+  -o i64.elf "$custom/multicore/mc_multi_writer_line.S"
+python3 g6lc_mc_long_writer.py "$original" "$tiled" "$guarded" i64.elf "$new_dir"
+```
+
+ELF/build pins are in `g6lc_mc_long_writer.py`. Raw evidence on
+`ovh_calltorch:/tmp/hyp8-lane-ab.U2p5fd/long64.XCRy9X/`: `i64.elf`,
+`guest-coverage.json`, `report`, `results/summary.json`, and per-run
+`perf.csv`, metrics, log, traces, and verification hashes. The RVFI loop
+count check was run separately against the matching traces and is also
+included in the delivered runner. No production RTL or compiler defaults changed.
+
+## 61. Fuse complete masked transpose reductions before scheduling
+
+`-fdfg-peephole-fuse-transpose-reductions` (off by default) checks the actual
+DFG component after X handling and SCC extraction, not an offline snapshot.
+Only accept an undriven packed input port as the matrix source: no input
+driver traversal, mutable alias, SystemC input or non-DFG write. Require
+the private intermediate to have no keep/module/external references; prove
+all `N*N` destination bits have disjoint complete drivers selecting exactly
+`(position % N)*N + position/N` from that port. Require all `N` consumers
+to select distinct whole columns and AND with the identical mask before
+OR reduction. Replace the reduction results with bits of one shared vector:
+a balanced OR of contiguous rows ANDed with broadcast mask bits, zero when
+the mask is empty. This is *not* a set-bit iteration loop. The new operations
+read the same combinational input and mask vertices before scheduling; no
+generated worker reads across an old publication. No new ISA requirement,
+production RTL, device interface, or silicon timing change.
+
+**Full MC code generation:** regenerated the archived two-thread Hyp8 MC RTL
+with the same scratch compiler and flags, differing only in fusion. One
+pre-inline match (elaborated module, not runtime invocation count), zero
+post-inline. In the generated core class the eight `i_vio_red.age_col`
+members disappeared; direct word-store lines in the `pi37` TUs went from
+**1,494 to zero**. The 30-task final graph changed from 61 to 55 edges.
+These are *fresh* schedules, not the frozen tiled executable in §60: do not
+substitute the new objects into that old archive or claim lower elapsed
+time from compiler cost estimates.
+
+**Execution test:** built and clocked the archived `g6lc_lsq_reduce` as
+top, `NLEAF=40 DIR=1 TRACK_WAIT=0`, other parameters at their standalone
+defaults. Both variants passed an independent bitwise winner oracle over
+8,192 updates including flush, empty, singleton and multihit masks, checking
+the registered winner and valid at the two-stage interface. One million
+timed clocks per run, mutate matrix data, CPU 2, AB/BA/AB, `OPT_FAST=-O3`.
+Final-source runs during full codegen:
+
+| Input distribution | Off / on M reducer cycles/s (three pairs) | Process retired instructions |
+|---|---|---:|
+| 127/128 empty, otherwise singleton | .573/3.971; .576/3.964; .574/3.939 | 19.050B / 3.260B |
+| Dense random | .571/3.922; .755/4.749; .717/4.595 | 19.059B / 3.269B |
+
+All timed checksums agreed (`a8ecdcb33d7d`, `224e9018faf729` respectively).
+Host work varied during timing; use the instruction counts and the scope
+of the measurement. Regression `t_dfg_fuse_transpose` required exactly one
+match among four 9x9 cones, rejected a wrong bit permutation, a mixed mask
+and another reader, and ran its output oracle across all 512 masks. Disabled
+early field/plan splitting on that small regression only. The exact-layout
+MC reducer matched with the normal earlier optimizations enabled.
+
+Artifacts: `/tmp/hyp8-lane-ab.U2p5fd/fuse61/` (`exact/verilator_bin`,
+SHA `4c16c792630aa008dfca28f199712c2fce12298cadfb11dea0bf436409f536b2`;
+`final-{ctl,opt}`, `final.log`, `final-*.perf`, `full-{ctl,final}` and
+their stats). `final-bench.sh` builds both reducers with the MC file list,
+`--cc --exe --stats --debug-check`, `-ffunction-sections -fdata-sections`
+and `-Wl,--gc-sections` to drop unused file-list DPI wrappers. Replay
+`g6lc_lsq_fusion_probe.cpp` with `z` and `d`. Both full MC elaborations
+completed; **full native builds, 64-iteration firmware traces and paired
+MC cycles/s are not yet qualified for fusion**. Build both fresh schedules
+consistently and hold the existing packed/tiled optimizations equal before
+comparing to the retained baseline.
+
+### Fresh native A/B for the 64-iteration writer
+
+`verif/regress/remote/g6lc_mc_fusion_ab.py` takes the §61 elaboration
+directory, the archived RTL snapshot, the same runtime for both builds,
+the pinned §60 guest ELF, the archived `0-tiled` reference run, and a new
+output directory. Run it on the remote testharness host. It compiles fresh
+archives with GCC 13 (`-O2/-O1/-O2`) and never borrows objects from a
+different schedule. The generated source directories are left untouched.
+
+Apply both expression matchers to core translation units referencing rename
+recovery on each side. This uses the same rule on both sides instead of
+assuming old task IDs or TU numbers survived re-elaboration. It can cover
+more assignments than the old profiled-TU lists; **A**, not §60's executable,
+is the throughput baseline for this experiment. The old executable still
+provides an independent guest oracle. Per-file rewrite counts are saved in
+`A/lowerings.json` and `B/lowerings.json`.
+
+The detached job is under `ovh_calltorch:/tmp/hyp8-lane-ab.U2p5fd/fuse61/`.
+`native62-series.log` tracks build and trial completions;
+`native62/{A,B}/build.log` records compiler/link commands. After both links,
+the runner automatically executes AB/BA/AB on CPUs 2,4. Each run must match
+13,431 cycles, the archived sidecar and eight traces before its timing is
+accepted. `native62/qualified.json` is written only after all six pass;
+absence of that file is **not** a throughput result.
+
+### Qualified result: do not enable fusion for the two-lane Hyp8 MC build
+
+Both fresh native builds completed. A (off) `2cfd9c67937b8f3e56872a0550c9418283929dd224b1ce8115c203bcaf250f36`;
+B (on) `0bca7d503ab7504a760ec91663e24ba2a2716a27b6682318560911c17c226daa`.
+Each packed 3,420 row assignments; column lowering matched 13,388 and 13,674
+projections respectively after code generation. This measures the end-to-end
+effect of enabling fusion, including repartitioning, not fusion at fixed schedule.
+
+| Run order | Off cycles/s | On cycles/s | On/off |
+|---|---:|---:|---:|
+| A B | 322.80 | 290.28 | 0.8993 |
+| B A | 323.20 | 290.30 | 0.8982 |
+| A B | 319.76 | 289.96 | 0.9068 |
+
+Median paired throughput **fell 10.07%**. Median retired host instructions
+fell 0.34% (172.028B to 171.446B), but median host cycles increased 11.85%
+(397.483B to 444.580B, both lanes). All six runs matched the archive's
+13,431-cycle success, sidecar and eight traces. No other model process was
+observed at trial start/end. Do not use the older frozen tiled model's timing
+as the denominator for fusion.
+
+Two separate, trace-qualified `perf record -e cycles:u -c 25000000` runs on
+the exact ELFs locate part of the additional cost. Lane 0's NBA worker
+accounts for 9.49% of 399.075B sampled-period cycles off and 11.99% of
+444.075B on (~37.9B to ~53.2B). `perf annotate` places the hottest branch
+in each worker in a `pause; sub; jne` retry loop. The branch targets reload
+the dependency word and check bit 30 off, bit 4 on. Generated waits confirm
+`0x40000000` before task 29 off, `0x10` before task 23 on. Task IDs are
+schedule-local. These are self samples, not exclusive producer attribution
+or elapsed wait times. They do **not** explain the entire regression.
+
+Keep fusion opt-in. If revisiting it, timestamp the fused schedule's task 4
+start/publication and task 23 wait boundaries to distinguish late producer
+start from expensive producer work. Do not prune the true dependency.
+Raw data under `fuse61/native62/qualified.json` and
+`fuse61/native62-profiles/{A,B}/{perf.data,report,nba0.asm}`.
+
+### 63. The fused task 23 waits mostly before task 4 starts
+
+Recompiled only the two NBA workers against each matching §61 native62
+archive. The diagnostic records monotonic raw time at wait arrival, after
+the wait, and after each body including `endOfThreadMTask` (immediately
+before any publication). It does not move a signal or change a task.
+Four diagnostic processes in ABBA order ran the same 64-iteration writer;
+all matched the 13,431-cycle success, archived sidecar, and eight traces.
+Sampled every 113th NBA invocation, first pair starting at invocation 13
+(353 rounds), reverse pair at 71 (352). Every sample covers all 30 tasks
+and passes lane-order and producer/consumer precedence checks.
+
+| Model and schedule-local edge | Phase | Total wait ms | Before producer body ms | During body ms | After body ms |
+|---|---:|---:|---:|---:|---:|
+| A off, 30 -> 29 | 13 | 43.02 | 19.06 | 23.94 | 0.023 |
+| B on, 4 -> 23 | 13 | 55.44 | 38.51 | 16.89 | 0.030 |
+| B on, 4 -> 23 | 71 | 53.71 | 37.76 | 15.92 | 0.028 |
+| A off, 30 -> 29 | 71 | 42.91 | 19.28 | 23.61 | 0.025 |
+
+Intervals are clipped to the consumer wait and summed across sampled
+rounds, not across all guest cycles. The tail includes timestamp overhead,
+publication and wakeup; it is not a direct measurement of atomic latency.
+On B, earlier lane-1 **task 16's body** overlapped 21.19 / 20.90 ms of
+the phase-13 / phase-71 waits; **task 17's body** overlapped 15.74 / 15.07
+ms. Together these account for **95-96% of the before-start interval**.
+Task 4's own wait accounted for only 0.008 / 0.010 ms of it. On A, task
+24's body accounts for 18.82 / 19.01 ms before task 30. These are different
+graphs; comparisons of the highlighted waits do not decompose the entire
+end-to-end fusion regression.
+
+**Decision.** Do not tune the acquire loop or move task 4 ahead of other
+work based on emitted waits: some legal-order constraints need no emitted
+wait. On B, native direct-callee samples for task 16 include issue-bank
+update/wakeup logic; task 17 includes issue arbitration and `vio_age_d`
+generation. Bindings are context, not exclusive sample attribution.
+For the faster unfused model, prioritize investigating task 25: a fixed-order
+replay halving its whole body reduces sampled NBA span 4.69 / 4.70% (largest
+single-body counterfactual in both captures). Two of its most sampled direct
+callees (`__830` and `__817` in the profiled core instances) each have 2,196
+generated `rob_d` assignment sites. That is a lead for a packed next-state
+microbenchmark, not evidence that all assignments execute, that either
+function can halve, or that MC throughput would increase by 4.7%.
+
+Replay `g6lc_mc_fusion_wait.py "$fuse61/native62" "$guest64" "$new_dir"`
+through the remote proxy. Evidence: `fuse61/clock63/{0A,1B,2B,3A}/`
+(`qualified.json`, `stamp-{0,1}.txt`, log, metrics and traces). The §61
+uninstrumented timings remain the throughput comparison.
+
 ### 64. Remote Hyp8 build policy
 
 For a fresh, two-lane `g6lc64_hyp8_mc` throughput build, use packed rows +
@@ -3741,3 +5100,147 @@ rules. On `ovh_calltorch`, GCC 13 also compiled a tuned core TU with
 the header check. The native preprocessor defined `__AVX512VBMI2__` as well
 (not mandatory). This integration check is not a new simulation timing or
 an end-to-end PGO qualification.
+
+### Model-specific Lua tuning policies
+
+`HYP8_BUILD_TUNING_PLUGIN=recovery.lua` opts into a Lua policy for the native
+overlay. Use a fresh Mdir and sync/build a new closure first. For example:
+
+```sh
+python verif/regress/remote/testharness_proxy.py build hyp8 --target g6lc64_hyp8_mc --vthreads 2 --jobs 2 --verlib work-ver-hyp8-lua --env HYP8_BUILD_TUNING_PLUGIN=recovery.lua
+```
+
+Put trusted site policies in `verif/regress/remote/hyp8/policies/`. The proxy
+and isolated closure include these files in their source identities. Lua 5.4
+or 5.3 must be on the **builder's** PATH for an explicit policy. No Lua is
+needed for the existing automatic/off/packed-tiled profiles. Sentinel JSON
+observation (`HYP8_BUILD_SENTINEL=1`) remains independent: no dump is
+required or automatically enabled, and the policy does not edit the SV or
+control scheduling.
+
+The script runs once per overlay preparation. `model.prefix`, `model.command`
+and `model.has_source("crossbar.sv")` are taken from the emitted build
+(source membership is a basename lookup in Verilator's recorded `.sv`,
+`.svh`, `.v`, `.vh` inputs, not a claim of exclusive ownership). Example:
+
+```lua
+if model.has_source("crossbar.sv") then
+    select_rule(model.prefix .. "_crossbar*", "route_mask", "packed-rows")
+end
+```
+
+`select_rule(class_glob, literal_cpp_marker, transform)` selects active
+generated class translation units. The marker selects the **whole TU**, not
+a particular assignment; an empty marker selects every matching TU.
+The supported transforms are `packed-rows` and `tiled-columns`, always
+applied in that order and at most once per TU. The checked matchers, not
+Lua, determine which assignments are legal. The API cannot supply generated
+C++, shell commands, paths to outputs, or new lowering algorithms. Use
+reviewed scripts: this is a build extension, not a security sandbox.
+
+For other generated tops invoke `g6lc_hyp8_tuning.py MDIR --prefix Vfabric
+--plugin PATH.lua` on the builder. It prepares `hyp8-packed-tiled/rules.mk`
+for use **after** the model makefile, as in the common harness. It expects
+the fork's parallel, separate `__DepSet_` C++ TU format and matching class
+headers, not arbitrary C++ or arbitrary SV syntax. Invalid scripts, empty
+plans, or zero matches for any requested transform fail an explicit build.
+The receipt includes the plugin digest, runtime version, effective rules,
+input hashes and rewrite counts. Changed policies do not reuse an existing
+overlay. Requalify new policies against a control and a trace oracle before
+claiming any model-level gain.
+
+## 65. Sink-domain clock-skip (`-fclock-skip-sink`), DFG bitwise-mux packing, Lua clock-skip wiring, and `packed-mux-rows` (2026-11-23)
+
+### 65.1 Why clock-gated sleeping cores still burned combinational work
+
+Inspecting the generated `g6lc64_hyp8_mc_sleep` (`CoreSleepGate=1`, `--threads 2`)
+schedule revealed why core-level ICGs (`tc_clk_gating`) previously yielded only
+a marginal simulation speedup (§6.1):
+
+- Sequential blocks (`_nba_sequent__*`, ~500 calls/core) are already cleanly
+  isolated onto each core's gated clock triggers (`core_clk[0..3]`) and do not
+  run while a core sleeps.
+- However, **879 `_nba_comb__*` functions per core** (~818 MB of emitted C++
+  per core — including `rob_d`, `u_recover`, `i_iq.e_d`, `i_prf`, `u_resolve`,
+  `t1_mk_s`, `t1_fmk_s`) inherited the always-on global cluster clock trigger
+  (`posedge clk_i`) via `V3Order::processDomains` domain union from a few
+  ungated inputs (`noc_resp_i`, `irq_i`, `rtc_time_i`, etc.).
+- **850 of those 879 functions (810.7 MB, 99.1%) are completely pure** with
+  zero external `vlSymsp` writes and feed only the core's own gated sequential
+  flops. Existing `-fclock-skip` could not touch them: it refuses `--threads > 1`
+  models and its per-writer invalidation index emitted 6.18M edges on single-core
+  dense activity (§9.5–§9.7).
+
+### 65.2 Implemented generic compiler passes in `tools/verilator`
+
+1. **`-fclock-skip-sink` (`V3ClkSkip::clkSkipSinkAll`, opt-in, ST and MT-safe)**:
+   Runs post-`V3Clock` / post-`V3LifePost` and pre-`V3Descope` / pre-`V3Combine`
+   / pre-`V3Partition::finalize`. Walks `_eval_nba` (including `AstExecGraph`
+   MTasks in deterministic Kahn topological order), pins any variable observed
+   outside `_eval_nba` (triggers, `_eval_act`, `_eval_ico`, `_eval` `__Vsampled__`,
+   `_eval_final`, DPI, opaque C text, latches, primary IO, public, forceable,
+   traced when `--trace`), and runs a monotone backward fixed-point over sink
+   trigger sets. Any pure multi-domain `_nba_comb__` call whose transitive sinks
+   depend only on a strict subset $K \subsetneq T$ has its NBA trigger guard
+   narrowed to $K$ in place. Per sink group $K$ (e.g. one per gated core), emits
+   one 1-bit dirty flag (`__Vclkskip_sink_d<N>`) and one `VL_ATTR_COLD`
+   (`slow(true)`) pre-NBA refresh function `_clkskip_sink_refresh__<N>` hooked
+   around `_eval_nba` in `_eval()` on the main thread (race-free at any
+   `--threads N`, zero hot I-cache overhead when awake, exact pre-edge refresh
+   on wake). Regressions: `test_regress/t/t_clock_skip_sink.{v,pl}` passes on
+   both `--threads 1` and `--threads 2` with `--debug-check` (2 groups, 2
+   deferred calls, 2 triggers dropped).
+2. **`-fdfg-peephole-pack-bitwise-mux` (`V3DfgOptimizer::packBitwiseMux`, opt-in)**:
+   Combines 8..64 adjacent 1-bit 2-way mux lanes `(sel & a[i]) | (~sel & b[i])`
+   or `sel ? a[i] : b[i]` with shared 1-bit `sel` and contiguous ascending
+   packed slices into one word-level `DfgCond`. Regression:
+   `test_regress/t/t_dfg_pack_bitwise_mux.{v,pl}` passes with `--debug-check`
+   (`packed bitwise muxes = 2`).
+
+### 65.3 Lua policy clock-skip wiring, `packed-mux-rows`, and objdump/SQLite compare
+
+- `g6lc_tuning_driver.lua` + `g6lc_tuning_policy.py` + `g6lc_hyp8_tuning.py`:
+  added `model.has_define`, `model.has_flag`, `model.threads`, `model.phase`,
+  `select_verilator_flag`, `select_clock_skip(mode, policy)` (`sink`/`causal`/`auto`,
+  `required`/`opportunistic`), pre-verilate `--plan-vlt-flags`, `clockSkipStats`
+  manifest verification, and checked `"packed-mux-rows"` (`lower_mux_rows` in
+  `g6lc_pack_generated_rows.py`, handling complemented-enable 2-way bitwise muxes
+  with shifted enables). Added flexible policies `hyp8/policies/{hyp8_mc_sleep,
+  hyp8_mc_perf,generic_sleep}.lua` while keeping `recovery.lua` parity intact.
+- `analyze_objdump_hotpaths.py`: added `--stats` (`vlt_stats` table), generic
+  `hot_by_region` view, and `--compare <baseline.db>` JSON delta report.
+- Harness & installer updates: `hyp8-build-harness.sh` (includes
+  `g6lc64_hyp8_mc_sleep` in `packed-tiled` eligibility, wires pre-verilate Lua
+  flag planning + capability-checked `HYP8_BUILD_CLOCK_SKIP=auto|sink|causal|off`,
+  discovers `/opt/testharness/toolchains/lua*/bin`), `soft-ladder-build-harness.sh`
+  (opportunistic `SOFT_LADDER_BUILD_CLOCK_SKIP` + plugin flags),
+  `install-verilator-g6lc.sh` (`VLT_ALLOW_DIRTY`, `VLT_PGO_TRAIN_ARGS`, capability
+  report, non-git closure `pipefail` fix). Lua 5.4.7 installed at
+  `/opt/testharness/toolchains/lua-5.4.7` on `ovh_calltorch` (7/7 `test_g6lc_hyp8_tuning`
+  tests pass live).
+
+### 65.4 Measured results
+
+1. **4-core sleeping-core benchmark** (local WSL, 4 `gated_core` instances with
+   always-on global bus mutating every cycle, 3 cores asleep / 1 active, 500k
+   cycles, `-O2`, checksum `83cedd1783dc8ea3` identical across all 4 builds):
+   - `--threads 1`: `2.336M → 6.569M cycles/s` (**2.81× speedup**, 4 sink groups,
+     4 deferred calls; cold `clkskip_refresh` total = 112 B / 24 insns in SQLite).
+   - `--threads 2`: `1.276M → 1.471M cycles/s` (**+15.3%**).
+2. **Real `g6lc64_hyp8_mc` frozen-model A/B of `packed-mux-rows`** on top of
+   `hyp8-mc-csrfix-aggregate-t1` (`packed-tiled` + PGO + AVX-512, `--threads 2`,
+   `i64.elf` 13,257 cycles, `taskset -c 2,4`, 6 interleaved AB/BA/AB runs,
+   `/tmp/clkskip-work/mux-ab/summary.json`):
+   - **118 core TUs / 3,498 mux rows** rewritten (`t1_mk_s`/`t1_fmk_s`),
+     **−324.65 MB** generated C++.
+   - **Objdump/SQLite `--compare` HOT cone**: `.text` `85.43 MB → 80.37 MB`
+     (**−5.06 MB / −5.92%**), static HOT insns `18.33M → 17.28M` (**−1.05M / −5.75%**).
+   - **Dynamic `instructions:u`**: A = `178.93B / 188.31B / 211.51B` (median
+     `188.31B`) vs B = `163.04B / 161.03B / 167.62B` (median **`163.04B`**,
+     **−13.42% median**, pairs −8.88% / −14.49% / −20.75%). All 6 runs passed
+     `tohost=0` at cycle 13,257 with **all 4 core RVFI traces byte-identical**.
+3. **Full `g6lc64_hyp8_mc_sleep` build with `verilator-v5.008-g6lc-clkskip` +
+   `hyp8_mc_sleep.lua`** (`hyp8-sleep-clkskip-t1` in flight on `ovh_calltorch`):
+   exercises `-fclock-skip-sink -fdfg-peephole-pack-bitwise-mux` + Lua overlay
+   (`packed-rows`, `packed-mux-rows`, `tiled-columns`) + PGO; full sleep-model
+   A/B vs `hyp8-sleepgatefix-aggregate-t1` follows on build completion.

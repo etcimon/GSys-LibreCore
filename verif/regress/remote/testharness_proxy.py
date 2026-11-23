@@ -1011,8 +1011,15 @@ def _git_tracked_files(root: Path, patterns: list[str]) -> list[Path]:
 
 
 HYP8_NATIVE_INPUTS = tuple("verif/regress/remote/" + name for name in (
+    "g6lc_tuning_policy.py", "g6lc_tuning_driver.lua",
     "g6lc_hyp8_tuning.py", "g6lc_pack_generated_rows.py", "g6lc_pack_columns.py",
+    "g6lc_pack_predicates.py", "g6lc_pack_wrapped_columns.py",
     "g6lc_column_tile.h", "hyp8/g6lc_native_isa.h", "hyp8/Flist.hyp8_mc_sim"))
+
+
+def _hyp8_native_inputs(root: Path):
+    return (*HYP8_NATIVE_INPUTS, *(p.relative_to(root).as_posix() for p in
+            sorted((root / "verif/regress/remote/hyp8/policies").glob("*.lua"))))
 
 
 def build_cache_key(root: Path, flavour: str, target: str) -> str:
@@ -1036,7 +1043,7 @@ def build_cache_key(root: Path, flavour: str, target: str) -> str:
         "core/Flist.smt_legacy",
     ]
     if flavour == "hyp8":
-        seed_files.extend(HYP8_NATIVE_INPUTS)
+        seed_files.extend(_hyp8_native_inputs(root))
     for rel in seed_files:
         p = root / rel
         if p.is_file():
@@ -1206,7 +1213,9 @@ def build_recipe_record(rem: Remote, root: Path, args, verlib: str) -> dict:
         if key == "SOFT_LADDER_BUILD_VLT_ARGS":
             extra_args = value
         elif key in ("SOFT_LADDER_ISOLATED", "SOFT_LADDER_OVERLAY", "G6LC_STORAMIC_DEFINES",
-                     "HYP8_BUILD_TUNING"):
+                     "HYP8_BUILD_TUNING", "HYP8_BUILD_TUNING_PLUGIN",
+                     "HYP8_BUILD_CLOCK_SKIP", "SOFT_LADDER_BUILD_CLOCK_SKIP",
+                     "SOFT_LADDER_BUILD_TUNING_PLUGIN"):
             build_env[key] = value
     version = rem.out(
         f"sed -n 's/^.*verilator: *//p' {shlex.quote(verlib_dir + '/build.log')} | head -1"
@@ -1250,7 +1259,7 @@ def write_build_manifest(rem: Remote, root: Path, args, verlib: str) -> None:
     ).strip()
     if not re.fullmatch(r"[0-9a-f]{64}", exe_sha):
         die(f"could not hash remote harness {harness} (got '{exe_sha}')")
-    sources = (_manifest_sources(root, HYP8_NATIVE_INPUTS) if args.flavour == "hyp8"
+    sources = (_manifest_sources(root, _hyp8_native_inputs(root)) if args.flavour == "hyp8"
                else _manifest_sources(root))
     configuration = {
         "flavour": args.flavour,
@@ -1267,10 +1276,10 @@ def write_build_manifest(rem: Remote, root: Path, args, verlib: str) -> None:
     if args.flavour == "hyp8":
         build_log = shlex.quote(f"{REMOTE_ROOT}/work/{verlib}/build.log")
         mode = rem.out(f"sed -n 's/^native_tuning=//p' {build_log} | tail -1").strip()
-        if mode not in ("off", "packed-tiled"):
+        if mode not in ("off", "packed-tiled", "lua"):
             die("missing effective Hyp8 native tuning in build log")
         configuration["nativeTuning"] = mode
-        if mode == "packed-tiled":
+        if mode != "off":
             receipt = REMOTE_ROOT + "/work/" + verlib + "/hyp8-packed-tiled/manifest.json"
             sha = rem.out(f"sha256sum {shlex.quote(receipt)} | cut -d' ' -f1").strip()
             if not re.fullmatch(r"[0-9a-f]{64}", sha):

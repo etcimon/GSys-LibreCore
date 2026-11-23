@@ -74,7 +74,9 @@ module g6lc_core_hb
   input  logic                         ai_isl_retired_valid_i,
   input  logic [31:0]                  ai_isl_retired_ticket_i,
   input  logic [31:0]                  ai_isl_last_ticket_i,
-  input  logic [15:0]                  ai_isl_last_status_i
+  input  logic [15:0]                  ai_isl_last_status_i,
+  input  logic                         storamic_pause_i,
+  output logic                         storamic_drained_o
 );
   // The metacomment binds only under --hierarchical (see the header).
   /*verilator hier_block*/
@@ -131,7 +133,9 @@ module g6lc_core_hb
       .ai_isl_retired_valid_i,
       .ai_isl_retired_ticket_i,
       .ai_isl_last_ticket_i,
-      .ai_isl_last_status_i
+      .ai_isl_last_status_i,
+      .storamic_pause_i,
+      .storamic_drained_o
   );
 
 endmodule

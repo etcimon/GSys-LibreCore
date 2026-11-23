@@ -339,7 +339,9 @@ module ex_stage
     output logic [G6LCCfg.TRANS_ID_BITS-1:0] rvfi_amo_push_tid_o,
     output logic [G6LCCfg.PLEN-1:0]        rvfi_amo_push_paddr_o,
     // Original instruction AES bits
-    input logic [5:0] orig_instr_aes_i
+    input logic [5:0] orig_instr_aes_i,
+    // Storamic W2/W4 resync store-buffer clear
+    input logic storamic_resync_i
 );
 
   // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
@@ -1349,7 +1351,9 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
       .rvfi_st_push_paddr_o  (rvfi_st_push_paddr_o),
       .rvfi_amo_push_valid_o (rvfi_amo_push_valid_o),
       .rvfi_amo_push_tid_o   (rvfi_amo_push_tid_o),
-      .rvfi_amo_push_paddr_o (rvfi_amo_push_paddr_o)
+      .rvfi_amo_push_paddr_o (rvfi_amo_push_paddr_o),
+      .debug_mode_i          (debug_mode_i),
+      .storamic_resync_i     (storamic_resync_i)
   );
 
   if (G6LCCfg.CvxifEn) begin : gen_cvxif

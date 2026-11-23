@@ -58,6 +58,16 @@ package g6lc_config_pkg;
   // single-hart; -DG6LC_HYP8_SMT2 selects the two-hart configuration.
   localparam int unsigned G6LCConfigNrHarts = 2;  // hyp8-mc: dual-hart cores (4x2 = 8 harts)
 
+  // Sleep-gate qualification seam: -DG6LC_HYP8_MC_SLEEP enables the per-core
+  // WFI ICG (CoreSleepGate) on an otherwise identical mc build. Kept off by
+  // default — the gate costs ~17% sim speed awake (T22 measurement), so it is
+  // a dedicated qualification target, not a boot-witness default.
+`ifdef G6LC_HYP8_MC_SLEEP
+  localparam bit G6LCConfigCoreSleepGate = 1'b1;
+`else
+  localparam bit G6LCConfigCoreSleepGate = 1'b0;
+`endif
+
   localparam G6LCConfigAxiIdWidth = 4;
   localparam G6LCConfigAxiAddrWidth = 64;
   localparam G6LCConfigAxiDataWidth = 64;
@@ -302,7 +312,7 @@ L2En: bit'(1),  // hyp8-mc: always on (4-core shared L2/L3)
       // to complete within one quantum. Diagnostic value; tune after fix lands.
       SmtFetchQuantum: unsigned'(4096),
       SmtStarveLimit: unsigned'(16),
-      CoreSleepGate: bit'(0),
+      CoreSleepGate: bit'(G6LCConfigCoreSleepGate),
       NrCores: unsigned'(4),  // hyp8-mc
       CohPolicy: config_pkg::COH_OOO,  // hyp8-mc: OoO multi-core WT (also derived by build_config)
       SnoopFilterEn: bit'(1),  // hyp8-mc: hub snoop filter on
@@ -371,7 +381,10 @@ L2En: bit'(1),  // hyp8-mc: always on (4-core shared L2/L3)
 
       NrLoadPipeRegs: int'(G6LCConfigNrLoadPipeRegs),
       NrStorePipeRegs: int'(G6LCConfigNrStorePipeRegs),
-      DcacheIdWidth: int'(G6LCConfigDcacheIdWidth)
+      DcacheIdWidth: int'(G6LCConfigDcacheIdWidth),
+      StoramicEn: bit'(0),
+      StoramicCheckpointEn: bit'(0),
+      StoramicIoEn: bit'(0)
   };
 
   // The hyp8 redesign seam — every `// hyp8:` knob bound at compile time.

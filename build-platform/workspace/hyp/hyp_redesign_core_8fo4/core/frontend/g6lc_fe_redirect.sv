@@ -50,6 +50,8 @@ module g6lc_fe_redirect
     input  logic [G6LCCfg.VLEN-1:0] pc_commit_i,
     input  logic                    halt_i,
     input  logic                    mem_replay_pc_i,
+    // C5 storamic resync: forces arch_step on SRC_COMMIT even under halt_i.
+    input  logic                    commit_step_i,
     input  logic                    set_debug_pc_i,
     input  logic                    smt_restore_i,
     input  logic [G6LCCfg.VLEN-1:0] smt_npc_restore_i,
@@ -224,7 +226,7 @@ module g6lc_fe_redirect
         arb_trap = 1'b1;
       end
       g6lc_fetch_pkg::SRC_COMMIT: begin
-        arb_step   = FtqEn & ~halt_i;
+        arb_step   = FtqEn & (~halt_i | commit_step_i);
         arb_reseed = flush_i;
       end
       g6lc_fetch_pkg::SRC_PEER,

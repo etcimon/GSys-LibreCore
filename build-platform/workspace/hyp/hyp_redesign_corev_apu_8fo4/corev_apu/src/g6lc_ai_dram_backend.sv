@@ -61,14 +61,7 @@ module g6lc_ai_dram_backend
     output logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] ch_w_beats_o
 );
 
-  // Checkpointing is deferred for later hyp8 implementation.
-  // pragma translate_off
-  if (StoramicCheckpointEn) begin : gen_ckpt_deferred
-    initial $fatal(1, "HYP8_STORAMIC_CHECKPOINT_DEFERRED");
-  end
-  // pragma translate_on
-
-  if (!StoramicEn) begin : gen_legacy_service_ready
+  if (!(StoramicEn || StoramicCheckpointEn)) begin : gen_legacy_service_ready
     assign service_ready_o         = init_done_o;
     assign storamic_ctrl_resp_o    = '0;
     assign storamic_irq_o          = 1'b0;
@@ -85,12 +78,12 @@ module g6lc_ai_dram_backend
     // pragma translate_on
   end
 
-  if (StoramicEn) begin : gen_storamic
+  if (StoramicEn || StoramicCheckpointEn) begin : gen_storamic
     assign ch_r_beats_o = '0;
     assign ch_w_beats_o = '0;
     g6lc_storamic_attach #(
-      .Enable              (StoramicEn),
-      .CheckpointRequested (1'b0),
+      .Enable              (StoramicEn || StoramicCheckpointEn),
+      .CheckpointRequested (StoramicCheckpointEn),
       .NativeBound         (1'b0),
       .DramClass           (DramClass),
       .NrChannels          (NrChannels),

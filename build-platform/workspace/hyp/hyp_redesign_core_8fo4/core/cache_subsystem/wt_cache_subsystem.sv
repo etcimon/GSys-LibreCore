@@ -113,6 +113,7 @@ module wt_cache_subsystem
     logic nc;  // noncacheable
     logic [G6LCCfg.MEM_TID_WIDTH-1:0] tid;  // thread id (used as transaction id in the core)
     g6lc_core_pkg::amo_t amo_op;  // amo opcode
+    logic [2:0] data_prot;  // Storamic C1 access-origin AXI prot
   };
 
   localparam type dcache_rtrn_t = struct packed {

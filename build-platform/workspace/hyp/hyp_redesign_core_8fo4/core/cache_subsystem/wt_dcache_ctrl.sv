@@ -45,6 +45,7 @@ module wt_dcache_ctrl
     output logic miss_nc_o,  // request to I/O space
     output logic [2:0] miss_size_o,  // 00: 1byte, 01: 2byte, 10: 4byte, 11: 8byte, 111: cacheline
     output logic [G6LCCfg.MEM_TID_WIDTH-1:0] miss_id_o,  // set to constant ID
+    output logic [2:0] miss_prot_o,  // Storamic C1 access-origin AXI prot
     input logic miss_replay_i,  // request collided with pending miss - have to replay the request
     input  logic                            miss_rtrn_vld_i, // signals that the miss has been served, asserted in the same cycle as when the data returns from memory
     // used to detect readout mux collisions
@@ -88,6 +89,17 @@ module wt_dcache_ctrl
   logic [G6LCCfg.DCACHE_SET_ASSOC-1:0] vld_data_d, vld_data_q;
   logic save_tag, rd_req_d, rd_req_q, rd_ack_d, rd_ack_q;
   logic [1:0] data_size_d, data_size_q;
+  if (G6LCCfg.StoramicCheckpointEn) begin : gen_ctrl_prot
+    logic [2:0] prot_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) prot_q <= '0;
+      else if (req_port_o.data_gnt) prot_q <= req_port_i.data_prot;
+    end
+    assign miss_prot_o = config_pkg::is_inside_cacheable_regions(
+        G6LCCfg, {{{64 - G6LCCfg.PLEN} {1'b0}}, miss_paddr_o}) ? 3'b000 : prot_q;
+  end else begin : gen_no_ctrl_prot
+    assign miss_prot_o = '0;
+  end
   // hyp8: verdict-window bookkeeping for the +2 readout. wr_cl_seen_q is
   // sticky across the lookup window so a refill landing in any T stage
   // still forces the same REPLAY_REQ re-lookup the single-cycle version

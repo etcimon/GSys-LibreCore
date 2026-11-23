@@ -73,6 +73,7 @@ module zcmt_decoder #(
     req_port_o.data_we    = 1'b0;
     req_port_o.data_be    = '0;
     req_port_o.data_size  = 2'b10;
+    req_port_o.data_prot  = 3'b000;
     req_port_o.data_id    = 1'b1;
     req_port_o.kill_req   = 1'b0;
     req_port_o.tag_valid  = 1'b1;

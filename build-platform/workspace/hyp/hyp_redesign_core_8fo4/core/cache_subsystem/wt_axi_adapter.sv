@@ -125,6 +125,14 @@ module wt_axi_adapter
   logic [G6LCCfg.AxiUserWidth-1:0] axi_rd_user;
   logic [AxiNumWords-1:0][(G6LCCfg.AxiDataWidth/8)-1:0] axi_wr_be;
   logic [5:0] axi_wr_atop;
+  logic [2:0] axi_rd_prot, axi_wr_prot;
+  assign axi_rd_prot = (G6LCCfg.StoramicCheckpointEn &&
+                        (arb_idx == 1'b1) &&
+                        (dcache_data.rtype == wt_cache_pkg::DCACHE_LOAD_REQ))
+                       ? dcache_data.data_prot : 3'b000;
+  assign axi_wr_prot = (G6LCCfg.StoramicCheckpointEn &&
+                        (dcache_data.rtype == wt_cache_pkg::DCACHE_STORE_REQ))
+                       ? dcache_data.data_prot : 3'b000;
   logic invalidate;
   logic [$clog2(G6LCCfg.AxiDataWidth/8)-1:0] amo_off_d, amo_off_q;
   // AMO generates r beat
@@ -1099,6 +1107,7 @@ assign icache_data_ack_o = icache_data_req_i & ~icache_data_full;
       .rd_id_i    (axi_rd_id_in),
       .rd_rdy_i   (axi_rd_rdy),
       .rd_lock_i  (axi_rd_lock),
+      .rd_prot_i  (axi_rd_prot),
       .rd_last_o  (axi_rd_last),
       .rd_valid_o (axi_rd_valid),
       .rd_data_o  (axi_rd_data),
@@ -1116,6 +1125,7 @@ assign icache_data_ack_o = icache_data_req_i & ~icache_data_full;
       .wr_id_i    (axi_wr_id_in),
       .wr_lock_i  (axi_wr_lock),
       .wr_atop_i  (axi_wr_atop),
+      .wr_prot_i  (axi_wr_prot),
       .wr_rdy_i   (axi_wr_rdy),
       .wr_valid_o (axi_wr_valid),
       .wr_id_o    (axi_wr_id_out),

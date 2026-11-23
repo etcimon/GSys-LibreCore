@@ -174,6 +174,7 @@ no_sf:
   li    t1, 0xC0DE
   sd    t1, 24(s5)
   sd    s7, 16(s5)
+  li    t1, 1                  # DONE counts arrivals; coord_wait compares NPART
   addi  a0, s2, DONE
   amoadd.d x0, t1, (a0)
   fence rw, rw

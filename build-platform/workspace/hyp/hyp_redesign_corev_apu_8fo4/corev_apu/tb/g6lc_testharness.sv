@@ -134,8 +134,48 @@ module g6lc_testharness #(
 
   // Port 2: AI island desc-fetch DMA master (NrSlaves=3).
   // Driven from gen_ai_island when MatrixEn; idle otherwise.
-  g6lc_axi::req_t  ai_dma_req;
-  g6lc_axi::resp_t ai_dma_resp;
+  g6lc_axi::req_t  ai_dma_req, ai_dma_sh_req;
+  g6lc_axi::resp_t ai_dma_resp, ai_dma_sh_resp;
+  logic            storamic_inval_valid, storamic_inval_ready, storamic_inval_done;
+  logic [AXI_ADDRESS_WIDTH-1:0] storamic_inval_addr;
+  g6lc_storamic_pkg::axil_req_t  storamic_ctrl_req, storamic_vctrl_req;
+  g6lc_storamic_pkg::axil_resp_t storamic_ctrl_resp, storamic_vctrl_resp;
+  logic            storamic_irq, storamic_virtio_irq, dram_service_ready;
+  logic            storamic_power_cut, storamic_save, storamic_restore;
+  logic            storamic_service_enable, storamic_policy_hold;
+  logic            storamic_aw_authorized, storamic_ar_authorized;
+  logic            storamic_aw_source_ok, storamic_ar_source_ok;
+  logic            ckpt_pause_req, ckpt_policy_ready;
+  logic [31:0]     ckpt_policy_epoch;
+  logic            ckpt_core_pause, ckpt_core_drained, ckpt_res_clr;
+  logic            ckpt_virtio_quiesced, ckpt_virtio_qerr, ckpt_virtio_ctrl_quiesced;
+  logic            ckpt_virtio_inflight, ckpt_dma_inflight;
+  logic            ckpt_cpu_paused, ckpt_cpu_err, ckpt_cpu_inflight;
+  logic            ckpt_dbg_closed, ckpt_dbg_inflight;
+  logic            ckpt_cycle_rst;
+  logic            storamic_ckpt_boot_ready /*verilator public_flat_rd*/;
+`ifdef G6LC_STORAMIC_CKPT
+  localparam bit STORAMIC_CKPT = 1'b1;
+`ifdef G6LC_STORAMIC_CKPT_WORDS
+  localparam int unsigned STORAMIC_CKPT_WORDS = `G6LC_STORAMIC_CKPT_WORDS;
+`else
+  localparam int unsigned STORAMIC_CKPT_WORDS = 2**15;
+`endif
+`else
+  localparam bit STORAMIC_CKPT = 1'b0;
+  assign ckpt_cycle_rst = 1'b0;
+  assign ckpt_pause_req = 1'b0;
+  assign ckpt_policy_ready = 1'b0;
+  assign ckpt_policy_epoch = '0;
+  assign ckpt_core_pause = 1'b0;
+  assign ckpt_res_clr = 1'b0;
+  assign ckpt_cpu_paused = 1'b0;
+  assign ckpt_cpu_err = 1'b0;
+  assign ckpt_cpu_inflight = 1'b0;
+  assign ckpt_dbg_closed = 1'b0;
+  assign ckpt_dbg_inflight = 1'b0;
+  assign storamic_ckpt_boot_ready = 1'b0;
+`endif
 `ifdef G6LC_APU
   g6lc_axi::req_t  apu_dma_req;
   g6lc_axi::resp_t apu_dma_rsp;
@@ -202,46 +242,16 @@ module g6lc_testharness #(
 `endif
       ;
 `ifdef G6LC_AI_DRAM_ISLAND_PORT
-  // Island DMA leaves the 64-bit xbar on a 512-bit port. slave[2] stays idle
-  // without G6LC_APU. With G6LC_APU the compositor DMA master takes this port
-  // (widths differ, so the 2:1 join is not used).
+  g6lc_axi::req_t  p2_up_req;
+  g6lc_axi::resp_t p2_up_resp;
 `ifdef G6LC_APU
-  `AXI_ASSIGN_FROM_REQ(slave[2], apu_dma_req)
-  `AXI_ASSIGN_TO_RESP(apu_dma_rsp, slave[2])
+  assign p2_up_req   = apu_dma_req;
+  assign apu_dma_rsp = p2_up_resp;
 `else
-  assign slave[2].aw_valid  = 1'b0;
-  assign slave[2].aw_id     = '0;
-  assign slave[2].aw_addr   = '0;
-  assign slave[2].aw_len    = '0;
-  assign slave[2].aw_size   = '0;
-  assign slave[2].aw_burst  = axi_pkg::BURST_FIXED;
-  assign slave[2].aw_lock   = 1'b0;
-  assign slave[2].aw_cache  = '0;
-  assign slave[2].aw_prot   = '0;
-  assign slave[2].aw_qos    = '0;
-  assign slave[2].aw_region = '0;
-  assign slave[2].aw_atop   = '0;
-  assign slave[2].aw_user   = '0;
-  assign slave[2].w_valid   = 1'b0;
-  assign slave[2].w_data    = '0;
-  assign slave[2].w_strb    = '0;
-  assign slave[2].w_last    = 1'b0;
-  assign slave[2].w_user    = '0;
-  assign slave[2].b_ready   = 1'b0;
-  assign slave[2].ar_valid  = 1'b0;
-  assign slave[2].ar_id     = '0;
-  assign slave[2].ar_addr   = '0;
-  assign slave[2].ar_len    = '0;
-  assign slave[2].ar_size   = '0;
-  assign slave[2].ar_burst  = axi_pkg::BURST_FIXED;
-  assign slave[2].ar_lock   = 1'b0;
-  assign slave[2].ar_cache  = '0;
-  assign slave[2].ar_prot   = '0;
-  assign slave[2].ar_qos    = '0;
-  assign slave[2].ar_region = '0;
-  assign slave[2].ar_user   = '0;
-  assign slave[2].r_ready   = 1'b0;
+  assign p2_up_req   = '0;
 `endif
+  `AXI_ASSIGN_FROM_REQ(slave[2], ai_dma_sh_req)
+  `AXI_ASSIGN_TO_RESP(ai_dma_sh_resp, slave[2])
 `else
 `ifdef G6LC_APU
   // Enable=1 so AI DMA still reaches slave[2]. ApuHarness.DmaReadEn=0 keeps
@@ -254,14 +264,14 @@ module g6lc_testharness #(
   ) i_apu_tdma (
     .clk_i, .rst_ni(ndmreset_n),
     .a_req_i(apu_dma_req), .a_rsp_o(apu_dma_rsp),
-    .b_req_i(ai_dma_req), .b_rsp_o(ai_dma_resp),
+    .b_req_i(ai_dma_sh_req), .b_rsp_o(ai_dma_sh_resp),
     .mst_req_o(apu_dma_join_req), .mst_rsp_i(apu_dma_join_rsp)
   );
   `AXI_ASSIGN_FROM_REQ(slave[2], apu_dma_join_req)
   `AXI_ASSIGN_TO_RESP(apu_dma_join_rsp, slave[2])
 `else
-  `AXI_ASSIGN_FROM_REQ(slave[2], ai_dma_req)
-  `AXI_ASSIGN_TO_RESP(ai_dma_resp, slave[2])
+  `AXI_ASSIGN_FROM_REQ(slave[2], ai_dma_sh_req)
+  `AXI_ASSIGN_TO_RESP(ai_dma_sh_resp, slave[2])
 `endif
 `endif
 
@@ -276,7 +286,9 @@ module g6lc_testharness #(
   localparam int unsigned APU_NB_EXTRA = 0;
   localparam int unsigned APU_NB_RULES_EXTRA = 0;
 `endif
-  localparam int unsigned NB_MST = g6lc_soc::NB_PERIPHERALS + APU_NB_EXTRA;
+  localparam int unsigned STORAMIC_NB_EXTRA = G6LCCfg.StoramicIoEn ? 1 : 0;
+  localparam int unsigned STORAMIC_IDX = g6lc_soc::NB_PERIPHERALS + APU_NB_EXTRA;
+  localparam int unsigned NB_MST = g6lc_soc::NB_PERIPHERALS + APU_NB_EXTRA + STORAMIC_NB_EXTRA;
   localparam int unsigned NB_RULES = NB_MST + APU_NB_RULES_EXTRA;
 
   AXI_BUS #(
@@ -285,6 +297,203 @@ module g6lc_testharness #(
     .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidthSlave ),
     .AXI_USER_WIDTH ( AXI_USER_WIDTH               )
   ) master[NB_MST-1:0]();
+
+  if (G6LCCfg.StoramicIoEn) begin : gen_storamic_ctrl
+    g6lc_axi_soc::req_slv_t  storamic_axi_req;
+    g6lc_axi_soc::resp_slv_t storamic_axi_resp;
+    `AXI_ASSIGN_TO_REQ(storamic_axi_req, master[STORAMIC_IDX])
+    `AXI_ASSIGN_FROM_RESP(master[STORAMIC_IDX], storamic_axi_resp)
+    localparam bit STORAMIC_ROUTE_ADMIT = STORAMIC_CKPT;
+    g6lc_storamic_checkpoint_route #(
+      .Enable(STORAMIC_ROUTE_ADMIT),
+      .LocalIdWidth(g6lc_axi_soc::IdWidth),
+      .NumMasters(g6lc_soc::NrSlaves),
+      .TrustedMaster(0),
+      .IdWidth(g6lc_axi_soc::IdWidthSlave),
+      .Base(g6lc_soc::StoramicBase),
+      .CtrlPageEn(G6LCCfg.StoramicEn),
+      .req_t(g6lc_axi_soc::req_slv_t),
+      .resp_t(g6lc_axi_soc::resp_slv_t)
+    ) i_storamic_route (
+      .clk_i, .rst_ni(ndmreset_n),
+      .req_i(storamic_axi_req), .resp_o(storamic_axi_resp),
+      .policy_ready_i(ckpt_policy_ready), .policy_epoch_i(ckpt_policy_epoch),
+      .ctrl_req_o(storamic_ctrl_req),
+      .ctrl_resp_i(storamic_ctrl_resp),
+      .vctrl_req_o(storamic_vctrl_req),
+      .vctrl_resp_i(storamic_vctrl_resp),
+      .service_enable_o(storamic_service_enable),
+      .aw_authorized_o(storamic_aw_authorized),
+      .ar_authorized_o(storamic_ar_authorized),
+      .policy_hold_o(storamic_policy_hold),
+      .aw_source_ok_o(storamic_aw_source_ok),
+      .ar_source_ok_o(storamic_ar_source_ok)
+    );
+    logic        vd_req, vd_gnt, vd_we, vd_rvalid, vd_err;
+    logic [63:0] vd_addr, vd_wdata, vd_rdata;
+    logic [7:0]  vd_be;
+    logic        vs_req, vs_gnt, vs_we, vs_rvalid, vs_err;
+    logic [63:0] vs_addr, vs_wdata, vs_rdata;
+    logic [7:0]  vs_be;
+    logic        vs_flush_req, vs_flush_ack, vs_flush_err;
+    logic [3:0]  storamic_power_cut_q;
+    logic        storamic_cut_arm_q;
+    logic [3:0]  storamic_cut_delay_q;
+    logic        storamic_save_q, storamic_restore_q;
+    logic [31:0] storamic_unlock_key_q;
+    logic        storamic_key_pend_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        storamic_power_cut_q <= '0;
+        storamic_cut_arm_q <= 1'b0;
+        storamic_cut_delay_q <= '0;
+        storamic_save_q <= 1'b0;
+        storamic_restore_q <= 1'b0;
+        storamic_unlock_key_q <= '0;
+        storamic_key_pend_q <= 1'b0;
+        storamic_power_cut <= 1'b0;
+        storamic_save <= 1'b0;
+        storamic_restore <= 1'b0;
+      end else begin
+        storamic_power_cut <= storamic_power_cut_q != '0;
+        storamic_save <= storamic_save_q;
+        storamic_restore <= storamic_restore_q;
+        storamic_save_q <= storamic_axi_req.aw_valid &&
+            storamic_axi_resp.aw_ready &&
+            storamic_axi_req.aw.addr == g6lc_soc::StoramicBase + 64'h3010;
+        storamic_restore_q <= storamic_axi_req.aw_valid &&
+            storamic_axi_resp.aw_ready &&
+            storamic_axi_req.aw.addr == g6lc_soc::StoramicBase + 64'h3018;
+        if (storamic_axi_req.aw_valid && storamic_axi_resp.aw_ready &&
+            storamic_axi_req.aw.addr == g6lc_soc::StoramicBase + 64'h3020)
+          storamic_key_pend_q <= 1'b1;
+        if (storamic_key_pend_q &&
+            storamic_axi_req.w_valid && storamic_axi_resp.w_ready) begin
+          storamic_key_pend_q <= 1'b0;
+          storamic_unlock_key_q <= storamic_axi_req.w.data[31:0];
+        end
+        if (storamic_axi_req.aw_valid && storamic_axi_resp.aw_ready &&
+            storamic_axi_req.aw.addr == g6lc_soc::StoramicBase + 64'h3000)
+          storamic_power_cut_q <= 4'hF;
+        else if (storamic_power_cut_q != '0)
+          storamic_power_cut_q <= storamic_power_cut_q - 1'b1;
+        if (storamic_axi_req.aw_valid && storamic_axi_resp.aw_ready &&
+            storamic_axi_req.aw.addr == g6lc_soc::StoramicBase + 64'h3008)
+          storamic_cut_arm_q <= 1'b1;
+        else if (storamic_cut_arm_q && vs_flush_req &&
+                 storamic_cut_delay_q == '0) begin
+          storamic_cut_arm_q <= 1'b0;
+          storamic_cut_delay_q <= 4'd3;
+        end else if (storamic_cut_delay_q != '0) begin
+          storamic_cut_delay_q <= storamic_cut_delay_q - 1'b1;
+          if (storamic_cut_delay_q == 4'd1) storamic_power_cut_q <= 4'hF;
+        end
+      end
+    end
+    logic        stick_present, stick_durable;
+    logic [31:0] stick_cut_count, stick_commit_gen;
+    logic [31:0] stick_identity;
+    logic [63:0] stick_ram_bytes, stick_flash_bytes, stick_flash_sectors;
+    logic [159:0] stick_serial;
+    localparam bit vd_usable = 1'b1;
+    g6lc_storamic_virtio_dev #(.QueueNumMax(128), .MaxSegs(8)) i_storamic_virtio (
+      .clk_i, .rst_ni(ndmreset_n),
+      .quiesce_i(ckpt_pause_req), .quiesced_o(ckpt_virtio_quiesced),
+      .quiesce_error_o(ckpt_virtio_qerr),
+      .ctrl_quiesce_i(ckpt_pause_req), .ctrl_quiesced_o(ckpt_virtio_ctrl_quiesced),
+      .inflight_o(ckpt_virtio_inflight),
+      .ctrl_req_i(storamic_vctrl_req), .ctrl_resp_o(storamic_vctrl_resp),
+      .irq_o(storamic_virtio_irq),
+      .device_usable_i(vd_usable && stick_present),
+      .capacity_i(stick_flash_sectors), .capacity_update_i(1'b0),
+      .serial_i(stick_serial),
+      .store_ready_i(stick_present),
+      .dma_base_i(g6lc_soc::DRAMBase),
+`ifdef G6LC_STORAMIC_CKPT
+      .dma_size_i(64'(STORAMIC_CKPT_WORDS) * 64'd8),
+`else
+      .dma_size_i(g6lc_soc::DRAMLength),
+`endif
+      .dma_req_o(vd_req), .dma_gnt_i(vd_gnt), .dma_we_o(vd_we),
+      .dma_addr_o(vd_addr), .dma_wdata_o(vd_wdata), .dma_be_o(vd_be),
+      .dma_rvalid_i(vd_rvalid), .dma_rdata_i(vd_rdata), .dma_err_i(vd_err),
+      .st_req_o(vs_req), .st_gnt_i(vs_gnt), .st_we_o(vs_we),
+      .st_addr_o(vs_addr), .st_wdata_o(vs_wdata), .st_be_o(vs_be),
+      .st_rvalid_i(vs_rvalid), .st_rdata_i(vs_rdata), .st_err_i(vs_err),
+      .st_durable_i(stick_durable), .st_flush_req_o(vs_flush_req),
+      .st_flush_ack_i(vs_flush_ack), .st_flush_err_i(vs_flush_err)
+    );
+    g6lc_storamic_model_stick #(
+      .RamWords(NUM_WORDS * AXI_DATA_WIDTH / AI_DRAM_CH_W), .FlashWords(8192)
+    ) i_storamic_stick (
+      .clk_i, .rst_ni(ndmreset_n),
+      .power_cut_i(storamic_power_cut_q != '0),
+      .save_i(storamic_save_q), .save_done_o(),
+      .st_req_i(vs_req), .st_gnt_o(vs_gnt), .st_we_i(vs_we),
+      .st_addr_i(vs_addr), .st_wdata_i(vs_wdata), .st_be_i(vs_be),
+      .st_rvalid_o(vs_rvalid), .st_rdata_o(vs_rdata), .st_err_o(vs_err),
+      .st_flush_req_i(vs_flush_req), .st_flush_ack_o(vs_flush_ack),
+      .st_flush_err_o(vs_flush_err),
+      .unlock_key_i(storamic_unlock_key_q),
+      .restore_i(storamic_restore), .restore_done_o(),
+      .stick_journal_gen_o(), .stick_journal_id_o(),
+      .stick_present_o(stick_present), .stick_identity_o(stick_identity),
+      .stick_ram_bytes_o(stick_ram_bytes),
+      .stick_flash_bytes_o(stick_flash_bytes),
+      .stick_flash_sectors_o(stick_flash_sectors),
+      .stick_durable_o(stick_durable),
+      .stick_store_idle_o(),
+      .stick_cut_count_o(stick_cut_count),
+      .stick_commit_gen_o(stick_commit_gen),
+      .stick_serial_o(stick_serial)
+    );
+    g6lc_storamic_dma_axi #(
+      .IdWidth(g6lc_axi::IdWidth), .DmaId('0), .InvalEn(1'b1),
+      .axi_req_t(g6lc_axi::req_t), .axi_resp_t(g6lc_axi::resp_t)
+    ) i_storamic_dma (
+      .clk_i, .rst_ni(ndmreset_n),
+      .inflight_o(ckpt_dma_inflight),
+      .dma_req_i(vd_req), .dma_gnt_o(vd_gnt), .dma_we_i(vd_we),
+      .dma_addr_i(vd_addr), .dma_wdata_i(vd_wdata), .dma_be_i(vd_be),
+      .dma_rvalid_o(vd_rvalid), .dma_rdata_o(vd_rdata), .dma_err_o(vd_err),
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+      .up_req_i(p2_up_req), .up_resp_o(p2_up_resp),
+`else
+      .up_req_i(ai_dma_req), .up_resp_o(ai_dma_resp),
+`endif
+      .mst_req_o(ai_dma_sh_req), .mst_resp_i(ai_dma_sh_resp),
+      .inval_valid_o(storamic_inval_valid), .inval_addr_o(storamic_inval_addr),
+      .inval_ready_i(storamic_inval_ready), .inval_done_i(storamic_inval_done)
+    );
+  end else begin : gen_no_storamic_ctrl
+    assign storamic_ctrl_req = '0;
+    assign storamic_power_cut = 1'b0;
+    assign storamic_save = 1'b0;
+    assign storamic_restore = 1'b0;
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+    assign ai_dma_sh_req = p2_up_req;
+    assign p2_up_resp = ai_dma_sh_resp;
+`else
+    assign ai_dma_sh_req = ai_dma_req;
+    assign ai_dma_resp = ai_dma_sh_resp;
+`endif
+    assign storamic_vctrl_req = '0;
+    assign storamic_vctrl_resp = '0;
+    assign storamic_virtio_irq = 1'b0;
+    assign storamic_inval_valid = 1'b0;
+    assign storamic_inval_addr = '0;
+    assign ckpt_virtio_quiesced = 1'b0;
+    assign ckpt_virtio_qerr = 1'b0;
+    assign ckpt_virtio_ctrl_quiesced = 1'b0;
+    assign ckpt_virtio_inflight = 1'b0;
+    assign ckpt_dma_inflight = 1'b0;
+    assign storamic_service_enable = 1'b0;
+    assign storamic_policy_hold = 1'b0;
+    assign storamic_aw_authorized = 1'b0;
+    assign storamic_ar_authorized = 1'b0;
+    assign storamic_aw_source_ok = 1'b0;
+    assign storamic_ar_source_ok = 1'b0;
+  end
 
 `ifdef G6LC_APU
   logic apu_ram_fault;
@@ -297,7 +506,7 @@ module g6lc_testharness #(
   // RAM master, and the RAM fault clears because of that reset.
   rstgen i_rstgen_main (
     .clk_i        ( clk_i                ),
-    .rst_ni       ( rst_ni & (~ndmreset) & ~apu_fault_reset ),
+    .rst_ni       ( rst_ni & (~ndmreset) & ~apu_fault_reset & ~ckpt_cycle_rst ),
     .test_mode_i  ( test_en              ),
     .rst_no       ( ndmreset_n           ),
     .init_no      (                      ) // keep open
@@ -510,8 +719,24 @@ module g6lc_testharness #(
     .data_i     ( dm_slave_rdata            )
   );
 
+`ifdef G6LC_STORAMIC_CKPT
+  g6lc_axi::req_t    ckpt_dbg_req;
+  g6lc_axi::resp_t   ckpt_dbg_resp;
+  g6lc_storamic_axi_gate #(
+    .req_t(g6lc_axi::req_t), .resp_t(g6lc_axi::resp_t)
+  ) i_ckpt_dbg_gate (
+    .clk_i, .rst_ni(ndmreset_n),
+    .close_i(ckpt_pause_req), .closed_o(ckpt_dbg_closed),
+    .inflight_o(ckpt_dbg_inflight),
+    .up_req_i(dm_axi_m_req), .up_resp_o(dm_axi_m_resp),
+    .dn_req_o(ckpt_dbg_req), .dn_resp_i(ckpt_dbg_resp)
+  );
+  `AXI_ASSIGN_FROM_REQ(slave[1], ckpt_dbg_req)
+  `AXI_ASSIGN_TO_RESP(ckpt_dbg_resp, slave[1])
+`else
   `AXI_ASSIGN_FROM_REQ(slave[1], dm_axi_m_req)
   `AXI_ASSIGN_TO_RESP(dm_axi_m_resp, slave[1])
+`endif
 
   axi_adapter #(
     .G6LCCfg               ( G6LCCfg                   ),
@@ -899,9 +1124,10 @@ module g6lc_testharness #(
 `endif
     ) i_axi_riscv_atomics (
       .clk_i,
-      .rst_ni ( ndmreset_n               ),
-      .slv    ( master[g6lc_soc::DRAM] ),
-      .mst    ( dram                     )
+      .rst_ni    ( ndmreset_n               ),
+      .res_clr_i ( ckpt_res_clr             ),
+      .slv       ( master[g6lc_soc::DRAM]   ),
+      .mst       ( dram                     )
     );
   end else begin : gen_excl_pulp
     axi_riscv_atomics_wrap #(
@@ -1060,8 +1286,241 @@ module g6lc_testharness #(
       .master      ( join_mst       )
   );
 `endif
+`ifdef G6LC_STORAMIC_CKPT
+  // ==========================================================================
+  // Native Storamic Checkpoint Composition (C3-C6 + W0-W2 + hyp8 OoO W4)
+  // ==========================================================================
+`ifdef G6LC_STORAMIC_CKPT_RSP
+  localparam int unsigned STORAMIC_CKPT_RSP = `G6LC_STORAMIC_CKPT_RSP;
+`else
+  localparam int unsigned STORAMIC_CKPT_RSP = 0;
+`endif
+  localparam int unsigned STORAMIC_CKPT_BYTES = STORAMIC_CKPT_WORDS * 8;
+  localparam int unsigned STORAMIC_CKPT_FLASH =
+      ((2 * STORAMIC_CKPT_BYTES + 128 + 511) / 512) * 512 + 4096;
+
+  g6lc_storamic_soc_cfg_pkg::ckpt_plat_in_t  ckpt_in;
+  g6lc_storamic_soc_cfg_pkg::ckpt_plat_out_t ckpt_out;
+
+  localparam int unsigned CkptSwapCycles = 256;
+  localparam int unsigned CkptCycleCut = 16;
+  localparam int unsigned CkptCycleRst = 16;
+  logic [8:0] ckpt_swap_cnt_q;
+  logic [5:0] ckpt_cycle_cnt_q;
+  logic       ckpt_cycle_cut;
+  assign ckpt_cycle_cut = ckpt_cycle_cnt_q > 6'(CkptCycleRst);
+  assign ckpt_cycle_rst = ckpt_cycle_cnt_q != '0 && !ckpt_cycle_cut;
+  logic ckpt_presence_q, ckpt_pgood_q, ckpt_desc_alt_q, ckpt_fault_clear_q;
+  logic ckpt_trig_hit;
+  logic [63:0] ckpt_trig_addr;
+  assign ckpt_trig_hit = gen_storamic_ctrl.storamic_axi_req.aw_valid &&
+                         gen_storamic_ctrl.storamic_axi_resp.aw_ready;
+  assign ckpt_trig_addr = gen_storamic_ctrl.storamic_axi_req.aw.addr;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      ckpt_presence_q <= 1'b1;
+      ckpt_pgood_q <= 1'b1;
+      ckpt_desc_alt_q <= 1'b0;
+      ckpt_fault_clear_q <= 1'b0;
+      ckpt_swap_cnt_q <= '0;
+      ckpt_cycle_cnt_q <= '0;
+    end else begin
+      ckpt_fault_clear_q <= 1'b0;
+      if (ckpt_cycle_cnt_q != '0) ckpt_cycle_cnt_q <= ckpt_cycle_cnt_q - 6'd1;
+      if (ckpt_swap_cnt_q != '0) begin
+        ckpt_swap_cnt_q <= ckpt_swap_cnt_q - 9'd1;
+        if (ckpt_swap_cnt_q == 9'(CkptSwapCycles / 2)) ckpt_fault_clear_q <= 1'b1;
+        if (ckpt_swap_cnt_q == 9'd1) ckpt_presence_q <= 1'b1;
+      end
+      if (ckpt_trig_hit) begin
+        unique case (ckpt_trig_addr)
+          g6lc_soc::StoramicBase + 64'h3040: ckpt_presence_q <= 1'b0;
+          g6lc_soc::StoramicBase + 64'h3048: ckpt_presence_q <= 1'b1;
+          g6lc_soc::StoramicBase + 64'h3050: ckpt_pgood_q <= 1'b0;
+          g6lc_soc::StoramicBase + 64'h3058: ckpt_pgood_q <= 1'b1;
+          g6lc_soc::StoramicBase + 64'h3060: ckpt_desc_alt_q <= 1'b1;
+          g6lc_soc::StoramicBase + 64'h3068: ckpt_fault_clear_q <= 1'b1;
+          g6lc_soc::StoramicBase + 64'h3078:
+            ckpt_cycle_cnt_q <= 6'(CkptCycleCut + CkptCycleRst);
+          g6lc_soc::StoramicBase + 64'h3070: begin
+            ckpt_presence_q <= 1'b0;
+            ckpt_desc_alt_q <= 1'b1;
+            ckpt_swap_cnt_q <= 9'(CkptSwapCycles);
+          end
+          default: ;
+        endcase
+      end
+    end
+  end
+
+  logic        ckpt_ndm_q;
+  logic [31:0] ckpt_reset_generation_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      ckpt_ndm_q <= 1'b0;
+      ckpt_reset_generation_q <= '0;
+    end else begin
+      ckpt_ndm_q <= ndmreset_n;
+      if (ckpt_ndm_q && !ndmreset_n && ckpt_reset_generation_q != '1)
+        ckpt_reset_generation_q <= ckpt_reset_generation_q + 32'd1;
+    end
+  end
+
+  logic ckpt_virtio_paused, ckpt_any_error, ckpt_res_clr_seen_q;
+  assign ckpt_virtio_paused = ckpt_virtio_quiesced && ckpt_virtio_ctrl_quiesced;
+  assign ckpt_any_error = ckpt_cpu_err || ckpt_virtio_qerr;
+  assign ckpt_res_clr = ckpt_cpu_paused;
+  always_ff @(posedge clk_i or negedge ndmreset_n) begin
+    if (!ndmreset_n) ckpt_res_clr_seen_q <= 1'b0;
+    else ckpt_res_clr_seen_q <= ckpt_cpu_paused;
+  end
+
+  logic [4:0]   ckpt_providers;
+  logic         ckpt_present, ckpt_identity_valid, ckpt_protection_ok;
+  logic [159:0] ckpt_module_id;
+  logic [31:0]  ckpt_mapping_generation, ckpt_reset_generation;
+  logic         ckpt_update_valid;
+  logic [31:0]  ckpt_update_policy;
+  g6lc_storamic_native_providers #(
+    .ModelBytes(64'(STORAMIC_CKPT_BYTES)),
+    .RawFlashBytes(64'(STORAMIC_CKPT_FLASH)),
+    .ResyncCapable(1'b1)
+  ) i_ckpt_providers (
+    .clk_i, .rst_ni(ndmreset_n), .testmode_i(test_en),
+    .presence_i(ckpt_presence_q), .power_good_i(ckpt_pgood_q),
+    .quiesce_req_i(1'b0),
+    .drain_i(ckpt_cpu_paused && ckpt_dbg_closed && ckpt_virtio_paused),
+    .fault_clear_i(ckpt_fault_clear_q),
+    .desc_alt_i(ckpt_desc_alt_q),
+    .reset_generation_i(ckpt_reset_generation_q),
+    .txn_policy_ok_i(!ckpt_any_error),
+    .pause_error_i(ckpt_any_error),
+    .update_ready_i(ckpt_out.update_ready),
+    .providers_ready_o(ckpt_providers),
+    .present_o(ckpt_present), .identity_valid_o(ckpt_identity_valid),
+    .protection_ok_o(ckpt_protection_ok), .module_id_o(ckpt_module_id),
+    .mapping_generation_o(ckpt_mapping_generation),
+    .reset_generation_o(ckpt_reset_generation),
+    .update_valid_o(ckpt_update_valid), .update_policy_o(ckpt_update_policy)
+  );
+
+  always_comb begin
+    ckpt_in = '0;
+    ckpt_in.providers_ready    = ckpt_providers;
+    ckpt_in.present            = ckpt_present;
+    ckpt_in.identity_valid     = ckpt_identity_valid;
+    ckpt_in.protection_ok      = ckpt_protection_ok;
+    ckpt_in.power_cut          = storamic_power_cut || ckpt_cycle_cut;
+    ckpt_in.module_id          = ckpt_module_id;
+    ckpt_in.mapping_generation = ckpt_mapping_generation;
+    ckpt_in.reset_generation   = ckpt_reset_generation;
+    ckpt_in.update_valid       = ckpt_update_valid;
+    ckpt_in.update_policy      = ckpt_update_policy;
+    ckpt_in.producer_paused    = {ckpt_virtio_paused, ckpt_dbg_closed, ckpt_cpu_paused};
+    ckpt_in.producer_error     = {ckpt_virtio_qerr, 1'b0, ckpt_cpu_err};
+    ckpt_in.ingress_hold       = {ckpt_virtio_inflight || ckpt_dma_inflight,
+                                  ckpt_dbg_inflight, ckpt_cpu_inflight};
+    ckpt_in.route_hold         = storamic_policy_hold;
+    ckpt_in.maintenance_hold   = 1'b0;
+    ckpt_in.service_enable     = storamic_service_enable;
+    ckpt_in.aw_authorized      = storamic_aw_authorized;
+    ckpt_in.ar_authorized      = storamic_ar_authorized;
+    ckpt_in.restore_resume_safe = ckpt_cpu_paused && ckpt_dbg_closed &&
+                                  ckpt_virtio_paused && ckpt_res_clr_seen_q &&
+                                  !ckpt_any_error;
+  end
+
+  assign ckpt_pause_req = ckpt_out.pause_req;
+  assign ckpt_policy_ready = ckpt_out.policy_ready;
+  assign ckpt_policy_epoch = ckpt_out.policy_epoch;
+  assign storamic_ckpt_boot_ready = ckpt_out.boot_ready;
+  assign dram_ch_r_beats = '0;
+  assign dram_ch_w_beats = '0;
+
+  g6lc_storamic_attach #(
+    .Enable(1'b1), .CheckpointRequested(1'b1), .NativeBound(1'b1),
+    .CkptBootRecovery(1'b1),
+    .DramClass(AiIslandCfg.DramClass), .NrChannels(AiIslandCfg.DramChannels),
+    .IdWidth(g6lc_axi_soc::IdWidthSlave), .AddrWidth(AXI_ADDRESS_WIDTH),
+    .DataWidth(AXI_DATA_WIDTH), .UserWidth(AXI_USER_WIDTH),
+    .ModelBase(g6lc_soc::DRAMBase), .ModelWords(STORAMIC_CKPT_WORDS),
+    .CkptRawFlashBytes(STORAMIC_CKPT_FLASH), .CkptRspCycles(STORAMIC_CKPT_RSP),
+    .CkptTimeoutCycles(STORAMIC_CKPT_WORDS * 256)
+  ) i_ckpt_attach (
+    .clk_i, .rst_ni(ndmreset_n), .testmode_i(test_en),
+    .slave(dram_lat),
+    .ctrl_req_i(storamic_ctrl_req), .ctrl_resp_o(storamic_ctrl_resp),
+    .irq_o(storamic_irq),
+    .init_done_o(dram_init_done), .service_ready_o(dram_service_ready),
+    .power_cut_i(1'b0), .save_i(1'b0), .restore_i(1'b0),
+    .save_busy_o(), .restore_done_o(),
+    .ckpt_plat_in_i(ckpt_in), .ckpt_plat_out_o(ckpt_out)
+  );
+
+  // pragma translate_off
+  int unsigned ckpt_pause_count, ckpt_release_count, ckpt_done_count;
+  int unsigned ckpt_error_count, ckpt_refuse_count, ckpt_issue_count;
+  logic ckpt_paused_d, ckpt_pause_req_d;
+  int unsigned ckpt_vio_busy_pauses;
+  logic        ckpt_llc_inval_done, ckpt_llc_idle, ckpt_l2_hit, ckpt_l3_hit;
+  int unsigned ckpt_llc_invals, ckpt_l2_hits, ckpt_l3_hits;
+  logic [3:0] ckpt_phase_d;
+  logic ckpt_locked_d, ckpt_init_d;
+  bit ckpt_trace_en;
+  initial ckpt_trace_en = $test$plusargs("storamic_ckpt_trace");
+  task automatic ckpt_state_line(input string tag);
+    $display("STORAMIC_CKPT_STATE %s t=%0t initialized=%0d locked=%0d busy=%0d phase=%0d valid=%0d generation=%0d policy_ready=%0d policy_epoch=%0d providers=%02h present=%0d paused=%03b errors=%03b map_gen=%0d reset_gen=%0d pauses=%0d releases=%0d issue=%0d done=%0d error=%0d refuse=%0d rec_active=%0d rec_failed=%0d vio_busy_pauses=%0d llc_invals=%0d l2_hits=%0d l3_hits=%0d",
+             tag, $time, ckpt_out.initialized, ckpt_out.recovery_locked,
+             ckpt_out.busy, ckpt_out.phase, ckpt_out.checkpoint_valid,
+             ckpt_out.checkpoint_generation, ckpt_out.policy_ready,
+             ckpt_out.policy_epoch, ckpt_providers, ckpt_present,
+             ckpt_in.producer_paused, ckpt_in.producer_error,
+             ckpt_mapping_generation, ckpt_reset_generation,
+             ckpt_pause_count, ckpt_release_count, ckpt_issue_count,
+             ckpt_done_count, ckpt_error_count, ckpt_refuse_count,
+             ckpt_out.recovery_active, ckpt_out.recovery_failed,
+             ckpt_vio_busy_pauses, ckpt_llc_invals, ckpt_l2_hits, ckpt_l3_hits);
+  endtask
+  always_ff @(posedge clk_i) begin
+    if (!ndmreset_n) begin
+      ckpt_paused_d <= 1'b0;
+      ckpt_pause_req_d <= 1'b1;
+      ckpt_phase_d <= '0;
+      ckpt_locked_d <= 1'b0;
+      ckpt_init_d <= 1'b0;
+    end else begin
+      ckpt_paused_d <= ckpt_cpu_paused;
+      ckpt_pause_req_d <= ckpt_pause_req;
+      if (ckpt_pause_req && !ckpt_pause_req_d &&
+          (ckpt_virtio_inflight || ckpt_dma_inflight))
+        ckpt_vio_busy_pauses <= ckpt_vio_busy_pauses + 1;
+      if (ckpt_llc_inval_done) ckpt_llc_invals <= ckpt_llc_invals + 1;
+      if (ckpt_l2_hit) ckpt_l2_hits <= ckpt_l2_hits + 1;
+      if (ckpt_l3_hit) ckpt_l3_hits <= ckpt_l3_hits + 1;
+      ckpt_phase_d <= ckpt_out.phase;
+      ckpt_locked_d <= ckpt_out.recovery_locked;
+      ckpt_init_d <= ckpt_out.initialized;
+      if (ckpt_cpu_paused && !ckpt_paused_d) ckpt_pause_count <= ckpt_pause_count + 1;
+      if (!ckpt_cpu_paused && ckpt_paused_d) ckpt_release_count <= ckpt_release_count + 1;
+      if (ckpt_out.events.issue) ckpt_issue_count <= ckpt_issue_count + 1;
+      if (ckpt_out.events.done) ckpt_done_count <= ckpt_done_count + 1;
+      if (ckpt_out.events.error) ckpt_error_count <= ckpt_error_count + 1;
+      if (ckpt_out.events.refuse) ckpt_refuse_count <= ckpt_refuse_count + 1;
+      if (ckpt_trace_en && (ckpt_cpu_paused != ckpt_paused_d ||
+                            ckpt_out.phase != ckpt_phase_d ||
+                            ckpt_out.recovery_locked != ckpt_locked_d ||
+                            ckpt_out.initialized != ckpt_init_d))
+        ckpt_state_line("trace");
+    end
+  end
+  final if ($test$plusargs("storamic_ckpt_report")) ckpt_state_line("final");
+  // pragma translate_on
+`else
   g6lc_ai_dram_backend #(
     .DramClass      ( AiIslandCfg.DramClass            ),
+    .StoramicEn     ( G6LCCfg.StoramicEn               ),
+    .StoramicCheckpointEn ( G6LCCfg.StoramicCheckpointEn ),
+    .StoramicModelBase    ( g6lc_soc::DRAMBase         ),
     .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidthSlave
 `ifdef G6LC_AI_DRAM_ISLAND_PORT
                       + 1
@@ -1086,19 +1545,20 @@ module g6lc_testharness #(
 `else
     .slave      ( dram_lat     ),
 `endif
-    .storamic_ctrl_req_i     ( '0             ),
-    .storamic_ctrl_resp_o    (                ),
-    .storamic_irq_o          (                ),
-    .init_done_o             ( dram_init_done ),
-    .service_ready_o         (                ),
-    .storamic_power_cut_i    ( 1'b0           ),
-    .storamic_save_i         ( 1'b0           ),
-    .storamic_restore_i      ( 1'b0           ),
-    .storamic_save_busy_o    (                ),
-    .storamic_restore_done_o (                ),
+    .storamic_ctrl_req_i     ( storamic_ctrl_req  ),
+    .storamic_ctrl_resp_o    ( storamic_ctrl_resp ),
+    .storamic_irq_o          ( storamic_irq       ),
+    .init_done_o             ( dram_init_done     ),
+    .service_ready_o         ( dram_service_ready ),
+    .storamic_power_cut_i    ( storamic_power_cut ),
+    .storamic_save_i         ( storamic_save      ),
+    .storamic_restore_i      ( storamic_restore   ),
+    .storamic_save_busy_o    (                    ),
+    .storamic_restore_done_o (                    ),
     .ch_r_beats_o ( dram_ch_r_beats ),
     .ch_w_beats_o ( dram_ch_w_beats )
   );
+`endif
 
   // Remote v5.008 cannot look up G6LCCfg.DcacheLineWidth (struct member
   // missing on the elaborated parameter). Use the target package constants.
@@ -1135,39 +1595,71 @@ module g6lc_testharness #(
   axi_pkg::xbar_rule_64_t [NB_RULES-1:0] addr_map;
 
 `ifdef G6LC_APU
-  // OpenSBI-visible testharness map. Split DRAM around firmware RAM.
-  // addr_decode last-match-wins: a full DRAM rule at a higher array index
-  // than the RAM rule aliases 0x90000000. Locked by tb_g6lc_apu_th_osbi
-  // and software/apu-fw/test/osbi_check.c. Not an OpenSBI firmware boot.
-  assign addr_map = '{
-    '{ idx: g6lc_soc::Debug,    start_addr: g6lc_soc::DebugBase,    end_addr: g6lc_soc::DebugBase + g6lc_soc::DebugLength       },
-    '{ idx: g6lc_soc::ROM,      start_addr: g6lc_soc::ROMBase,      end_addr: g6lc_soc::ROMBase + g6lc_soc::ROMLength           },
-    '{ idx: g6lc_soc::CLINT,    start_addr: g6lc_soc::CLINTBase,    end_addr: g6lc_soc::CLINTBase + g6lc_soc::CLINTLength       },
-    '{ idx: g6lc_soc::PLIC,     start_addr: g6lc_soc::PLICBase,     end_addr: g6lc_soc::PLICBase + g6lc_soc::PLICLength         },
-    '{ idx: g6lc_soc::UART,     start_addr: g6lc_soc::UARTBase,     end_addr: g6lc_soc::UARTBase + g6lc_soc::UARTLength         },
-    '{ idx: g6lc_soc::Timer,    start_addr: g6lc_soc::TimerBase,    end_addr: g6lc_soc::TimerBase + g6lc_soc::TimerLength       },
-    '{ idx: g6lc_soc::SPI,      start_addr: g6lc_soc::SPIBase,      end_addr: g6lc_soc::SPIBase + g6lc_soc::SPILength           },
-    '{ idx: g6lc_soc::Ethernet, start_addr: g6lc_soc::EthernetBase, end_addr: g6lc_soc::EthernetBase + g6lc_soc::EthernetLength },
-    '{ idx: g6lc_soc::GPIO,     start_addr: g6lc_soc::GPIOBase,     end_addr: g6lc_soc::GPIOBase + g6lc_soc::GPIOLength         },
-    apu_dram_lo_rule,
-    apu_guest_rule,
-    apu_ctrl_rule,
-    apu_ram_rule,
-    apu_dram_hi_rule
-  };
+  if (G6LCCfg.StoramicIoEn) begin : gen_storamic_map_apu
+    assign addr_map = '{
+      '{ idx: g6lc_soc::Debug,    start_addr: g6lc_soc::DebugBase,    end_addr: g6lc_soc::DebugBase + g6lc_soc::DebugLength       },
+      '{ idx: g6lc_soc::ROM,      start_addr: g6lc_soc::ROMBase,      end_addr: g6lc_soc::ROMBase + g6lc_soc::ROMLength           },
+      '{ idx: g6lc_soc::CLINT,    start_addr: g6lc_soc::CLINTBase,    end_addr: g6lc_soc::CLINTBase + g6lc_soc::CLINTLength       },
+      '{ idx: g6lc_soc::PLIC,     start_addr: g6lc_soc::PLICBase,     end_addr: g6lc_soc::PLICBase + g6lc_soc::PLICLength         },
+      '{ idx: g6lc_soc::UART,     start_addr: g6lc_soc::UARTBase,     end_addr: g6lc_soc::UARTBase + g6lc_soc::UARTLength         },
+      '{ idx: g6lc_soc::Timer,    start_addr: g6lc_soc::TimerBase,    end_addr: g6lc_soc::TimerBase + g6lc_soc::TimerLength       },
+      '{ idx: g6lc_soc::SPI,      start_addr: g6lc_soc::SPIBase,      end_addr: g6lc_soc::SPIBase + g6lc_soc::SPILength           },
+      '{ idx: g6lc_soc::Ethernet, start_addr: g6lc_soc::EthernetBase, end_addr: g6lc_soc::EthernetBase + g6lc_soc::EthernetLength },
+      '{ idx: g6lc_soc::GPIO,     start_addr: g6lc_soc::GPIOBase,     end_addr: g6lc_soc::GPIOBase + g6lc_soc::GPIOLength         },
+      '{ idx: STORAMIC_IDX,       start_addr: g6lc_soc::StoramicBase, end_addr: g6lc_soc::StoramicBase + g6lc_soc::StoramicLength },
+      apu_dram_lo_rule,
+      apu_guest_rule,
+      apu_ctrl_rule,
+      apu_ram_rule,
+      apu_dram_hi_rule
+    };
+  end else begin : gen_no_storamic_map_apu
+    assign addr_map = '{
+      '{ idx: g6lc_soc::Debug,    start_addr: g6lc_soc::DebugBase,    end_addr: g6lc_soc::DebugBase + g6lc_soc::DebugLength       },
+      '{ idx: g6lc_soc::ROM,      start_addr: g6lc_soc::ROMBase,      end_addr: g6lc_soc::ROMBase + g6lc_soc::ROMLength           },
+      '{ idx: g6lc_soc::CLINT,    start_addr: g6lc_soc::CLINTBase,    end_addr: g6lc_soc::CLINTBase + g6lc_soc::CLINTLength       },
+      '{ idx: g6lc_soc::PLIC,     start_addr: g6lc_soc::PLICBase,     end_addr: g6lc_soc::PLICBase + g6lc_soc::PLICLength         },
+      '{ idx: g6lc_soc::UART,     start_addr: g6lc_soc::UARTBase,     end_addr: g6lc_soc::UARTBase + g6lc_soc::UARTLength         },
+      '{ idx: g6lc_soc::Timer,    start_addr: g6lc_soc::TimerBase,    end_addr: g6lc_soc::TimerBase + g6lc_soc::TimerLength       },
+      '{ idx: g6lc_soc::SPI,      start_addr: g6lc_soc::SPIBase,      end_addr: g6lc_soc::SPIBase + g6lc_soc::SPILength           },
+      '{ idx: g6lc_soc::Ethernet, start_addr: g6lc_soc::EthernetBase, end_addr: g6lc_soc::EthernetBase + g6lc_soc::EthernetLength },
+      '{ idx: g6lc_soc::GPIO,     start_addr: g6lc_soc::GPIOBase,     end_addr: g6lc_soc::GPIOBase + g6lc_soc::GPIOLength         },
+      apu_dram_lo_rule,
+      apu_guest_rule,
+      apu_ctrl_rule,
+      apu_ram_rule,
+      apu_dram_hi_rule
+    };
+  end
 `else
-  assign addr_map = '{
-    '{ idx: g6lc_soc::Debug,    start_addr: g6lc_soc::DebugBase,    end_addr: g6lc_soc::DebugBase + g6lc_soc::DebugLength       },
-    '{ idx: g6lc_soc::ROM,      start_addr: g6lc_soc::ROMBase,      end_addr: g6lc_soc::ROMBase + g6lc_soc::ROMLength           },
-    '{ idx: g6lc_soc::CLINT,    start_addr: g6lc_soc::CLINTBase,    end_addr: g6lc_soc::CLINTBase + g6lc_soc::CLINTLength       },
-    '{ idx: g6lc_soc::PLIC,     start_addr: g6lc_soc::PLICBase,     end_addr: g6lc_soc::PLICBase + g6lc_soc::PLICLength         },
-    '{ idx: g6lc_soc::UART,     start_addr: g6lc_soc::UARTBase,     end_addr: g6lc_soc::UARTBase + g6lc_soc::UARTLength         },
-    '{ idx: g6lc_soc::Timer,    start_addr: g6lc_soc::TimerBase,    end_addr: g6lc_soc::TimerBase + g6lc_soc::TimerLength       },
-    '{ idx: g6lc_soc::SPI,      start_addr: g6lc_soc::SPIBase,      end_addr: g6lc_soc::SPIBase + g6lc_soc::SPILength           },
-    '{ idx: g6lc_soc::Ethernet, start_addr: g6lc_soc::EthernetBase, end_addr: g6lc_soc::EthernetBase + g6lc_soc::EthernetLength },
-    '{ idx: g6lc_soc::GPIO,     start_addr: g6lc_soc::GPIOBase,     end_addr: g6lc_soc::GPIOBase + g6lc_soc::GPIOLength         },
-    '{ idx: g6lc_soc::DRAM,     start_addr: g6lc_soc::DRAMBase,     end_addr: g6lc_soc::DRAMBase + g6lc_soc::DRAMLength         }
-  };
+  if (G6LCCfg.StoramicIoEn) begin : gen_storamic_map_noapu
+    assign addr_map = '{
+      '{ idx: g6lc_soc::Debug,    start_addr: g6lc_soc::DebugBase,    end_addr: g6lc_soc::DebugBase + g6lc_soc::DebugLength       },
+      '{ idx: g6lc_soc::ROM,      start_addr: g6lc_soc::ROMBase,      end_addr: g6lc_soc::ROMBase + g6lc_soc::ROMLength           },
+      '{ idx: g6lc_soc::CLINT,    start_addr: g6lc_soc::CLINTBase,    end_addr: g6lc_soc::CLINTBase + g6lc_soc::CLINTLength       },
+      '{ idx: g6lc_soc::PLIC,     start_addr: g6lc_soc::PLICBase,     end_addr: g6lc_soc::PLICBase + g6lc_soc::PLICLength         },
+      '{ idx: g6lc_soc::UART,     start_addr: g6lc_soc::UARTBase,     end_addr: g6lc_soc::UARTBase + g6lc_soc::UARTLength         },
+      '{ idx: g6lc_soc::Timer,    start_addr: g6lc_soc::TimerBase,    end_addr: g6lc_soc::TimerBase + g6lc_soc::TimerLength       },
+      '{ idx: g6lc_soc::SPI,      start_addr: g6lc_soc::SPIBase,      end_addr: g6lc_soc::SPIBase + g6lc_soc::SPILength           },
+      '{ idx: g6lc_soc::Ethernet, start_addr: g6lc_soc::EthernetBase, end_addr: g6lc_soc::EthernetBase + g6lc_soc::EthernetLength },
+      '{ idx: g6lc_soc::GPIO,     start_addr: g6lc_soc::GPIOBase,     end_addr: g6lc_soc::GPIOBase + g6lc_soc::GPIOLength         },
+      '{ idx: STORAMIC_IDX,       start_addr: g6lc_soc::StoramicBase, end_addr: g6lc_soc::StoramicBase + g6lc_soc::StoramicLength },
+      '{ idx: g6lc_soc::DRAM,     start_addr: g6lc_soc::DRAMBase,     end_addr: g6lc_soc::DRAMBase + g6lc_soc::DRAMLength         }
+    };
+  end else begin : gen_no_storamic_map_noapu
+    assign addr_map = '{
+      '{ idx: g6lc_soc::Debug,    start_addr: g6lc_soc::DebugBase,    end_addr: g6lc_soc::DebugBase + g6lc_soc::DebugLength       },
+      '{ idx: g6lc_soc::ROM,      start_addr: g6lc_soc::ROMBase,      end_addr: g6lc_soc::ROMBase + g6lc_soc::ROMLength           },
+      '{ idx: g6lc_soc::CLINT,    start_addr: g6lc_soc::CLINTBase,    end_addr: g6lc_soc::CLINTBase + g6lc_soc::CLINTLength       },
+      '{ idx: g6lc_soc::PLIC,     start_addr: g6lc_soc::PLICBase,     end_addr: g6lc_soc::PLICBase + g6lc_soc::PLICLength         },
+      '{ idx: g6lc_soc::UART,     start_addr: g6lc_soc::UARTBase,     end_addr: g6lc_soc::UARTBase + g6lc_soc::UARTLength         },
+      '{ idx: g6lc_soc::Timer,    start_addr: g6lc_soc::TimerBase,    end_addr: g6lc_soc::TimerBase + g6lc_soc::TimerLength       },
+      '{ idx: g6lc_soc::SPI,      start_addr: g6lc_soc::SPIBase,      end_addr: g6lc_soc::SPIBase + g6lc_soc::SPILength           },
+      '{ idx: g6lc_soc::Ethernet, start_addr: g6lc_soc::EthernetBase, end_addr: g6lc_soc::EthernetBase + g6lc_soc::EthernetLength },
+      '{ idx: g6lc_soc::GPIO,     start_addr: g6lc_soc::GPIOBase,     end_addr: g6lc_soc::GPIOBase + g6lc_soc::GPIOLength         },
+      '{ idx: g6lc_soc::DRAM,     start_addr: g6lc_soc::DRAMBase,     end_addr: g6lc_soc::DRAMBase + g6lc_soc::DRAMLength         }
+    };
+  end
 `endif
 
   // Multi-core + L2 miss-fill needs multi-outstanding on the xbar demux.
@@ -1353,8 +1845,10 @@ module g6lc_testharness #(
     .ethernet  ( master[g6lc_soc::Ethernet] ),
     .timer     ( master[g6lc_soc::Timer]    ),
     .irq_o     ( irqs                         ),
-    .ai_irq_i  ( ai_irq                       ),
-    .apu_irq_i ( apu_irq                      ),
+    .ai_irq_i           ( ai_irq               ),
+    .apu_irq_i          ( apu_irq              ),
+    .storamic_irq_i     ( storamic_irq         ),
+    .storamic_vio_irq_i ( storamic_virtio_irq  ),
     .rx_i      ( rx                           ),
     .tx_o      ( tx                           ),
     .eth_txck  ( ),
@@ -1481,11 +1975,52 @@ module g6lc_testharness #(
     .ai_dma_inval_done_o    ( ai_dma_inval_done     ),
     .ai_isl_retired_ticket_i( ai_isl_retired_ticket ),
     .ai_isl_last_ticket_i   ( ai_isl_last_ticket    ),
-    .ai_isl_last_status_i   ( ai_isl_last_status    )
+    .ai_isl_last_status_i   ( ai_isl_last_status    ),
+    .storamic_dma_inval_valid_i ( storamic_inval_valid ),
+    .storamic_dma_inval_addr_i  ( storamic_inval_addr  ),
+    .storamic_dma_inval_ready_o ( storamic_inval_ready ),
+    .storamic_dma_inval_done_o  ( storamic_inval_done  ),
+    .storamic_pause_i       ( ckpt_core_pause       ),
+    .storamic_drained_o     ( ckpt_core_drained     )
   );
 
+`ifdef G6LC_STORAMIC_CKPT
+  // pragma translate_off
+  assign ckpt_llc_inval_done = i_cluster.llc_inval_done;
+  assign ckpt_llc_idle       = i_cluster.hub_all_idle && i_cluster.l2_all_idle && i_cluster.l3_all_idle;
+  if (G6LCCfg.L2En) begin : gen_ckpt_l2_hit
+    assign ckpt_l2_hit = i_cluster.gen_l2.i_l2.l2_hit_o;
+  end else begin : gen_ckpt_no_l2_hit
+    assign ckpt_l2_hit = 1'b0;
+  end
+  assign ckpt_l3_hit = mc_l3_hit;
+  // pragma translate_on
+  g6lc_axi::req_t    ckpt_cpu_req;
+  g6lc_axi::resp_t   ckpt_cpu_resp;
+  logic              ckpt_gate_close, ckpt_cpu_closed;
+  g6lc_storamic_cpu_pause i_ckpt_cpu_pause (
+    .clk_i, .rst_ni(ndmreset_n),
+    .pause_req_i(ckpt_pause_req), .paused_o(ckpt_cpu_paused),
+    .error_o(ckpt_cpu_err),
+    .core_pause_o(ckpt_core_pause), .core_drained_i(ckpt_core_drained),
+    .gate_close_o(ckpt_gate_close), .gate_closed_i(ckpt_cpu_closed),
+    .gate_inflight_i(ckpt_cpu_inflight)
+  );
+  g6lc_storamic_axi_gate #(
+    .req_t(g6lc_axi::req_t), .resp_t(g6lc_axi::resp_t)
+  ) i_ckpt_cpu_gate (
+    .clk_i, .rst_ni(ndmreset_n),
+    .close_i(ckpt_gate_close), .closed_o(ckpt_cpu_closed),
+    .inflight_o(ckpt_cpu_inflight),
+    .up_req_i(axi_g6lc_req), .up_resp_o(axi_g6lc_resp),
+    .dn_req_o(ckpt_cpu_req), .dn_resp_i(ckpt_cpu_resp)
+  );
+  `AXI_ASSIGN_FROM_REQ(slave[0], ckpt_cpu_req)
+  `AXI_ASSIGN_TO_RESP(ckpt_cpu_resp, slave[0])
+`else
   `AXI_ASSIGN_FROM_REQ(slave[0], axi_g6lc_req)
   `AXI_ASSIGN_TO_RESP(axi_g6lc_resp, slave[0])
+`endif
 
   //pragma translate_off
   // M3 bring-up probe (+soc_trace): hart AR/R at the xbar slave port and the

@@ -37,6 +37,9 @@ module g6lc_peripherals #(
     // LibreCore APU guest virtio IRQ → PLIC source 9 / irq_sources[8]
     // (tie 0 until testharness instantiates g6lc_apu_th)
     input  logic       apu_irq_i       ,
+    // Storamic control IRQ -> PLIC source 10 / irq_sources[9], VirtIO-blk -> source 11 / [10]
+    input  logic       storamic_irq_i  ,
+    input  logic       storamic_vio_irq_i,
     // UART
     input  logic       rx_i            ,
     output logic       tx_o            ,
@@ -68,8 +71,10 @@ module g6lc_peripherals #(
     // Source 8: Xg6lcai island. Source 9: APU guest virtio. Rest unused.
     assign irq_sources[7] = ai_irq_i;
     assign irq_sources[8] = apu_irq_i;
-    if (g6lc_soc::NumSources > 9)
-      assign irq_sources[g6lc_soc::NumSources-1:9] = '0;
+    assign irq_sources[9] = storamic_irq_i;
+    assign irq_sources[10] = storamic_vio_irq_i;
+    if (g6lc_soc::NumSources > 11)
+      assign irq_sources[g6lc_soc::NumSources-1:11] = '0;
 
     REG_BUS #(
         .ADDR_WIDTH ( 32 ),
