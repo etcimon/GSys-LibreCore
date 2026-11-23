@@ -102,6 +102,10 @@ module controller
     // while commit stays halted, so the frontend refetches the commit head.
     input logic resync_storamic_flush_i,
     input logic resync_storamic_squash_i,
+    // W2 empty-scoreboard resync (WFI or SMT drain-quiesce): flushes IF/ID/EX
+    // and I-cache without set_pc_commit_o (frontend npc_q already holds the
+    // restart PC). Inert when 0.
+    input logic resync_storamic_nopc_i,
     // Single-cycle acknowledge of the requested D$ flush (flush_dcache_ack_i
     // qualified by the request level).
     output logic resync_storamic_dack_o
@@ -373,8 +377,8 @@ module controller
     if (resync_storamic_flush_i) begin
       flush_dcache = 1'b1;
     end
-    if (resync_storamic_squash_i) begin
-      set_pc_commit_o        = 1'b1;
+    if (resync_storamic_squash_i || resync_storamic_nopc_i) begin
+      if (resync_storamic_squash_i) set_pc_commit_o = 1'b1;
       flush_if_o             = 1'b1;
       flush_unissued_instr_o = 1'b1;
       flush_id_o             = 1'b1;

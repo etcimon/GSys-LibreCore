@@ -55,7 +55,7 @@ module tb_g6lc_ctrl;
     .replay_i(1'b0), .mem_replay_pc_o(), .flush_acc_i(flush_acc),
     .smt_switch_i(sw), .drain_force_i(1'b0),
     .resync_storamic_flush_i(1'b0), .resync_storamic_squash_i(1'b0),
-    .resync_storamic_dack_o()
+    .resync_storamic_nopc_i(1'b0), .resync_storamic_dack_o()
   );
 
   controller #(.CVA6Cfg(cfg(1)), .bp_resolve_t(bp_resolve_t)) drained (
@@ -74,7 +74,7 @@ module tb_g6lc_ctrl;
     .replay_i(1'b0), .mem_replay_pc_o(), .flush_acc_i(flush_acc),
     .smt_switch_i(sw), .drain_force_i(1'b0),
     .resync_storamic_flush_i(1'b0), .resync_storamic_squash_i(1'b0),
-    .resync_storamic_dack_o()
+    .resync_storamic_nopc_i(1'b0), .resync_storamic_dack_o()
   );
 
   // flush_ctrl is purely combinational; a short settle is enough.

@@ -390,6 +390,10 @@ package build_config_pkg;
       cfg.NrCores = config_pkg::CVA6_MAX_CORES;
     else
       cfg.NrCores = CVA6Cfg.NrCores;
+`ifdef G6LC_STORAMIC_MC2
+    // Storamic W2 qualification overlay: 2-core in-order WT cluster + L2.
+    cfg.NrCores = unsigned'(2);
+`endif
     // An out-of-order multi-core cluster always runs the OoO coherence
     // protocol: the package value is overridden whenever the hub exists
     // (NrCores > 1) behind OoO cores with the WT L1 the protocol is defined
@@ -487,6 +491,8 @@ package build_config_pkg;
 `elsif G6LC_STORAMIC_L2
     // Storamic W1 qualification overlay: single-core L2 (flop tags, posted
     // writes, write-update, L2 prefetcher, CMO).
+    cfg.L2En = 1'b1;
+`elsif G6LC_STORAMIC_MC2
     cfg.L2En = 1'b1;
 `endif
     // --- Shared L2/L3 geometry inference (0 = auto from NrCores) -------------
@@ -592,6 +598,14 @@ package build_config_pkg;
     cfg.L2PostedWriteEn = 1'b1;
     cfg.L2PrefetchEn    = 1'b1;
     cfg.L2PfStrideEn    = 1'b1;
+`elsif G6LC_STORAMIC_MC2
+    cfg.WtAxiAllocEn    = 1'b1;
+    cfg.L2RoundRobinEn  = 1'b1;
+    cfg.L2WriteUpdateEn = 1'b1;
+    cfg.L2CmoEn         = 1'b1;
+    cfg.L2PostedWriteEn = 1'b1;
+    cfg.SnoopFilterEn   = 1'b1;
+    cfg.CohPolicy       = config_pkg::COH_FILTERED;
 `endif
     // Multi-core snoop-filter / prefetch defaults when left zero
     if (cfg.NrCores > 1 && CVA6Cfg.SnoopFilterEn && CVA6Cfg.SnoopFilterEntries == 0)

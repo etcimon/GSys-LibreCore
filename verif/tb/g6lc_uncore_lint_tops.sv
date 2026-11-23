@@ -101,7 +101,9 @@ module g6lc_coherence_hub_lint_top
       .hub_aw_sc_collide_o (),
       .hub_ar_wr_hold_o    (),
       .hub_aw_hold_slot_o  (),
-      .hub_aw_hold_other_o ()
+      .hub_aw_hold_other_o (),
+      .hub_block_slv_i     (1'b0),
+      .hub_idle_o          ()
   );
 endmodule
 

@@ -82,7 +82,7 @@ module tb_g6lc_stq_flush_ptr;
     .valid_i(valid), .valid_without_flush_i(valid),
     .paddr_i(paddr), .trans_id_i(tid), .st_hart_i('0), .rvfi_mem_paddr_o(rvfi_paddr),
     .data_i(data), .be_i('1), .data_size_i(2'b11), .cbo_op_i(cbo_t'(ariane_pkg::CBO_NONE)),
-    .req_port_i(req_in), .req_port_o(req_out));
+    .req_port_i(req_in), .req_port_o(req_out), .storamic_resync_i(1'b0));
 
   // DUT state sampled once after every clock and checked from these copies.
   // (Verilator 5.020 --timing evaluated the commit-queue pop with a stale

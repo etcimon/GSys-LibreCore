@@ -2269,7 +2269,7 @@ module ariane_testharness #(
 `ifdef G6LC_STORAMIC_CKPT
   // pragma translate_off
   assign ckpt_llc_inval_done = i_cluster.llc_inval_done;
-  assign ckpt_llc_idle       = i_cluster.l2_all_idle && i_cluster.l3_all_idle;
+  assign ckpt_llc_idle       = i_cluster.hub_all_idle && i_cluster.l2_all_idle && i_cluster.l3_all_idle;
   if (CVA6Cfg.L2En) begin : gen_ckpt_l2_hit
     assign ckpt_l2_hit = i_cluster.gen_l2.i_l2.l2_hit_o;
   end else begin : gen_ckpt_no_l2_hit

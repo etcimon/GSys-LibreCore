@@ -6809,6 +6809,7 @@ module tb_g6lc_hyp8_ctrl;
 `ifdef G6LC_CTRL_STORAMIC_PORTS
       .resync_storamic_flush_i(1'b0),
       .resync_storamic_squash_i(1'b0),
+      .resync_storamic_nopc_i (1'b0),
       .resync_storamic_dack_o (),
 `endif
       .pc_commit_i         ('0),

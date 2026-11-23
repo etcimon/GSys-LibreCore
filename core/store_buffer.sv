@@ -99,7 +99,11 @@ module store_buffer
 
     // D$ interface
     input  dcache_req_o_t req_port_i,
-    output dcache_req_i_t req_port_o
+    output dcache_req_i_t req_port_o,
+    // Storamic W2 resync: evict every speculative store (including
+    // LEGACY_SMT_KEEP fwd_keep entries) when RAM may have been replaced.
+    // Tie 0 in non-Storamic builds.
+    input  logic          storamic_resync_i
 );
 
   // FSE S1: speculative/commit queue depths.
@@ -367,7 +371,11 @@ module store_buffer
       cancel_hit[i] = spec_valid_q[i] && cancelled_mask_i[speculative_queue_q[i].trans_id];
     lgcy_flush_keep = flush_i && LEGACY_SMT_KEEP;
     for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
-      if (LEGACY_SMT_KEEP) begin
+      if (storamic_resync_i) begin
+        // Storamic C5/W2 resync: RAM may have been replaced and the whole
+        // pipeline is being squashed; no speculative or fwd_keep entry may survive.
+        spec_remove[i] = spec_valid_q[i];
+      end else if (LEGACY_SMT_KEEP) begin
 `ifdef G6LC_FETCH_B
         // I13 (B): on flush or cancel keep fwd_keep and the not-cancelled
         spec_remove[i] = spec_valid_q[i] && cancel_hit[i] && !speculative_queue_q[i].fwd_keep;
@@ -440,8 +448,8 @@ module store_buffer
           end
         end
       end
-      // a flush (non-legacy) in the arrival's cycle evicts it as well
-      if (flush_i && !LEGACY_SMT_KEEP) begin
+      // a flush (non-legacy) or Storamic resync in the arrival's cycle evicts it as well
+      if ((flush_i && !LEGACY_SMT_KEEP) || storamic_resync_i) begin
         for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
           if (spec_ins_oh[i]) begin
             speculative_queue_n[i].valid = 1'b0;
@@ -1090,6 +1098,12 @@ module store_buffer
   assert property (@(posedge clk_i) disable iff (!rst_ni) (flush_i && !LEGACY_SMT_KEEP) |=>
       speculative_status_cnt_q == 0)
   else $error("[Speculative Queue] speculative stores survived a full flush");
+
+  // Storamic C5/W2 resync leaves no speculative store even under LEGACY_SMT_KEEP.
+  resync_empties_speculative :
+  assert property (@(posedge clk_i) disable iff (!rst_ni) (flush_i && storamic_resync_i) |=>
+      speculative_status_cnt_q == 0)
+  else $error("[Speculative Queue] speculative stores survived a Storamic resync");
 
   speculative_buffer_overflow :
   assert property (@(posedge clk_i) rst_ni && (speculative_status_cnt_q == $bits(speculative_status_cnt_q)'(DEPTH_SPEC)) |-> !valid_i)

@@ -97,33 +97,35 @@ module g6lc_cluster
   // Effective inclusion policy: TB override parameter OR package bit. The
   // testbench keeps INCLUSIVE_L3=0 so production packages own the policy.
   localparam bit INCL = INCLUSIVE_L3 || CVA6Cfg.L3InclusiveEn;
-  // C4/C5/W1 storamic pause/drain and LLC resync provider: scalar, core-0
-  // only, single-core and origin-profile gated. NR_CORES>1 or unsupported =>
-  // fully inert. When L2/L3 is present (HAS_LLC), pause also quiesces L2/L3
-  // prefetchers, blocks new L2 slave AR/AW once core 0 is drained so in-flight
-  // LLC work drains monotonically, and runs a whole-cache set-invalidation
-  // walk on release while keeping core 0 paused.
+  // C4/C5/W1/W2 storamic pause/drain and LLC resync provider: origin-profile
+  // gated across all NC cores. Unsupported => fully inert. Once all cores
+  // drain, new hub/L2 slave AR/AW acceptance is blocked so in-flight hub and
+  // LLC work drains monotonically; on release, L2 and L3 walk all sets in
+  // parallel while holding all cores paused before every core runs C5 L1 resync.
   localparam bit HAS_LLC = L2_ENABLE || CVA6Cfg.L2En;
-  localparam bit STO_PAUSE_EN = (NC == 1) && config_pkg::g6lc_storamic_origin_supported(CVA6Cfg);
+  localparam bit STO_PAUSE_EN = config_pkg::g6lc_storamic_origin_supported(CVA6Cfg);
   logic cluster_sto_pause;
   logic [NC-1:0] core_sto_drained_w;
-  logic l2_all_idle, l3_all_idle;
+  logic all_cores_drained;
+  logic hub_all_idle, l2_all_idle, l3_all_idle;
   logic l2_inval_all_done, l3_inval_all_done;
   logic incl_inv_busy;
   logic llc_armed_q, llc_inval_q;
-  logic llc_inval_done, llc_release_pend, core0_sto_pause;
-  logic llc_quiesce, l2_block_slv;
+  logic llc_inval_done, llc_release_pend, core_sto_pause;
+  logic llc_quiesce, l2_block_slv, hub_block_slv;
 
   assign cluster_sto_pause = STO_PAUSE_EN ? storamic_pause_i : 1'b0;
+  assign all_cores_drained = &core_sto_drained_w;
 
   if (STO_PAUSE_EN && HAS_LLC) begin : gen_sto_llc_resync
     assign llc_inval_done   = llc_inval_q && l2_inval_all_done && l3_inval_all_done;
     assign llc_release_pend = llc_inval_q || (llc_armed_q && !cluster_sto_pause);
-    assign core0_sto_pause  = cluster_sto_pause || llc_inval_q || llc_armed_q;
-    assign llc_quiesce      = core0_sto_pause;
-    assign l2_block_slv     = (cluster_sto_pause && core_sto_drained_w[0]) || llc_release_pend;
+    assign core_sto_pause   = cluster_sto_pause || llc_inval_q || llc_armed_q;
+    assign llc_quiesce      = core_sto_pause;
+    assign l2_block_slv     = (cluster_sto_pause && all_cores_drained) || llc_release_pend;
+    assign hub_block_slv    = l2_block_slv;
     assign storamic_drained_o =
-        core_sto_drained_w[0] && l2_all_idle && l3_all_idle &&
+        all_cores_drained && hub_all_idle && l2_all_idle && l3_all_idle &&
         !incl_inv_busy && !llc_release_pend;
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -150,10 +152,11 @@ module g6lc_cluster
     assign llc_inval_q        = 1'b0;
     assign llc_inval_done     = 1'b0;
     assign llc_release_pend   = 1'b0;
-    assign core0_sto_pause    = cluster_sto_pause;
+    assign core_sto_pause     = cluster_sto_pause;
     assign llc_quiesce        = 1'b0;
     assign l2_block_slv       = 1'b0;
-    assign storamic_drained_o = STO_PAUSE_EN ? core_sto_drained_w[0] : 1'b0;
+    assign hub_block_slv      = STO_PAUSE_EN && cluster_sto_pause && all_cores_drained;
+    assign storamic_drained_o = STO_PAUSE_EN ? (all_cores_drained && hub_all_idle) : 1'b0;
   end
   localparam int unsigned LINE_B =
       (CVA6Cfg.DCACHE_LINE_WIDTH != 0) ? CVA6Cfg.DCACHE_LINE_WIDTH / 8
@@ -454,7 +457,7 @@ module g6lc_cluster
         .ai_isl_retired_ticket_i(ai_isl_retired_ticket_i),
         .ai_isl_last_ticket_i   (ai_isl_last_ticket_i),
         .ai_isl_last_status_i   (ai_isl_last_status_i),
-        .storamic_pause_i       ((c == 0) ? core0_sto_pause : 1'b0),
+        .storamic_pause_i       (core_sto_pause),
         .storamic_drained_o     (core_sto_drained_w[c])
     );
 
@@ -560,6 +563,7 @@ module g6lc_cluster
     assign inv_hub       = '{default: '0};
     assign coh_sf_filt_w  = 1'b0;
     assign coh_sf_bcast_w = 1'b0;
+    assign hub_all_idle   = 1'b1;
   end else begin : gen_hub
     g6lc_coherence_hub #(
         .NR_CORES             (NC),
@@ -605,7 +609,9 @@ module g6lc_cluster
         .hub_aw_sc_collide_o (),
         .hub_ar_wr_hold_o     (),
         .hub_aw_hold_slot_o   (),
-        .hub_aw_hold_other_o  ()
+        .hub_aw_hold_other_o  (),
+        .hub_block_slv_i      (hub_block_slv),
+        .hub_idle_o           (hub_all_idle)
     );
   end
 

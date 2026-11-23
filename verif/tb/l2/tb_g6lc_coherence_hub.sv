@@ -66,7 +66,8 @@ module tb_g6lc_coherence_hub;
     .coh_arb_starve_o(arb_starve),
     .coh_split_conflict_o(), .coh_sc_noresv_o(), .coh_lr_kill_o(),
     .hub_aw_sc_collide_o(),.hub_ar_wr_hold_o(),
-    .hub_aw_hold_slot_o(),.hub_aw_hold_other_o()
+    .hub_aw_hold_slot_o(),.hub_aw_hold_other_o(),
+    .hub_block_slv_i(1'b0),.hub_idle_o()
   );
 
   function automatic ar_chan_t ar(input addr_t address, input id_t id);
@@ -1629,7 +1630,7 @@ module tb_g6lc_coherence_l2;
       .mem_req_o(hub_req),.mem_resp_i(hub_rsp),.inv_core_o(invalidations),
       .inv_core_ready_i(inv_ready),.lr_valid_i(1'b0),.lr_addr_i('0),.lr_core_i('0),
       .coh_inv_fire_o(),.coh_sf_hit_o(),.coh_sf_overapprox_o(),.coh_arb_starve_o(),
-      .coh_split_conflict_o(),.coh_sc_noresv_o(),.coh_lr_kill_o(),.hub_aw_sc_collide_o(),.hub_ar_wr_hold_o(),.hub_aw_hold_slot_o(),.hub_aw_hold_other_o());
+      .coh_split_conflict_o(),.coh_sc_noresv_o(),.coh_lr_kill_o(),.hub_aw_sc_collide_o(),.hub_ar_wr_hold_o(),.hub_aw_hold_slot_o(),.hub_aw_hold_other_o(),.hub_block_slv_i(1'b0),.hub_idle_o());
   // dram_req/dram_rsp stay the DRAM edge; l2m_* is the L2 master side.
   req_t l2m_req;
   resp_t l2m_rsp;
@@ -2386,7 +2387,7 @@ module tb_g6lc_coherence_credits;
       .mem_req_o(hub_req),.mem_resp_i(hub_rsp),.inv_core_o(invalidations),
       .inv_core_ready_i(inv_ready),.lr_valid_i(1'b0),.lr_addr_i('0),.lr_core_i('0),
       .coh_inv_fire_o(),.coh_sf_hit_o(),.coh_sf_overapprox_o(),.coh_arb_starve_o(),
-      .coh_split_conflict_o(),.coh_sc_noresv_o(),.coh_lr_kill_o(),.hub_aw_sc_collide_o(),.hub_ar_wr_hold_o(),.hub_aw_hold_slot_o(),.hub_aw_hold_other_o());
+      .coh_split_conflict_o(),.coh_sc_noresv_o(),.coh_lr_kill_o(),.hub_aw_sc_collide_o(),.hub_ar_wr_hold_o(),.hub_aw_hold_slot_o(),.hub_aw_hold_other_o(),.hub_block_slv_i(1'b0),.hub_idle_o());
   // dram_req/dram_rsp stay the DRAM edge; l2m_* is the L2 master side.
   req_t l2m_req;
   resp_t l2m_rsp;

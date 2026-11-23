@@ -102,6 +102,8 @@ module store_unit
     // T6b: querying load's hart — speculative forwarding is same-hart only
     // under OoO multi-hart. Constant-0 otherwise.
     input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] load_hart_i,
+    // Storamic W2 resync: passed to store_buffer to evict retained fwd_keep entries.
+    input logic storamic_resync_i,
     // R3a cont.13: D$ wbuffer empty for STQ page-offset sticky release
     input logic dcache_wbuffer_empty_i,
     // Address check result - load_unit
@@ -552,7 +554,8 @@ module store_unit
       .be_i                 (st_be_q),
       .data_size_i          (st_data_size_q),
       .req_port_i           (req_port_i),
-      .req_port_o           (req_port_o)
+      .req_port_o           (req_port_o),
+      .storamic_resync_i    (storamic_resync_i)
   );
 
   if (CVA6Cfg.RVA) begin

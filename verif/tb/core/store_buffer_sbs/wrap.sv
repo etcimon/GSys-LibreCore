@@ -107,7 +107,7 @@ module sb_wrap_new
     output dcache_req_i_t req_port_o
 );
   logic [CVA6Cfg.PLEN-1:0] paddr_raw;
-  store_buffer #(.CVA6Cfg(CVA6Cfg), .dcache_req_i_t(dcache_req_i_t), .dcache_req_o_t(dcache_req_o_t), .cbo_t(cbo_t)) u (.rvfi_mem_paddr_o(paddr_raw), .*);
+  store_buffer #(.CVA6Cfg(CVA6Cfg), .dcache_req_i_t(dcache_req_i_t), .dcache_req_o_t(dcache_req_o_t), .cbo_t(cbo_t)) u (.rvfi_mem_paddr_o(paddr_raw), .storamic_resync_i(1'b0), .*);
   // the head slot's address is don't-care while the speculative queue is
   // empty (stale data of an invalid slot); compare it only when live
   assign rvfi_mem_paddr_o = (u.speculative_status_cnt_q != '0) ? paddr_raw : '0;

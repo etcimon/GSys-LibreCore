@@ -72,7 +72,8 @@ module tb_g6lc_sf_precision;
     .lr_valid_i(1'b0), .lr_addr_i('0), .lr_core_i('0),
     .coh_inv_fire_o(), .coh_sf_hit_o(sf_hit), .coh_sf_overapprox_o(sf_over),
     .coh_arb_starve_o(), .coh_split_conflict_o(), .coh_sc_noresv_o(), .coh_lr_kill_o(),
-    .hub_aw_sc_collide_o(), .hub_ar_wr_hold_o(), .hub_aw_hold_slot_o(), .hub_aw_hold_other_o()
+    .hub_aw_sc_collide_o(), .hub_ar_wr_hold_o(), .hub_aw_hold_slot_o(), .hub_aw_hold_other_o(),
+    .hub_block_slv_i(1'b0), .hub_idle_o()
   );
 
   // ---- deterministic PRNG ---------------------------------------------------

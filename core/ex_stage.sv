@@ -136,6 +136,8 @@ module ex_stage
     // N1d: the commit head is an unpublished load — speculative-store
     // stalls are futile while it pends (see store_buffer).
     input logic head_phys_pending_i,
+    // Storamic W2 resync: passed to LSU/store_buffer.
+    input logic storamic_resync_i,
     // TO_BE_COMPLETED - ACC_DISPATCHER
     input logic stall_st_pending_i,
     // TO_BE_COMPLETED - COMMIT_STAGE
@@ -754,6 +756,7 @@ module ex_stage
       .vs_sum_i,
       .mxr_i,
       .vmxr_i,
+      .storamic_resync_i,
       .satp_ppn_i,
       .vsatp_ppn_i,
       .hgatp_ppn_i,

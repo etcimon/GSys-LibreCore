@@ -84,7 +84,7 @@ module tb_g6lc_stq_commit_flush;
     .paddr_i(paddr), .trans_id_i(tid), .st_hart_i('0), .data_prot_i('0),
     .rvfi_mem_paddr_o(rvfi_paddr), .data_i(data), .be_i('1), .data_size_i(2'b11),
     .cbo_op_i(cbo_t'(ariane_pkg::CBO_NONE)),
-    .req_port_i(req_in), .req_port_o(req_out));
+    .req_port_i(req_in), .req_port_o(req_out), .storamic_resync_i(1'b0));
 
   // DUT state and request fields sampled once after every settled edge.
   logic [2:0] spec_cnt_s, commit_cnt_s;

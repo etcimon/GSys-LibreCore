@@ -126,7 +126,7 @@ module tb_g6lc_review_fp_lifetime;
     .halt_frontend_o(),.halt_o(),.eret_i(1'b0),.ex_valid_i(ex_event),.set_debug_pc_i(1'b0),
     .resolved_branch_i(branch),.flush_csr_i(1'b0),.fence_i_i(1'b0),.fence_i(1'b0),
     .sfence_vma_i(1'b0),.hfence_vvma_i(1'b0),.hfence_gvma_i(1'b0),.flush_commit_i(1'b0),
-    .replay_i(1'b0),.mem_replay_pc_o(),.flush_acc_i(1'b0),.smt_switch_i(1'b0),.drain_force_i(1'b0),.resync_storamic_flush_i(1'b0),.resync_storamic_squash_i(1'b0),.resync_storamic_dack_o());
+    .replay_i(1'b0),.mem_replay_pc_o(),.flush_acc_i(1'b0),.smt_switch_i(1'b0),.drain_force_i(1'b0),.resync_storamic_flush_i(1'b0),.resync_storamic_squash_i(1'b0),.resync_storamic_nopc_i(1'b0),.resync_storamic_dack_o());
   fpu_wrap #(.CVA6Cfg(C),.exception_t(exception_t),.fu_data_t(fu_typed_t)) fpu(
     .clk_i(clk),.rst_ni(rst_n),.flush_i(flush_ex),.cancelled_mask_i(cancel),.fpu_valid_i(fp_in && !DIVIDER),.fpu_ready_o(fpu_ready),
     .fu_data_i(fp_data),.fpu_fmt_i(2'b01),.fpu_rm_i(3'b000),.fpu_frm_i(3'b000),.fpu_prec_i('0),
@@ -3559,7 +3559,7 @@ module tb_g6lc_review_store_recovery;
     .st_fwd_data_o(fwd_data),.st_fwd_be_o(fwd_be),.commit_i(commit),
     .commit_ready_o(commit_ready),.ready_o(ready),.valid_i(valid),.valid_without_flush_i(valid),
     .paddr_i(address),.trans_id_i(tid),.rvfi_mem_paddr_o(),.data_i(data),.be_i(8'hff),
-    .data_size_i(2'b11),.cbo_op_i(CBO_NONE),.req_port_i(rsp),.req_port_o(req));
+    .data_size_i(2'b11),.cbo_op_i(CBO_NONE),.req_port_i(rsp),.req_port_o(req),.storamic_resync_i(1'b0));
   task automatic drive;@(negedge clk);endtask
   initial begin
     scenario=0;negative=$test$plusargs("oracle_negative");
@@ -3721,7 +3721,7 @@ module tb_g6lc_review_wfi;
     .halt_acc_i(1'b0),.halt_storamic_i(1'b0),.halt_frontend_o(),.halt_o(),.eret_i(1'b0),.ex_valid_i(1'b0),
     .set_debug_pc_i(1'b0),.resolved_branch_i('0),.flush_csr_i(1'b0),.fence_i_i(1'b0),
     .fence_i(1'b0),.sfence_vma_i(1'b0),.hfence_vvma_i(1'b0),.hfence_gvma_i(1'b0),
-    .flush_commit_i(flush_commit),.replay_i(1'b0),.mem_replay_pc_o(),.flush_acc_i(1'b0),.smt_switch_i(1'b0),.drain_force_i(1'b0),.resync_storamic_flush_i(1'b0),.resync_storamic_squash_i(1'b0),.resync_storamic_dack_o());
+    .flush_commit_i(flush_commit),.replay_i(1'b0),.mem_replay_pc_o(),.flush_acc_i(1'b0),.smt_switch_i(1'b0),.drain_force_i(1'b0),.resync_storamic_flush_i(1'b0),.resync_storamic_squash_i(1'b0),.resync_storamic_nopc_i(1'b0),.resync_storamic_dack_o());
   initial begin
     scenario=0;negative=$test$plusargs("oracle_negative");
     void'($value$plusargs("scenario=%d",scenario));

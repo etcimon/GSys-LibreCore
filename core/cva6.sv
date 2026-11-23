@@ -935,8 +935,10 @@ module cva6
   logic hfence_vvma_commit_controller;
   logic hfence_gvma_commit_controller;
   logic halt_ctrl;
-  // Storamic C5 resync (driven by the resync FSM near the controller).
-  logic resync_flush_i, resync_squash, resync_dack, resync_held;
+  // Storamic C5/W2 resync (driven by the resync FSM near the controller).
+  logic resync_flush_i, resync_squash, resync_squash_nopc, resync_done;
+  logic resync_dack, resync_held;
+  logic storamic_pause_gated, storamic_halt_q;
   logic halt_frontend;
   // C4 storamic pause/drain provider: gated pause into the controller halt and
   // the registered drain acknowledgement. Inert unless the bounded origin
@@ -1940,7 +1942,8 @@ module cva6
   assign smt_drain_safe = no_st_pending_commit &&
       sb_head_valid[smt_active_hart] &&
       !(lsu_commit_commit_ex && !lsu_commit_ready_ex_commit) &&
-      !(CVA6Cfg.DebugEn && set_debug_pc);
+      !(CVA6Cfg.DebugEn && set_debug_pc) &&
+      !(storamic_pause_gated || storamic_halt_q || resync_held);
 
   g6lc_thread_select #(
       .CVA6Cfg(CVA6Cfg)
@@ -1950,7 +1953,8 @@ module cva6
       .fetch_fire_i        (smt_fetch_fire),
       .issue_fire_i        (smt_issue_fire),
       .flush_i             (flush_ctrl_if),
-      .hold_i              (smt_switch_hold),
+      .hold_i              (smt_switch_hold || storamic_pause_gated ||
+                            storamic_halt_q || resync_held),
       // T6b seam: with SmtDrainedHandoff=1 the selector may switch only on a
       // drained backend (today's coarse handoff). With 0 the switch becomes a
       // fetch-slot policy and hart-tagged ownership (LSQ/store buffer/IQ) keeps
@@ -3074,7 +3078,8 @@ module cva6
       .fet_pmpaddr_i           (fet_pmpaddr),
       //RVFI
       .rvfi_lsu_ctrl_o         (rvfi_lsu_ctrl),
-      .rvfi_mem_paddr_o        (rvfi_mem_paddr)
+      .rvfi_mem_paddr_o        (rvfi_mem_paddr),
+      .storamic_resync_i       (resync_done)
   );
 
   // ---------
@@ -3435,16 +3440,17 @@ module cva6
   // withdraw amo_req from a miss unit already in AMO_WAIT with the atomic on
   // the bus and orphan its acknowledgement. Once the halt is in effect a
   // later AMO at the head is never started, so the latch is safe to hold.
-  logic storamic_pause_gated, storamic_halt_q, storamic_amo_head;
-  // C5 resync-on-release FSM. Inert unless origin_supported: entry needs
+  logic storamic_amo_head;
+  // C5/W2 resync-on-release FSM. Inert unless origin_supported: entry needs
   // storamic_halt_q, which only sets under a gated pause. Three phases after
   // pause falls post-halt: FLUSH_D holds the D$ flush to ack, WAIT_HEAD waits
-  // for the (halt-frozen) commit head to be valid, then a single squash pulse
-  // issues the FENCE.I set so the frontend refetches the commit head. Commit
-  // stays halted throughout; drained_o is forced low so the sequencer cannot
-  // report Paused over an unfinished resync. Timing: resync_held/resync_flush_i/
-  // resync_squash are ORs/registered pulses into existing flush outputs; no new
-  // combinational cone from commit.
+  // for the (halt-frozen) commit head to be valid (or an empty scoreboard
+  // parked under WFI / SMT drain-quiesce), then a single squash pulse issues
+  // the FENCE.I set so the frontend refetches the commit head (or flushes I$
+  // in place without set_pc_commit when parked). Commit stays halted
+  // throughout; drained_o is forced low so the sequencer cannot report Paused
+  // over an unfinished resync. Timing: resync_held/resync_flush_i/resync_squash
+  // are ORs/registered pulses into existing flush outputs; no new comb cone.
   logic [1:0] storamic_resync_state_q;
   localparam logic [1:0] RESYNC_IDLE = 2'd0, RESYNC_FLUSH_D = 2'd1,
                         RESYNC_WAIT_HEAD = 2'd2;
@@ -3461,6 +3467,10 @@ module cva6
   assign resync_flush_i = (storamic_resync_state_q == RESYNC_FLUSH_D);
   assign resync_squash = (storamic_resync_state_q == RESYNC_WAIT_HEAD) &&
                          commit_instr_id_commit[0].valid;
+  assign resync_squash_nopc = (storamic_resync_state_q == RESYNC_WAIT_HEAD) &&
+                              !commit_instr_id_commit[0].valid &&
+                              (halt_csr_ctrl || smt_quiesce) && smt_sb_empty;
+  assign resync_done = resync_squash || resync_squash_nopc;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       storamic_pause_q         <= 1'b0;
@@ -3477,7 +3487,7 @@ module cva6
           if (resync_dack) storamic_resync_state_q <= RESYNC_WAIT_HEAD;
         end
         RESYNC_WAIT_HEAD: begin
-          if (commit_instr_id_commit[0].valid)
+          if (resync_done)
             storamic_resync_state_q <= RESYNC_IDLE;
         end
         default: storamic_resync_state_q <= RESYNC_IDLE;
@@ -3488,19 +3498,20 @@ module cva6
       // stays halted and a later release triggers a fresh resync.
       storamic_halt_q <= ((storamic_pause_gated || resync_held) &&
                           (storamic_halt_q || !storamic_amo_head)) &&
-                         !(resync_squash && !storamic_pause_gated);
+                         !(resync_done && !storamic_pause_gated);
       storamic_pause_q <= storamic_halt;
       // drained_o certifies the committed-store path is empty (no_st_pending_
       // commit = commit queue + D$ write buffer drained), no LSU operation is
       // stuck at the commit handshake (AMO/LR/SC "cannot cancel in flight",
       // the same term smt_drain_safe uses), no debug redirect owns the commit,
-      // and commit is actually halted. The AXI gate separately certifies the
-      // bus boundary, so any non-commit source (PTW/CMO/speculative) is still
-      // covered there.
+      // no SMT handoff is switching, and commit is actually halted. The AXI
+      // gate separately certifies the bus boundary, so any non-commit source
+      // (PTW/CMO/speculative) is still covered there.
       storamic_drained_o <= storamic_pause_q && halt_ctrl &&
                             no_st_pending_commit &&
                             !(lsu_commit_commit_ex && !lsu_commit_ready_ex_commit) &&
                             !(CVA6Cfg.DebugEn && set_debug_pc) &&
+                            !smt_switch &&
                             !resync_held;
     end
   end
@@ -3534,9 +3545,10 @@ module cva6
       .halt_o                (halt_ctrl),
       .smt_switch_i          (smt_switch),
       .drain_force_i         (smt_drain_force),
-      // C5 storamic resync-on-release
+      // C5/W2 storamic resync-on-release
       .resync_storamic_flush_i(resync_flush_i),
       .resync_storamic_squash_i(resync_squash),
+      .resync_storamic_nopc_i (resync_squash_nopc),
       .resync_storamic_dack_o (resync_dack),
       // control ports
       .eret_i                (eret),

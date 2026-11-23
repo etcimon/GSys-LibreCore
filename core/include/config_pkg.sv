@@ -1110,7 +1110,7 @@ package config_pkg;
   // Internal data-origin encoding. 000 is unknown/legacy, never M authority.
   function automatic bit g6lc_storamic_origin_supported(cva6_cfg_t Cfg);
     return Cfg.StoramicEn && Cfg.StoramicIoEn && Cfg.StoramicCheckpointEn &&
-        Cfg.NrHarts == 1 && Cfg.NrCores <= 1 &&
+        (Cfg.NrHarts == 1 || Cfg.SmtDrainedHandoff) &&
         !Cfg.OoOEn && !Cfg.RVH && Cfg.DCacheType == WT &&
         !Cfg.EnableAccelerator && Cfg.CoproType == COPRO_NONE &&
         !Cfg.AiCfg.MatrixEn && !Cfg.ServerPrefetchEn;

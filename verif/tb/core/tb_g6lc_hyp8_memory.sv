@@ -333,7 +333,7 @@ module tb_g6lc_hyp8_memory;
       .rvfi_mem_paddr_o(sb_rvfi_pa),
       .data_i(st_data), .be_i(st_be), .data_size_i(st_size),
       .cbo_op_i(st_cbo),
-      .req_port_i(sb_rpi), .req_port_o(sb_rpo));
+      .req_port_i(sb_rpi), .req_port_o(sb_rpo), .storamic_resync_i(1'b0));
 
   always @(posedge clk)
     if (rst_n && sb_commit)

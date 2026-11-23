@@ -138,7 +138,7 @@ module tb_g6lc_stq_cancel_ptw;
     .paddr_i(paddr), .ex_i(ex), .dtlb_hit_i(dtlb_hit),
     .page_offset_i('0), .load_paddr_i('0), .load_paddr_valid_i(1'b0),
     .load_trans_id_i('0), .commit_tran_id_i('0), .oldest_live_tid_i('0), .head_phys_pending_i(1'b0),
-    .load_hart_i('0), .dcache_wbuffer_empty_i(1'b1),
+    .load_hart_i('0), .storamic_resync_i(1'b0), .dcache_wbuffer_empty_i(1'b1),
     .page_offset_matches_o(po_match), .page_offset_spec_only_o(po_spec),
     .st_fwd_valid_o(fwd_valid), .st_fwd_data_o(fwd_data), .st_fwd_be_o(fwd_be),
     .amo_req_o(amo_req), .amo_resp_i(amo_resp), .req_port_i(req_in), .req_port_o(req_out));

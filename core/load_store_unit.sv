@@ -140,6 +140,8 @@ module load_store_unit
     input  logic                                      mxr_i,
     // Make Executable Readable Virtual Supervisor - CSR_REGFILE
     input  logic                                      vmxr_i,
+    // Storamic W2 resync: passed to store_unit/store_buffer.
+    input  logic                                      storamic_resync_i,
     // TO_BE_COMPLETED - TO_BE_COMPLETED
     input  logic             [      CVA6Cfg.PPNW-1:0] satp_ppn_i,
     // TO_BE_COMPLETED - TO_BE_COMPLETED
@@ -696,6 +698,7 @@ module load_store_unit
       .load_paddr_valid_i   (load_paddr_valid),
       .load_trans_id_i      (load_trans_id),
       .load_hart_i          (load_hart),
+      .storamic_resync_i,
       .commit_tran_id_i,
       .oldest_live_tid_i,
       .head_phys_pending_i,

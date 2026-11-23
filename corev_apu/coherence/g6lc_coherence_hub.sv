@@ -85,7 +85,11 @@ module g6lc_coherence_hub
     // signature gating, mem-side !aw_ready, or an RR loss. The same-line
     // collide above never gates aw_grant — it is observation only.
     output logic                       hub_aw_hold_slot_o,
-    output logic                       hub_aw_hold_other_o
+    output logic                       hub_aw_hold_other_o,
+    // Storamic W2 multi-core pause/drain: block new slave AR/AW acceptance
+    // once all cores are drained, and certify zero in-flight hub state.
+    input  logic                       hub_block_slv_i,
+    output logic                       hub_idle_o
 );
 
   localparam bit OOO_SF = (POLICY == COH_OOO) && SNOOP_FILTER_EN;
@@ -134,6 +138,9 @@ module g6lc_coherence_hub
     assign hub_ar_wr_hold_o     = 1'b0;
     assign hub_aw_hold_slot_o   = 1'b0;
     assign hub_aw_hold_other_o  = 1'b0;
+    assign hub_idle_o           = 1'b1;
+    logic _unused_hub_blk;
+    assign _unused_hub_blk = hub_block_slv_i;
   end else begin : gen_cluster
 
     // ================================================================
@@ -169,9 +176,9 @@ module g6lc_coherence_hub
     // write's data is in memory and its invalidation was applied everywhere.
     logic [NC-1:0] ar_wr_line_live;
     for (genvar c = 0; c < NC; c++) begin : gen_req
-      assign aw_req[c] = core_req_i[c].aw_valid;
-      assign ar_req[c] = core_req_i[c].ar_valid && !ar_same_id_live[c] &&
-                         !ar_wr_line_live[c];
+      assign aw_req[c] = !hub_block_slv_i && core_req_i[c].aw_valid;
+      assign ar_req[c] = !hub_block_slv_i && core_req_i[c].ar_valid &&
+                         !ar_same_id_live[c] && !ar_wr_line_live[c];
     end
 
     function automatic logic [CID_W-1:0] pick_rr(
@@ -1244,6 +1251,10 @@ module g6lc_coherence_hub
         .inv_enq_seq_o   (inv_enq_seq),
         .inv_deq_seq_o   (inv_deq_seq)
     );
+
+    assign hub_idle_o = (aw_ot_cnt_q == '0) && (ar_ot_cnt_q == '0) &&
+                        !w_busy_q && !aw_hold_q && !ar_hold_q &&
+                        !inv_pend_valid_q && (inv_enq_seq == inv_deq_seq);
 
     //pragma translate_off
     // N1d/T10g hub stall dump (+smt_stats): birth-stamp AR/AW slots; when a
