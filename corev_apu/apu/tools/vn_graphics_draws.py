@@ -40,6 +40,9 @@ class DrawPlan(Recording):
     discard: object
     cull: object
     front_face: object
+    depth_test: object
+    depth_write: object
+    depth_compare: object
     vertices: tuple
     indices: object
     references: tuple
@@ -51,7 +54,10 @@ class DrawPlan(Recording):
 _BOOL_ATTR = {'primitive_restart': 'restart',
               'rasterizer_discard': 'discard',
               'cull': 'cull',
-              'front_face': 'front_face'}
+              'front_face': 'front_face',
+              'depth_test': 'depth_test',
+              'depth_write': 'depth_write',
+              'depth_compare': 'depth_compare'}
 
 
 class GraphicsDraws:
@@ -68,6 +74,7 @@ class GraphicsDraws:
         self.bindings = GraphicsBindings(engine, context_id, recording)
         self.viewport = self.scissor = None
         self.restart = self.discard = self.cull = self.front_face = None
+        self.depth_test = self.depth_write = self.depth_compare = None
         self.vertices, self.index_source = {}, None
         self.pass_state = None
         self.subpass = 0
@@ -328,4 +335,5 @@ class GraphicsDraws:
                 self.subpass, framebuffer.attachments, framebuffer,
                 self.viewport, self.scissor, self.restart, self.discard,
                 self.cull, self.front_face,
+                self.depth_test, self.depth_write, self.depth_compare,
                 vertices, indices, references, validate))

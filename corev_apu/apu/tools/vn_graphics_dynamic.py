@@ -28,6 +28,9 @@ _SCALAR_DYNAMIC = {
     'vkCmdSetRasterizerDiscardEnable': ('rasterizer_discard', 0, 1),
     'vkCmdSetCullMode': ('cull', 0, 3),
     'vkCmdSetFrontFace': ('front_face', 0, 1),
+    'vkCmdSetDepthTestEnable': ('depth_test', 0, 1),
+    'vkCmdSetDepthWriteEnable': ('depth_write', 0, 1),
+    'vkCmdSetDepthCompareOp': ('depth_compare', 0, 7),
 }
 _BOOL_DYNAMIC = {n: k for n, (k, _lo, _hi) in _SCALAR_DYNAMIC.items()}
 

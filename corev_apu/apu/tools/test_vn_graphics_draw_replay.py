@@ -577,7 +577,8 @@ class DrawReplayTests(unittest.TestCase):
                 width=8, height=4, layers=1))
 
     def depth_pipeline(self, compare=1, write=1, blend=None, depth_test=1,
-                       bounds=None, bias=None, depth_clamp=0, stencil=None):
+                       bounds=None, bias=None, depth_clamp=0, stencil=None,
+                       dynamic=None):
         s = self.w.structure
         att = dict(blendEnable=0, srcColorBlendFactor=1,
                    dstColorBlendFactor=0, colorBlendOp=0,
@@ -662,7 +663,8 @@ class DrawReplayTests(unittest.TestCase):
                         'VkPipelineColorBlendAttachmentState', **att)],
                     blendConstants=[0, 0, 0, 0]),
                 pDynamicState=s('VkPipelineDynamicStateCreateInfo', pNext=[],
-                    flags=0, dynamicStateCount=2, pDynamicStates=[0, 1]),
+                    flags=0, dynamicStateCount=len(dynamic or [0, 1]),
+                    pDynamicStates=dynamic or [0, 1]),
                 layout=self.g.PL, renderPass=self.DRP, subpass=0,
                 basePipelineHandle=0, basePipelineIndex=-1)])
 
@@ -1892,6 +1894,33 @@ class DrawReplayTests(unittest.TestCase):
                 self.assertEqual(self.read_texel(x, y), self.clear_texel(),
                                  'texel (%d,%d)' % (x, y))
 
+    # vkCmdSetDepth* dynamic-state command -> VkDynamicState wire value
+    # (extension 268 offsets 6/7/8).
+    DYN_DEPTH_STATE = {
+        'vkCmdSetDepthTestEnable': 1000267006,
+        'vkCmdSetDepthWriteEnable': 1000267007,
+        'vkCmdSetDepthCompareOp': 1000267008,
+    }
+
+    def dyn_depth_prepared(self, commands, depth_load=0, depth_clear=None,
+                           color_clear=None, **pipe_kw):
+        # `commands` is a list of (name, kwargs) vkCmdSetDepth* records issued
+        # between bind and draw; the pipeline declares each command's
+        # VkDynamicState so the values override the create-info depth state.
+        self.depth_resources(depth_load=depth_load)
+        dynamic = [0, 1] + [self.DYN_DEPTH_STATE[n] for n, _kw in commands]
+        self.depth_pipeline(dynamic=dynamic, **pipe_kw)
+        self.depth_begin_pass(depth_clear=depth_clear,
+                              color_clear=color_clear)
+        self.viewport()
+        self.scissor()
+        self.bind()
+        for name, kw in commands:
+            self.f.command(name, commandBuffer=self.f.CB, **kw)
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
     def indexed_coverage(self, clip, indices):
         # clip = per-vertex clip positions; indices select/reorder them
         # into TRIANGLE_LIST triples for the golden coverage union.
@@ -2595,6 +2624,79 @@ class DrawReplayTests(unittest.TestCase):
         self.assertIsNotNone(job)
         self.f.drain()
         self.assert_cleared(job)
+
+    def test_draw_dynamic_depth_test_disable_passes(self):
+        # vkCmdSetDepthTestEnable(0) overrides create-info depthTestEnable=1:
+        # the depth compare folds to ALWAYS so every covered fragment passes
+        # and still writes depth — where the static test would fail against
+        # the 0.0 seed (z_win 0.5 is not LESS than 0.0).
+        self.upload(self.ndc_triangle())
+        self.seed_depth(0.0)
+        self.dyn_depth_prepared(
+            [('vkCmdSetDepthTestEnable', dict(depthTestEnable=0))],
+            compare=1, write=1, depth_test=1)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.fc_texel(x, y))
+            self.assertAlmostEqual(self.read_depth(x, y), 0.5, places=6)
+
+    def test_draw_dynamic_depth_test_enable_applies_compare(self):
+        # vkCmdSetDepthTestEnable(1) on a write-only pipeline (create-info
+        # depthTestEnable=0, depthCompareOp=LESS) re-enables the test using
+        # the pipeline's raw compare op: 0.5 is not LESS than the 0.0 seed,
+        # so fragments fail and neither colour nor depth is written.
+        self.upload(self.ndc_triangle())
+        self.seed_depth(0.0)
+        self.dyn_depth_prepared(
+            [('vkCmdSetDepthTestEnable', dict(depthTestEnable=1))],
+            compare=1, write=1, depth_test=0)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertEqual(self.read_texel(0, 0), self.clear_texel())
+        self.assertAlmostEqual(self.read_depth(0, 0), 0.0, places=6)
+        self.assertAlmostEqual(self.read_depth(4, 1), 0.0, places=6)
+
+    def test_draw_dynamic_depth_write_disable_keeps_buffer(self):
+        # vkCmdSetDepthWriteEnable(0) overrides create-info depthWriteEnable=1:
+        # the LESS test still gates colour (0.5 < 1.0 passes) but the depth
+        # attachment is read-only — covered texels get colour, depth stays 1.0.
+        self.upload(self.ndc_triangle())
+        self.seed_depth(1.0)
+        self.dyn_depth_prepared(
+            [('vkCmdSetDepthWriteEnable', dict(depthWriteEnable=0))],
+            compare=1, write=1, depth_test=1)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.fc_texel(x, y))
+            self.assertAlmostEqual(self.read_depth(x, y), 1.0, places=6)
+
+    def test_draw_dynamic_depth_compare_always_passes(self):
+        # vkCmdSetDepthCompareOp(ALWAYS) overrides create-info LESS: against
+        # the 0.0 seed every covered fragment passes and writes depth 0.5,
+        # where the static LESS compare would have dropped them all.
+        self.upload(self.ndc_triangle())
+        self.seed_depth(0.0)
+        self.dyn_depth_prepared(
+            [('vkCmdSetDepthCompareOp', dict(depthCompareOp=7))],
+            compare=1, write=1, depth_test=1)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.fc_texel(x, y))
+            self.assertAlmostEqual(self.read_depth(x, y), 0.5, places=6)
 
     # ---- bounded MRT (two colour attachments) end-to-end ----
     # fs_program2 emits loc0=vcol, loc1=const; the single Writeback stage

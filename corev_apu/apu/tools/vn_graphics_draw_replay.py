@@ -22,7 +22,10 @@ from vn_graphics_drawexec import DrawExec
 from vn_graphics_fetch import Fetch, FetchVertex
 from vn_graphics_state import (DYNAMIC_PRIMITIVE_RESTART,
                                DYNAMIC_RASTERIZER_DISCARD,
-                               DYNAMIC_CULL_MODE, DYNAMIC_FRONT_FACE)
+                               DYNAMIC_CULL_MODE, DYNAMIC_FRONT_FACE,
+                               DYNAMIC_DEPTH_TEST_ENABLE,
+                               DYNAMIC_DEPTH_WRITE_ENABLE,
+                               DYNAMIC_DEPTH_COMPARE_OP)
 
 
 def _push(stages):
@@ -116,13 +119,28 @@ def operation(engine, context_id, plan, remember, guards):
         if dref is not None:
             depth_att = plan.attachments[dref[0]]
             if fixed.depth is not None:
-                _dte, dwe, dco = fixed.depth
+                dte, dwe, dco = fixed.depth
+                # vkCmdSetDepth{Test,Write}Enable / vkCmdSetDepthCompareOp
+                # override the pipeline depth state only when the pipeline
+                # declared the matching VkDynamicState; unset commands keep
+                # the create-info value (bounded default).
+                if (DYNAMIC_DEPTH_TEST_ENABLE in fixed.dynamic and
+                        plan.depth_test is not None):
+                    dte = plan.depth_test
+                if (DYNAMIC_DEPTH_WRITE_ENABLE in fixed.dynamic and
+                        plan.depth_write is not None):
+                    dwe = plan.depth_write
+                if (DYNAMIC_DEPTH_COMPARE_OP in fixed.dynamic and
+                        plan.depth_compare is not None):
+                    dco = plan.depth_compare
             else:
                 # stencil-only: depth always passes and never writes
-                dwe, dco = 0, 7
+                dte, dwe, dco = 0, 0, 7
             depth_fmt = depth_att.fmt
+            # a disabled depth test compares ALWAYS so covered fragments
+            # still reach the (optional) depth write.
             depth = (depth_att.owner, depth_att.offset, depth_att.pitch,
-                     dco, dwe)
+                     dco if dte else 7, dwe)
     if fixed.stencil is not None and depth is None:
         raise ValueError('graphics stencil needs a depth-stencil attachment')
     vertices = tuple(FetchVertex(vertex.location, vertex.format,

@@ -85,9 +85,15 @@ DYNAMIC_PRIMITIVE_RESTART = 1000000000 + (378 - 1) * 1000 + 4
 DYNAMIC_RASTERIZER_DISCARD = 1000000000 + (378 - 1) * 1000 + 1
 DYNAMIC_CULL_MODE = 1000000000 + (268 - 1) * 1000 + 0
 DYNAMIC_FRONT_FACE = 1000000000 + (268 - 1) * 1000 + 1
+DYNAMIC_DEPTH_TEST_ENABLE = 1000000000 + (268 - 1) * 1000 + 6
+DYNAMIC_DEPTH_WRITE_ENABLE = 1000000000 + (268 - 1) * 1000 + 7
+DYNAMIC_DEPTH_COMPARE_OP = 1000000000 + (268 - 1) * 1000 + 8
 _DYNAMIC_ADMITTED = frozenset((DYNAMIC_PRIMITIVE_RESTART,
                              DYNAMIC_RASTERIZER_DISCARD,
-                             DYNAMIC_CULL_MODE, DYNAMIC_FRONT_FACE))
+                             DYNAMIC_CULL_MODE, DYNAMIC_FRONT_FACE,
+                             DYNAMIC_DEPTH_TEST_ENABLE,
+                             DYNAMIC_DEPTH_WRITE_ENABLE,
+                             DYNAMIC_DEPTH_COMPARE_OP))
 
 
 def validate(engine, fields, blobs, render_pass, subpass=0):
@@ -127,9 +133,12 @@ def validate(engine, fields, blobs, render_pass, subpass=0):
                 dbte not in (0, 1) or ste not in (0, 1)):
             raise ValueError('graphics fixed depth state exceeds profile')
         # depth write is independent of the depth test: keep the
-        # attachment path live whenever a test OR a write is requested,
-        # and let a disabled test compare ALWAYS so covered fragments pass.
-        depth = (dte, dwe, dco if dte else 7) if (dte or dwe) else None
+        # attachment path live whenever a test OR a write is requested.
+        # The raw compare op is retained (not folded to ALWAYS) so a
+        # dynamic VK_DYNAMIC_STATE_DEPTH_COMPARE_OP / _TEST_ENABLE can
+        # re-enable a real compare; the dte->ALWAYS fold happens at draw
+        # assembly in vn_graphics_draw_replay.
+        depth = (dte, dwe, dco) if (dte or dwe) else None
         if ste:
             # bounded stencil: the front/back VkStencilOpState fields arrive
             # as two-element [front, back] arrays; ops are VkStencilOp
