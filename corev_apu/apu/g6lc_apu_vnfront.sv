@@ -1627,6 +1627,12 @@ module g6lc_apu_vnfront
               result_q <= APU_VK_ERROR_FEATURE_NOT_PRESENT;
               state_q  <= StRep;
             end else if (dec_op.fault != APU_VN_FAULT_NONE) begin
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+              $display("[DBG] vnf fault: ctype=%08x fault=%0d t=%0t",
+                       dec_op.cmd_type, dec_op.fault, $time);
+`endif
+// pragma translate_on
               result_q   <= APU_VK_ERROR_UNKNOWN;
               fault_q    <= dec_op.fault;
               rep_skip_q <= 1'b1;
@@ -1732,6 +1738,13 @@ module g6lc_apu_vnfront
           end
           StResCpl: begin
             if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+              $display("[DBG] vnf resfail: ctype=%08x slot=%0d st=%0d hnd=%016x kind=%0d t=%0t",
+                       op_q.cmd_type, res_i_q, ot_cpl_i.status,
+                       op_q.q[res_i_q[2:0]], op_q.qkind[res_i_q[2:0]], $time);
+`endif
+// pragma translate_on
               result_q <= APU_VK_ERROR_UNKNOWN;
               state_q  <= StRep;
             end else begin
@@ -2645,6 +2658,13 @@ module g6lc_apu_vnfront
             automatic int ps = act_q.parent_qslot != APU_VN_QSLOT_NONE
                                ? int'(act_q.parent_qslot) : -1;
             automatic int ds = data_slot(op_q);
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+            if (op_q.cmd_type == 32'd70)
+              $display("[DBG] vnf allocgo: kind=%0d ns=%0d q0=%016x t=%0t",
+                       act_q.obj_kind, ns, op_q.q[0], $time);
+`endif
+// pragma translate_on
             if (op_q.cmd_type == APU_VN_TYPE_VK_CREATE_FENCE_EXT &&
                 fence_free() == 8'hFF) begin
               result_q <= APU_VK_ERROR_OUT_OF_DEVICE_MEMORY;
@@ -5555,6 +5575,12 @@ module g6lc_apu_vnfront
           end
           StUpdImgVC: begin
             // view resolved: capture its aux, walk to the image entry
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+            $display("[DBG] imgVC st=%0d kind=%0d vw=%016x t=%0t",
+                     ot_cpl_i.status, ot_cpl_i.entry.kind, upd_buf_q, $time);
+`endif
+// pragma translate_on
             if (ot_cpl_i.status != APU_OBJTAB_OK) begin
               state_q <= StUpdWr0;
             end else begin
@@ -5574,6 +5600,13 @@ module g6lc_apu_vnfront
             automatic logic [9:0] usage = ot_cpl_i.entry.aux[63:54];
             automatic logic [9:0] need  =
                 upd_type_q[7:0] == 8'd3 ? 10'h008 : 10'h004;
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+            $display("[DBG] imgIC st=%0d kind=%0d usage=%03x need=%03x bmem=%08x t=%0t",
+                     ot_cpl_i.status, ot_cpl_i.entry.kind, usage, need,
+                     ot_cpl_i.entry.bind_mem, $time);
+`endif
+// pragma translate_on
             if (ot_cpl_i.status != APU_OBJTAB_OK ||
                 ot_cpl_i.entry.kind != 6'(APU_VN_KIND_VK_IMAGE) ||
                 ot_cpl_i.entry.bind_mem[15:0] ==
@@ -5623,6 +5656,14 @@ module g6lc_apu_vnfront
                 ot_cpl_i.entry.gen != ud_mgen_q ||
                 ot_cpl_i.entry.aux[63:32] == APU_MEM_UNBACKED) begin
               upd_elok_q <= 1'b0;
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+              $display("[DBG] imgMC FAIL st=%0d kind=%0d gen=%0d mgen=%0d unb=%0d t=%0t",
+                       ot_cpl_i.status, ot_cpl_i.entry.kind,
+                       ot_cpl_i.entry.gen, ud_mgen_q,
+                       ot_cpl_i.entry.aux[63:32] == APU_MEM_UNBACKED, $time);
+`endif
+// pragma translate_on
             end else begin
               upd_elok_q <= 1'b1;
               upd_mh_q   <= {ud_mgen_q, ud_mslot_q};
@@ -5650,6 +5691,12 @@ module g6lc_apu_vnfront
           end
           StUpdImgSC: begin
             // sampler resolved: record words +20/+24 = its packed aux
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+            $display("[DBG] imgSC st=%0d kind=%0d smp=%016x t=%0t",
+                     ot_cpl_i.status, ot_cpl_i.entry.kind, upd_smp_q, $time);
+`endif
+// pragma translate_on
             if (ot_cpl_i.status == APU_OBJTAB_OK) begin
               upd_iw_q[3] <= ot_cpl_i.entry.aux[31:0];
               upd_iw_q[4] <= ot_cpl_i.entry.aux[63:32];
@@ -7847,6 +7894,13 @@ module g6lc_apu_vnfront
           // 8=anisoEn 10=cmpEn 11=cmpOp 12=minLod 13=maxLod
           // 14=borderColor 15=unnormCoords
           StSamCk: begin
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+            $display("[DBG] vnf samck: ctype=%08x imm1=%0d imm2=%0d imm4=%0d imm14=%0d imm15=%0d t=%0t",
+                     op_q.cmd_type, op_q.imm[1], op_q.imm[2], op_q.imm[4],
+                     op_q.imm[14], op_q.imm[15], $time);
+`endif
+// pragma translate_on
             if (op_q.imm[1] > 32'd1 || op_q.imm[2] > 32'd1 ||
                 op_q.imm[3] > 32'd1 || op_q.imm[8] > 32'd1 ||
                 op_q.imm[11] > 32'd7 || op_q.imm[14] > 32'd5) begin
