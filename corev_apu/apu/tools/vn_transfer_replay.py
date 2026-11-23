@@ -166,7 +166,8 @@ class TransferReplay:
                                        remember, append, guards)
                 elif name == 'vkCmdPipelineBarrier':
                     replay_image_barrier(images, record, compute=compute, device=pool['parent'])
-                elif name in ('vkCmdSetEvent', 'vkCmdResetEvent', 'vkCmdWaitEvents'):
+                elif name in ('vkCmdSetEvent', 'vkCmdResetEvent', 'vkCmdWaitEvents',
+                              'vkCmdResetEvent2'):
                     replay_event(images, record, name, compute=compute,
                                  device=pool['parent'])
                 elif name in ('vkCmdBeginConditionalRenderingEXT',

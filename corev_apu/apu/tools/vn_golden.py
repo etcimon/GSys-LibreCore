@@ -5539,6 +5539,14 @@ class FrontModel(ObjectTable, PayloadMemory):
                         recd['imm'][4] = (rec['q'][3] >> 32) & 0xFFFFFFFF
                         recd['imm'][5] = rec['q'][4] & 0xFFFFFFFF
                         recd['imm'][6] = (rec['q'][4] >> 32) & 0xFFFFFFFF
+                    # vkCmdResetEvent2 stageMask is u64 (VkPipelineStageFlags2)
+                    # riding q[2] — fold lo->imm[0], hi->imm[1].  The low 32
+                    # stage bits are identical to VkPipelineStageFlags; the
+                    # event replay's imm[1:7]==0 check then rejects hi!=0,
+                    # fail-closing the sync2-only stages above bit31.
+                    if ct == session['T'].get('vkCmdResetEvent2', -1):
+                        recd['imm'][0] = rec['q'][2] & 0xFFFFFFFF
+                        recd['imm'][1] = (rec['q'][2] >> 32) & 0xFFFFFFFF
                     # §7b: BindDS streams resolved set handles then the
                     # dynamic offsets; PushConstants streams the staged
                     # words verbatim -- both through the payload chain

@@ -32,6 +32,14 @@ class EventTests(unittest.TestCase):
         self.f.command('vkCmdResetEvent', commandBuffer=self.f.CB,
             event=event or self.EVENT, stageMask=stage)
 
+    def reset_event2(self, event=None, stage=0x1000):
+        # vkCmdResetEvent2 takes the same event+stageMask operands but
+        # stageMask is VkPipelineStageFlags2 (u64).  The golden fold
+        # packs it into imm[0:2]; the low stage bits are identical to
+        # VkPipelineStageFlags so replay treats it like base.
+        self.f.command('vkCmdResetEvent2', commandBuffer=self.f.CB,
+            event=event or self.EVENT, stageMask=stage)
+
     def wait_events(self, events=None, *, src=0x1000, dst=0x400,
                     memory=0, buffers=0, images=0, src_access=0x800,
                     dst_access=0x100, old_layout=0, new_layout=1):
@@ -86,6 +94,34 @@ class EventTests(unittest.TestCase):
         # Final state is RESET after the ordered reset op.
         words = self.status()
         self.assertIn(4, words)
+
+    def test_reset_event2_replays_like_base(self):
+        # vkCmdResetEvent2 (VK_KHR_synchronization2) carries event+stageMask
+        # with stageMask widened to u64.  It must emit the same reset
+        # EventSignal as vkCmdResetEvent and leave the event cleared.
+        self.f.begin()
+        self.set_event()
+        self.wait_events()
+        self.reset_event2()
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertEqual([op.__class__.__name__ for op in job.operations],
+                         ['EventSignal', 'EventWait', 'EventSignal'])
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertEqual(job.event_stats[0], {'signaled': True})
+        self.assertEqual(job.event_stats[2], {'signaled': False})
+        self.assertIn(4, self.status())
+
+    def test_reset_event2_rejects_sync2_only_high_stage_bits(self):
+        # stageMask bit >=32 (e.g. VK_PIPELINE_STAGE_2_COPY_BIT) is a
+        # synchronization2-only stage outside the bounded u32 profile;
+        # the hi word lands in imm[1] and must fail closed.
+        self.f.begin()
+        self.reset_event2(stage=0x100000000)
+        self.f.end()
+        with self.assertRaises(ValueError):
+            self.f.enqueue()
 
     def test_wait_blocks_until_host_set_event_releases(self):
         self.f.begin()

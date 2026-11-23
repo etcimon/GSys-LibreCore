@@ -66,7 +66,7 @@ def replay(images, record, name, *, compute=False, device=None):
     from vn_image_barriers import scope, WORDS
     golden = images.engine.golden
     imm = record['imm']
-    if name in ('vkCmdSetEvent', 'vkCmdResetEvent'):
+    if name in ('vkCmdSetEvent', 'vkCmdResetEvent', 'vkCmdResetEvent2'):
         if (record.get('payload_words', 0) != 0 or
                 any(imm[1:7]) or imm[7] or any(record['handle'][1:])):
             raise ValueError('event signal record exceeds native profile')
