@@ -22,6 +22,10 @@ module tb_g6lc_apu_cmdexec;
   localparam int Fences = 16;
   localparam int unsigned ObjEntries = 256;
   localparam int unsigned PayMemB    = 64 * 1024;
+  // apu_sh_desc_t is >8k bits: a bare '0 comparison trips Verilator's
+  // WIDTHCONCAT, and '{default:'0} is illegal inside !==.  A typed localparam
+  // zero avoids both.
+  localparam apu_sh_desc_t ZeroShDesc = '{default: '0};
 
   logic clk = 0, rst_ni = 0;
   int errors = 0, checks = 0, cycles = 0, cases = 0;
@@ -257,7 +261,7 @@ module tb_g6lc_apu_cmdexec;
                             osm_v ||
                             odone !== '0 || ofsig !== '0 ||
                             oflost !== '0 || odslot !== '0 ||
-                            oddesc !== '0 || odpushn !== '0 ||
+                            oddesc !== ZeroShDesc || odpushn !== '0 ||
                             odpush !== '0 || odl_v || odl_dead)
     $fatal(1, "disabled cmdexec active");
 

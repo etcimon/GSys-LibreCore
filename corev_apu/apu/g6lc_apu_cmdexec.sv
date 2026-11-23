@@ -1493,7 +1493,7 @@ module g6lc_apu_cmdexec
         cp_i_q      <= '0; cp_nc_q    <= '0; cp_rb_q <= '0;
         cp_cw_q     <= '0; cp_av_q    <= '0; cp_rbase_q <= '0;
         cp_fw_q     <= '0; cp_tw_q    <= '0; cp_rw_q <= '0;
-        rd_q        <= '{default: '0};
+        rd_q        <= '{op: APU_RAST_OP_NONE, default: '0};
         xf_for_q    <= '0; xf_xoff_q <= '0;
         dr_bq       <= '0; dr_vbmask_q <= '0; dr_pi_q <= '0;
         dr_bcdyn_q  <= 1'b0; dr_dynmask_q <= '0;

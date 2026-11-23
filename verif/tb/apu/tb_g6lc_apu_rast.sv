@@ -77,7 +77,7 @@ module tb_g6lc_apu_rast;
   // ---- DUT wiring ---------------------------------------------------------
   logic               w_v, w_r, w_done;
   apu_cmdexec_work_t  w_o = '0;
-  apu_rast_draw_t     rd = '{default: '0};
+  apu_rast_draw_t     rd = '{op: APU_RAST_OP_NONE, default: '0};
   apu_sh_done_t       w_dpl;
   logic               shv, shr;
   logic [31:0]        shc;
@@ -104,7 +104,7 @@ module tb_g6lc_apu_rast;
     .clk_i(clk), .rst_ni(rst_n), .testmode_i(1'b0),
     .work_valid_i(w_v), .work_ready_o(w_r),
     .work_i(w_o), .rd_i(rd),
-    .desc_i('0), .push_n_i('0), .push_i('0),
+    .desc_i('{default: '0}), .push_n_i('0), .push_i('0),
     .done_o(w_done), .done_pl_o(w_dpl),
     .sh_work_valid_o(shv), .sh_work_ready_i(shr),
     .sh_ctype_o(shc), .sh_imm_o(shim), .sh_slot_o(shslot),
@@ -568,7 +568,7 @@ module tb_g6lc_apu_rast;
 
   // draw record skeleton for the smoke cases
   function automatic apu_rast_draw_t mk_draw();
-    apu_rast_draw_t d = '{default: '0};
+    apu_rast_draw_t d = '{op: APU_RAST_OP_NONE, default: '0};
     d.op = APU_RAST_OP_DRAW;
     d.vs_slot = 3'd0; d.fs_slot = 3'd1;
     d.fs_in_mask = 8'h01;
@@ -602,7 +602,7 @@ module tb_g6lc_apu_rast;
   endfunction
 
   function automatic apu_rast_draw_t mk_clear();
-    apu_rast_draw_t d = '{default: '0};
+    apu_rast_draw_t d = '{op: APU_RAST_OP_NONE, default: '0};
     d.op = APU_RAST_OP_CLEAR;
     d.ca[0] = '{base: FB, size: 32'h1000, w: 16'd32, h: 16'd32,
                 fmt: 8'(APU_IMG_FMT_R8G8B8A8_UNORM), mips: 5'd1,
@@ -814,7 +814,7 @@ module tb_g6lc_apu_rast;
   int c2_cyc;
 
   initial begin
-    rd = '{default: '0}; w_o = '0; w_v = 1'b0;
+    rd = '{op: APU_RAST_OP_NONE, default: '0}; w_o = '0; w_v = 1'b0;
     // TP5 perf probe: +vscost=N adds N cycles per VS vertex (0 = stock
     // 1-vertex/cycle stub).  Read once; applies to every VS wave in the run.
     if (!$value$plusargs("vscost=%d", sh_vcost)) sh_vcost = 0;
@@ -1450,7 +1450,7 @@ module tb_g6lc_apu_rast;
     d.clear_color[3] = 32'h3F800000;
     do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
     // depth-only clear to 1.0
-    d = '{default: '0};
+    d = '{op: APU_RAST_OP_NONE, default: '0};
     d.op = APU_RAST_OP_CLEAR;
     d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
              fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
@@ -1802,7 +1802,7 @@ module tb_g6lc_apu_rast;
     d.clear_color[2] = 32'h00000000;
     d.clear_color[3] = 32'h3F800000;
     do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
-    d = '{default: '0};
+    d = '{op: APU_RAST_OP_NONE, default: '0};
     d.op = APU_RAST_OP_CLEAR;
     d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
              fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
@@ -1869,7 +1869,7 @@ module tb_g6lc_apu_rast;
     d.clear_color[2] = 32'h00000000;
     d.clear_color[3] = 32'h3F800000;
     do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
-    d = '{default: '0};
+    d = '{op: APU_RAST_OP_NONE, default: '0};
     d.op = APU_RAST_OP_CLEAR;
     d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
              fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
@@ -2174,7 +2174,7 @@ module tb_g6lc_apu_rast;
     d.clear_color[2] = 32'h00000000;
     d.clear_color[3] = 32'h3F800000;
     do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
-    d = '{default: '0};
+    d = '{op: APU_RAST_OP_NONE, default: '0};
     d.op = APU_RAST_OP_CLEAR;
     d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
              fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
@@ -2205,7 +2205,7 @@ module tb_g6lc_apu_rast;
     if (got != 32'h3F400000)
       fail($sformatf("case18 depth=%08x exp 3f400000", got));
     // clamp 0.125 with constant 0.25 -> depth 0.625
-    d = '{default: '0};
+    d = '{op: APU_RAST_OP_NONE, default: '0};
     d.op = APU_RAST_OP_CLEAR;
     d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
              fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
@@ -2233,7 +2233,7 @@ module tb_g6lc_apu_rast;
     // is 1/16.  Pixel (4,4) center barycentric z is 0.15625, plus
     // the slope is 0.21875.
     cases++;
-    d = '{default: '0};
+    d = '{op: APU_RAST_OP_NONE, default: '0};
     d.op = APU_RAST_OP_CLEAR;
     d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
              fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
@@ -2273,7 +2273,7 @@ module tb_g6lc_apu_rast;
     d.clear_color[2] = 32'h00000000;
     d.clear_color[3] = 32'h3F800000;
     do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
-    d = '{default: '0};
+    d = '{op: APU_RAST_OP_NONE, default: '0};
     d.op = APU_RAST_OP_CLEAR;
     d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
              fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
@@ -2316,7 +2316,7 @@ module tb_g6lc_apu_rast;
     d.clear_color[2] = 32'h00000000;
     d.clear_color[3] = 32'h3F800000;
     do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
-    d = '{default: '0};
+    d = '{op: APU_RAST_OP_NONE, default: '0};
     d.op = APU_RAST_OP_CLEAR;
     d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
              fmt: 8'(APU_IMG_FMT_D24_UNORM_S8_UINT), mips: 5'd1,
@@ -3782,7 +3782,7 @@ module tb_g6lc_apu_rast;
     d.clear_color[2] = 32'h00000000;
     d.clear_color[3] = 32'h3F800000;
     do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
-    d = '{default: '0};
+    d = '{op: APU_RAST_OP_NONE, default: '0};
     d.op = APU_RAST_OP_CLEAR;
     d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
              fmt: 8'(APU_IMG_FMT_D16_UNORM), mips: 5'd1,
@@ -3853,7 +3853,7 @@ module tb_g6lc_apu_rast;
     d.clear_color[2] = 32'h00000000;
     d.clear_color[3] = 32'h3F800000;
     do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
-    d = '{default: '0};
+    d = '{op: APU_RAST_OP_NONE, default: '0};
     d.op = APU_RAST_OP_CLEAR;
     d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
              fmt: 8'(APU_IMG_FMT_D16_UNORM), mips: 5'd1,
