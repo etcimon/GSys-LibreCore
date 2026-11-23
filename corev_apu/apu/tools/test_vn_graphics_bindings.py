@@ -100,6 +100,13 @@ class BindingTests(unittest.TestCase):
             stageFlags=stage, offset=offset, size=4 * len(values),
             pValues=b''.join(value.to_bytes(4, 'little') for value in values))
 
+    def push2(self, stage, offset, values):
+        self.command('vkCmdPushConstants2', commandBuffer=self.f.CB,
+            pPushConstantsInfo=self.w.structure(
+                'VkPushConstantsInfo', layout=self.g.PL, stageFlags=stage,
+                offset=offset, size=4 * len(values),
+                pValues=b''.join(value.to_bytes(4, 'little') for value in values)))
+
     def replay(self):
         for name, record in self.names[self.state.position:]:
             self.state.replay(name, record)
@@ -140,6 +147,20 @@ class BindingTests(unittest.TestCase):
         self.push(1, 0, (7,))
         self.push(16, 4, (9,))
         self.push(32, 8, (99,))
+        self.replay()
+        vs, fs = self.state.resolve().stages
+        self.assertEqual((vs.push[0], fs.push[1]), (7, 9))
+        self.assertEqual((vs.push[1], fs.push[0], vs.push[2], fs.push[2]), (0, 0, 0, 0))
+
+    def test_push_constants2_matches_base_record_shape(self):
+        # vkCmdPushConstants2 wraps the same operands in a
+        # VkPushConstantsInfo struct; the decoder flattens it to the
+        # identical imm/pay/q record shape, so _push must replay it
+        # byte-for-byte like the base command.
+        self.prepare(push=True)
+        self.bind(sets=False)
+        self.push2(1, 0, (7,))
+        self.push2(16, 4, (9,))
         self.replay()
         vs, fs = self.state.resolve().stages
         self.assertEqual((vs.push[0], fs.push[1]), (7, 9))

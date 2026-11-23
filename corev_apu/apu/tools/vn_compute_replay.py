@@ -10,7 +10,8 @@ from vn_image_operands import image_descriptor
 
 class ComputeReplay:
     NAMES = frozenset(('vkCmdBindPipeline', 'vkCmdBindDescriptorSets',
-                       'vkCmdPushConstants', 'vkCmdDispatch', 'vkCmdDispatchIndirect'))
+                       'vkCmdPushConstants', 'vkCmdPushConstants2',
+                       'vkCmdDispatch', 'vkCmdDispatchIndirect'))
 
     def __init__(self, engine, context, device, remember, payload, append,
                  charge, guards, dispatch_budget, extent):
@@ -97,7 +98,7 @@ class ComputeReplay:
             self.sets = {index: old for index, old in self.sets.items()
                          if index not in staged and old[1].compatible(template, min(index, last))}
             self.sets.update(staged)
-        elif name == 'vkCmdPushConstants':
+        elif name in ('vkCmdPushConstants', 'vkCmdPushConstants2'):
             template = self.template(record)
             stages, offset, size = record['imm'][:3]
             if (not stages or offset % 4 or size % 4 or not 0 < size <= 256 or

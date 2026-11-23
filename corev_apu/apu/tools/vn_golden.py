@@ -5449,7 +5449,8 @@ class FrontModel(ObjectTable, PayloadMemory):
                 if not (e['state'] & CB_REC) or \
                         (e['state'] & (CB_INV | CB_PEND)) or \
                         d is None or \
-                        (ct == session['T']['vkCmdPushConstants']
+                        (ct in (session['T']['vkCmdPushConstants'],
+                                session['T'].get('vkCmdPushConstants2', -1))
                          and rec['imm'][2] > 256) or \
                         (ct == session['T'].get('vkCmdBindVertexBuffers')
                          and (rec['imm'][0] & 0xFFFF) +
@@ -5609,7 +5610,8 @@ class FrontModel(ObjectTable, PayloadMemory):
                             pwords += [w & 0xFFFFFFFF for w in
                                        rec['pay'][2 * (rec['imm'][0]
                                                       & 0xFFFF):]]
-                    elif ct == session['T']['vkCmdPushConstants']:
+                    elif ct in (session['T']['vkCmdPushConstants'],
+                                session['T'].get('vkCmdPushConstants2', -1)):
                         pwords = [w & 0xFFFFFFFF for w in rec['pay']]
                     elif ct in (session['T'].get('vkCmdBeginRenderPass'),
                                 session['T'].get('vkCmdBeginRenderPass2'),
@@ -12147,6 +12149,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # pipeline (the only leg with no prior non-zero bench).  'gpush'
         # collides with no existing flag substring.
         is_gpush = 'gpush' in gfx
+        # gpushpc2: same push-constant bench but the block is staged via
+        # vkCmdPushConstants2 — the VkPushConstantsInfo struct flattens
+        # to the identical record shape, exercising the *2 decode path.
+        is_pc2 = 'pc2' in gfx
         # mrt: TWO colour attachments (G3a-iv-n).  fs_mrt emits
         # location0->ca[0] (o0 = the fs_color gradient, att0 reuses the
         # is_fcolor oracle) and location1->ca[1] (o1 = R/B swap of o0 —
@@ -16284,11 +16290,17 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # VERTEX|FRAGMENT so the value is visible to the FS stage.
             # bindings._push validates offset/size/stage coverage and
             # stages per-(stage,word) into operation.push.
-            ('vkCmdPushConstants', dict(
-                commandBuffer=cbdraw, layout=X['pl'],
-                stageFlags=0x11, offset=0, size=16,
-                pValues=b''.join(struct.pack('<f', w)
-                                 for w in (0.1, 0.2, 0.3, 1.0)))),
+            ('vkCmdPushConstants2' if is_pc2 else 'vkCmdPushConstants',
+             dict(commandBuffer=cbdraw, layout=X['pl'],
+                  stageFlags=0x11, offset=0, size=16,
+                  pValues=b''.join(struct.pack('<f', w)
+                                   for w in (0.1, 0.2, 0.3, 1.0)))
+             if not is_pc2 else
+             dict(commandBuffer=cbdraw,
+                  pPushConstantsInfo=st('VkPushConstantsInfo',
+                      layout=X['pl'], stageFlags=0x11, offset=0, size=16,
+                      pValues=b''.join(struct.pack('<f', w)
+                                       for w in (0.1, 0.2, 0.3, 1.0))))),
         ] if is_gpush else []) + ([
             ('vkCmdBindDescriptorSets', dict(
                 commandBuffer=cbdraw, pipelineBindPoint=0,

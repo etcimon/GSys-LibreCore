@@ -309,6 +309,10 @@ python3 $G --graphics-session ue_gpos_vattr32sintbloff_1 1
 # vkCmdPushConstants vec4 (0.1,0.2,0.3,1.0); proves non-zero push data
 # reaches the fragment stage through the full producer->consumer path.
 python3 $G --graphics-session ue_gpos_gpushbloff_1 1
+# gpushbloffpc2: same push-constant bench via vkCmdPushConstants2 — the
+# VkPushConstantsInfo struct flattens to the identical record shape;
+# coverage identical to ue_gpos_gpushbloff_1 (arena pointers shift only)
+python3 $G --graphics-session ue_gpos_gpushbloffpc2_1 1
 
 # Sessions the run scripts execute that this script did not generate
 # (blend ops and factors, logic ops, depth compare/bounds/bias/clamp,

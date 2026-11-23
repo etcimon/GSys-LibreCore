@@ -31,7 +31,8 @@ def capture(engine, current, name, record):
             raise KeyError('native layout operand generation/context is stale')
         return entry['gen'] << 16 | slot, entry
 
-    if name in ('vkCmdBindDescriptorSets', 'vkCmdPushConstants'):
+    if name in ('vkCmdBindDescriptorSets', 'vkCmdPushConstants',
+                'vkCmdPushConstants2'):
         handle = next((record['q'][i] for i in range(8)
                        if record['qv'] >> i & 1 and
                        record['kind'][i] == kinds['VkPipelineLayout']), 0)
