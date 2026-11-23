@@ -79,7 +79,16 @@ module g6lc_axi_lrsc #(
   end
   // pragma translate_on
 
-  logic [OW-1:0] nar, naw, nwl;
+  logic [OW-1:0] naw, nwl;
+  // Reads owed to the slave port: forwarded ARs plus R-producing atomics
+  // (AWATOP[5]: AtomicLoad/Swap/Compare). The AMO adapter below this monitor
+  // answers those with an injected single-beat R and no AR ever crosses
+  // here, so counting ARs alone let each such R pop an entry that was never
+  // pushed: nar wrapped below zero and, eight atomics later, sat on MaxOut
+  // with nothing outstanding -- ar_room low forever, every DRAM read of the
+  // SoC refused (mc_cas_lock_handoff / zacas_amocas_d wedge). One bit wider
+  // than naw: an AR and an atomic AW may both handshake at MaxOut-1.
+  logic [OW:0]   nar;
   logic sc_drop, inj_b;
   // No res_id: the table is keyed on address, deliberately (see header). A
   // reservation ID would be written and never read, and would suggest the
@@ -106,7 +115,15 @@ module g6lc_axi_lrsc #(
 
   wire ar_is_ex = slv.ar_lock && (slv.ar_len == 8'd0);
   wire aw_is_ex = slv.aw_lock && (slv.aw_len == 8'd0);
-  wire ar_room  = nar != OW'(MaxOut);
+  wire ar_room  = nar < (OW+1)'(MaxOut);
+  // An atomic that returns read data needs a read slot as well as a write
+  // slot (same rule as the xbar demux, which injects it into its AR counter).
+`ifdef G6LC_MUT_LRSC_ATOP_R_UNCOUNTED
+  // Leaf-bench mutation (tb_g6lc_axi_lrsc_atop): the pre-fix accounting.
+  wire aw_atop_r = 1'b0;
+`else
+  wire aw_atop_r = slv.aw_atop[5];
+`endif
   wire aw_room  = naw != OW'(MaxOut);
 
   // --- reservation lookup ----------------------------------------------------
@@ -186,7 +203,8 @@ module g6lc_axi_lrsc #(
 
   wire sc_ok    = aw_hit;
   wire aw_drop  = aw_is_ex && !sc_ok;
-  wire aw_fwd   = !aw_drop && aw_room && !sc_drop && !inj_b;
+  wire aw_fwd   = !aw_drop && aw_room && !sc_drop && !inj_b &&
+                  (!aw_atop_r || ar_room);
   // SC waits for prior regular writes so the reservation check is stable.
   wire sc_wait  = aw_is_ex && (naw != 0 || nwl != 0);
 
@@ -260,6 +278,7 @@ module g6lc_axi_lrsc #(
   wire r_hs  = slv.r_valid && slv.r_ready && slv.r_last;
   wire b_hs  = slv.b_valid && slv.b_ready;
   wire aw_fwd_hs = aw_hs && !aw_drop;
+  wire atop_r_hs = aw_fwd_hs && aw_atop_r;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -279,11 +298,7 @@ module g6lc_axi_lrsc #(
       ar_ex <= '0;
       aw_ex <= '0;
     end else begin
-      unique case ({ar_hs, r_hs})
-        2'b10: nar <= nar + OW'(1);
-        2'b01: nar <= nar - OW'(1);
-        default: ;
-      endcase
+      nar <= nar + (OW+1)'(ar_hs) + (OW+1)'(atop_r_hs) - (OW+1)'(r_hs);
       unique case ({aw_fwd_hs, (b_hs && !inj_b)})
         2'b10: naw <= naw + OW'(1);
         2'b01: naw <= naw - OW'(1);
@@ -352,6 +367,12 @@ module g6lc_axi_lrsc #(
   end
 
   // pragma translate_off
+  // Every R-last answers a counted AR or a counted R-producing atomic.
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && r_hs)
+      g6lc_axi_lrsc_r_owed: assert (nar != '0)
+        else $error("g6lc_axi_lrsc: R-last id=%0d with no read outstanding", slv.r_id);
+  end
   // The table must never hold two entries for one address: `aw_hit_idx` keeps
   // only the last match, so a duplicate would leave a stale reservation behind
   // after a store and let a later SC succeed against a killed one. Allocation

@@ -101,7 +101,9 @@ else
   make -j"$JOBS" > make.log 2>&1
   make install > install.log 2>&1
 fi
-"$PREFIX/bin/verilator" --version
+# The perl wrapper resolves verilator_bin under an inherited $VERILATOR_ROOT
+# (env.sh names the stock runtime); drop it so the wrapper finds its own install.
+env -u VERILATOR_ROOT "$PREFIX/bin/verilator" --version
 # Runtime dir in the layout the pinned `verilator` wrapper expects from VERILATOR_ROOT
 # (bin/verilator_bin + include/): the fork's own headers (verilated_funcs.h /
 # verilated_types.h carry runtime changes too) plus its compiler binary. The pinned

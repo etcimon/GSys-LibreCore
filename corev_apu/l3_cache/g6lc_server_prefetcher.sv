@@ -200,10 +200,24 @@ module g6lc_server_prefetcher #(
       // no reserved id to come back on.
       if (pf_inject) begin
         dn_req_o.ar_valid = 1'b1;
-        dn_req_o.ar       = up_req_i.ar;  // inherit size/burst/cache defaults
-        dn_req_o.ar.addr  = pf_addr_q;
         dn_req_o.ar.id    = PF_ID;        // reserved PF id (all-ones)
+        dn_req_o.ar.addr  = pf_addr_q;
         dn_req_o.ar.len   = '0;           // single-beat probe
+        // Build a clean single-beat read: never inherit size/burst/lock/cache
+        // from the last demand AR. A stale BURST_WRAP or oversized size paired
+        // with len=0, or a lock/atomic attribute, makes the probe malformed so
+        // memory never returns its R beat; pf_ot_q then stays set and the
+        // up_pfid_alias block below starves every FILL_ID ('1) demand fill
+        // behind it (observed: mc_cas_lock_handoff wedged with L3 mar=1
+        // marr=0 and a stuck fill MSHR).
+        dn_req_o.ar.size   = axi_pkg::size_t'($clog2(AXI_DATA_WIDTH / 8));
+        dn_req_o.ar.burst  = axi_pkg::BURST_INCR;
+        dn_req_o.ar.lock   = 1'b0;
+        dn_req_o.ar.cache  = axi_pkg::CACHE_MODIFIABLE;
+        dn_req_o.ar.prot   = '0;
+        dn_req_o.ar.qos    = '0;
+        dn_req_o.ar.region = '0;
+        dn_req_o.ar.user   = '0;
       end
 
       // Absorb PF R: do not present to upper; assert r_ready toward memory

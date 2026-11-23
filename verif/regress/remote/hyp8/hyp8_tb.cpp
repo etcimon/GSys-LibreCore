@@ -405,6 +405,10 @@ static const char *verilog_plusargs[] = {
     // [tlb] update/flush/lookup lines inside the +trace_from/+trace_to
     // window; the colliding entries of a multi-hit always print.
     "tlb_trace",
+    // +ptw_rd_trace (core/g6lc_mmu/g6lc_ptw.sv, translate_off): dump every
+    // page-table read's returned PTE per level — the mc_smode_shootdown lvl2
+    // leaf-read discrepancy diagnostic. Same allowlist rule as above.
+    "ptw_rd_trace",
     nullptr};
 
 // +mem_poke entries, applied inside the sim loop once main_time reaches cycle.

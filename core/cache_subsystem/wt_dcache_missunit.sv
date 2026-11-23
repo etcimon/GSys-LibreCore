@@ -273,7 +273,10 @@ module wt_dcache_missunit
 
   always_comb begin : p_ack
     miss_ack_o = '0;
-    if (!amo_sel) begin
+    // The AMOCAS.D local load/store (cas_amo_sel) owns the memory handshake
+    // like amo_sel: acking the arbitrated port here would park a load ctrl in
+    // MISS_WAIT with no MSHR, or retire a pending store miss unsent.
+    if (!amo_sel && !cas_amo_sel) begin
       miss_ack_o[miss_port_idx] = mem_data_ack_i & mem_req_valid_c;
     end
   end

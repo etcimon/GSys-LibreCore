@@ -45,6 +45,7 @@
   .equ DONE,    0x80090200
   .equ READY,   0x80090300
   .equ SPIN_TO, 4000000
+  .equ CLINT_MSIP, 0x02000000   # peer cores stay clock-held until their MSIP is set
 
   .option norvc
   .section .text.init
@@ -76,6 +77,9 @@ hart0:
   sd   zero, 0(s4)              # DONE = 0
   li   t0, 1
   sd   t0, 0(s5)                # READY = 1  (releases hart2's poll loop)
+  li   t0, CLINT_MSIP
+  li   t1, 1
+  sw   t1, 8(t0)                # release core 1 (hart 2) from boot hold
   fence rw, rw
 
   # ---- phase 1: independent address B must NOT kill reservation on A ----

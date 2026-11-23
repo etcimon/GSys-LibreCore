@@ -34,7 +34,9 @@
 #  SMT (SmtFetchQuantum=4096) starves a sibling under a spinning primary, which
 #  deadlocks an all-8-hart barrier. One independent hart/core is a clean SMP
 #  shootdown surface and still exercises cross-core TLB invalidation.
+#ifndef NPART
 #define NPART 4
+#endif
 #define ROUNDS    2
 #define SEED_A   0xA5A5000000000001
 #define SEED_B   0xB5B5000000000002
@@ -110,6 +112,25 @@ setup_pt:
   j     3b
 4:
   fence
+  # DIAG: M-mode physical read-back of pt1[] leaf PTEs (post-fence, pre-satp —
+  # the same visibility point the S-mode PTW reads at). Reports
+  # [31:28]=index [27:0]=low28 of the value actually read, to discriminate a
+  # bad store from a bad PTW read. Silent when every entry reads back correct.
+  la    t0, pt1
+  la    t1, buf_a
+  srli  t1, t1, 12
+  slli  t1, t1, 10
+  ori   t1, t1, 0xcf
+  li    t2, 0
+20:
+  bgeu  t2, s1, 21f
+  slli  t3, t2, 3
+  add   t4, t0, t3
+  ld    t5, 0(t4)
+  bne   t5, t1, 22f
+  addi  t2, t2, 1
+  j     20b
+21:
   la    t0, root_pt
   srli  t1, t0, 12
   li    t2, 8
@@ -205,25 +226,27 @@ not_rdy:
   li    a0, 7
   j     fail_common
 rdy_ok:
-  # precompute both leaf PPNs once
+  # precompute both leaf PPNs once. Keep them in s8/s9: t0-t6 are scratch
+  # clobbered by the rdy/result wait loops (ld t1 / addi t2) inside round_loop,
+  # which corrupted leaf_a to the RESULT flag (=1) on even rounds -> pt1[]=1.
   la    t0, buf_a
-  srli  t1, t0, 12
-  slli  t1, t1, 10
-  ori   t1, t1, 0xcf         # leaf_a in t1 (will reload per round)
+  srli  s8, t0, 12
+  slli  s8, s8, 10
+  ori   s8, s8, 0xcf         # leaf_a in s8 (survives round_loop scratch use)
   la    t0, buf_b
-  srli  t2, t0, 12
-  slli  t2, t2, 10
-  ori   t2, t2, 0xcf         # leaf_b in t2
+  srli  s9, t0, 12
+  slli  s9, s9, 10
+  ori   s9, s9, 0xcf         # leaf_b in s9
   # drive ROUNDS shootdowns; s5 = round
   li    s5, 1
 round_loop:
   li    t6, ROUNDS+1
   bge   s5, t6, rounds_done
-  # pick target leaf: odd round -> buf_b(t2), even -> buf_a(t1)
-  mv    s7, t1
+  # pick target leaf: odd round -> buf_b(s9), even -> buf_a(s8)
+  mv    s7, s8
   andi  t3, s5, 1
   beqz  t3, 5f
-  mv    s7, t2
+  mv    s7, s9
 5:
   # rewrite pt1[i] = target for all i
   la    t0, pt1
@@ -323,6 +346,18 @@ m_trap:
   sw   a0, 0(t0)
   fence rw, rw
   j    park
+
+# DIAG mismatch handler (M-mode): tohost = [31:28]=pt1 index, [27:0]=low28 of
+# the value M-mode physically read back for that leaf PTE.
+22:
+  slli  t6, t5, 36
+  srli  t6, t6, 36          # t6 = low28 of read value
+  slli  t2, t2, 28          # index -> [31:28]
+  or    t2, t2, t6
+  la    t0, tohost
+  sw    t2, 0(t0)
+  fence rw, rw
+  j     park
 
   .section .data
   .align 12

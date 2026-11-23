@@ -117,11 +117,17 @@ ETYPES = {
     'ife.priv3': ('wrong-path', 'RFIX-131a-04', 'instruction fault presented in M-mode'),
     'hang': ('liveness', 'RFIX-131a-05', 'commit gap over the +hang_dump threshold'),
     'idle.wfi': ('idle', '', 'commit gap with WFI at the head: the hart sleeps (not an error)'),
+    'idle.halted': ('idle', '', 'commit gap on a halted/clock-held core with empty scoreboard (not an error)'),
     'seqgap': ('liveness', '', 'fetch sequence gap over +seq_gap_limit'),
     'assert': ('model-assert', '', 'RTL assertion ($error/$fatal) stopped or flagged the model'),
     'tlb': ('trace', '', '+tlb_trace record'),
     'wbuf.drop': ('diagnostic', '', 'write-buffer obligation dropped by other than a plain drop'),
     'verdict': ('verdict', '', 'harness end-of-test line'),
+    'stall.l2': ('liveness', '', '+smt_stats L2 FSM/MSHR state older than the stall gap, or live at final'),
+    'stall.l3': ('liveness', '', '+smt_stats L3-as-L2 FSM/MSHR state older than the stall gap, or live at final'),
+    'stall.coh': ('liveness', '', '+smt_stats coherence-hub AR/AW slot or invalidation live past the gap / at final'),
+    'stall.xbar': ('liveness', '', 'xbar demux AR/AW offered and refused (id counter full / foreign select / slave)'),
+    'stall.dcache': ('liveness', '', 'L1 D-cache read requests pending with no grant'),
     'progress.cycprog': ('progress', '', '+smt_cyc_progress per-hart retire/last-pc heartbeat'),
     'warn': ('unknown', '', 'unclassified stamped warning'),
 }
@@ -196,10 +202,16 @@ class Run:
         self.rows, self.census, self.kvs, self.uart = [], [], [], []
         self.seq = 0
         self.cycle = 0
+        self.max_cycle = 0
         self.counts = {}
         self.threads = {}
         self.verdict = None
         self.prog_exit = None
+
+    def set_cyc(self, c):
+        self.cycle = c
+        if c > self.max_cycle:
+            self.max_cycle = c
 
     def ev(self, cls, etype, exact=True, core=None, hart=None, addr=None, pc=None,
            aux=None, detail=None, raw=''):
@@ -214,6 +226,17 @@ def parse_log(run):
     ubuf = bytearray()   # UART line being assembled from "[uart] <char>" records
     ucyc = 0
     n_wb = n_boot = n_other = 0
+    pending_census = []  # (census_idx, kind, cyc, hart, ret, ipc) awaiting core scope on mem: line
+
+    def flush_pending_census(core_id=None):
+        nonlocal pending_census
+        for idx, knd, cyc_, hrt, ret_, ipc_ in pending_census:
+            if core_id is not None:
+                c = run.census[idx]
+                run.census[idx] = c[:2] + (f'{knd}.core{core_id}',) + c[3:]
+            t = run.threads.setdefault((core_id, hrt), {})
+            t.update(retired=ret_, ipc=ipc_, last_cycle=cyc_)
+        pending_census = []
 
     def uart_line(raw, cyc):
         t = raw.decode('utf-8', 'replace').strip()
@@ -234,16 +257,23 @@ def parse_log(run):
                 d.setdefault(label, {}).update(dict(RE_KV.findall(part)))
         head = d.get('SB head', {})
         lu = d.get('LU req:', {})
-        top = d.get('top', {})
-        run.cycle = cyc
-        # fu 6 / op 27 is WFI at the commit head: the hart is idle, not stuck
-        idle = head.get('fu') == '6' and head.get('op') == '27'
-        run.ev('hang', 'idle.wfi' if idle else f"hang.fu{head.get('fu', '?')}.op{head.get('op', '?')}",
+        # Parse the header line directly: later `| k=v` fragments (e.g. FE: | iq_rdy=0 halt=0)
+        # also have an empty label and would otherwise clobber d['top']['halt'].
+        top = dict(RE_KV.findall(lines[0]))
+        run.set_cyc(cyc)
+        # fu 6 / op 27 is WFI at the commit head; halt=1 & sb_empty=1 is a
+        # clock-held or parked secondary core -- neither is a real hang.
+        idle_wfi = head.get('fu') == '6' and head.get('op') == '27'
+        idle_halt = top.get('halt') == '1' and top.get('sb_empty') == '1'
+        et = ('idle.wfi' if idle_wfi else
+              'idle.halted' if idle_halt else
+              f"hang.fu{head.get('fu', '?')}.op{head.get('op', '?')}")
+        run.ev('hang', et,
                core=core_of(lines[0]), hart=int(head['hart']) if 'hart' in head else None,
                pc=hx(head['pc']) if 'pc' in head else None,
                addr=hx(lu['vaddr']) if 'vaddr' in lu else None,
                aux=f"since_ack={top.get('since_ack')} lsu_ready={top.get('lsu_ready')} "
-                   f"lsu_cnt={d.get('LSU bypass', {}).get('cnt')}",
+                   f"halt={top.get('halt')} lsu_cnt={d.get('LSU bypass', {}).get('cnt')}",
                detail=d, raw=lines[0])
         hang = None
 
@@ -272,7 +302,7 @@ def parse_log(run):
             if not s.startswith('[hang]'):
                 hang_close()
             if m:                 # [cycle] %Warning / %Error
-                run.cycle = int(m.group(1))
+                run.set_cyc(int(m.group(1)))
                 body = s[m.end():]
                 if 'Response Errored' in body:
                     kv = dict(RE_KV.findall(body))
@@ -300,14 +330,14 @@ def parse_log(run):
                 continue
             if s.startswith('[ptw-err]'):
                 kv = dict(RE_KV.findall(s))
-                run.cycle = int(kv.get('t', run.cycle))
+                run.set_cyc(int(kv.get('t', run.cycle)))
                 a = int(kv['vaddr'], 16)
                 kind = 'fetch' if kv.get('instr') == '1' else 'data'
                 run.ev('ptw', f'ptw.{kind}.{va_class(a)}', core=core_of(s), hart=int(kv.get('hart', 0)),
                        addr=hx(kv['vaddr']), aux=f"lvl={kv.get('lvl')} satp={kv.get('satp_ppn')}", raw=s)
             elif s.startswith('[mmu-ife]'):
                 kv = dict(RE_KV.findall(s))
-                run.cycle = int(kv.get('t', run.cycle))
+                run.set_cyc(int(kv.get('t', run.cycle)))
                 run.ev('ife', f"ife.priv{kv.get('priv')}.cause{kv.get('cause')}", core=core_of(s),
                        hart=int(kv.get('fetch_hart', 0)), addr=hx(kv['fetch_va']),
                        aux=f"itlb_hit={kv.get('itlb_hit')} ptw_err={kv.get('ptw_err')} "
@@ -321,26 +351,58 @@ def parse_log(run):
             elif s.startswith('[stall-census]'):
                 kv = dict(RE_KV.findall(s))
                 cyc = int(kv.get('cyc', run.cycle))
-                run.cycle = cyc
+                run.set_cyc(cyc)
                 kind = s.split()[1]
                 if ' mem: ' in s:
-                    # the mem line follows its core's last hart line
+                    # the mem line carries at=gen_core[N] and follows its core's hart lines
+                    c_ = core_of(s)
                     if run.census and run.census[-1][0] == cyc:
                         c = run.census[-1]
                         run.census[-1] = c[:5] + (int(kv.get('flush_cyc', 0)), int(kv.get('lu_replay', 0)),
                                                   int(kv.get('mem_viol', 0)), int(kv.get('ldbuf_full', 0)),
                                                   c[9])
+                    flush_pending_census(c_)
                 else:
                     hart = int(kv.get('hart', 0))
                     c_ = core_of(s)
+                    ret_ = int(kv.get('ret', 0))
+                    ipc_ = float(kv.get('ipc', 0))
                     run.census.append((cyc, hart, kind if c_ is None else f'{kind}.core{c_}',
-                                       int(kv.get('ret', 0)), float(kv.get('ipc', 0)),
+                                       ret_, ipc_,
                                        None, None, None, None, s[:1500]))
-                    t = run.threads.setdefault((core_of(s), hart), {})
-                    t.update(retired=int(kv.get('ret', 0)), ipc=float(kv.get('ipc', 0)), last_cycle=cyc)
+                    if c_ is None:
+                        pending_census.append((len(run.census) - 1, kind, cyc, hart, ret_, ipc_))
+                    else:
+                        t = run.threads.setdefault((c_, hart), {})
+                        t.update(retired=ret_, ipc=ipc_, last_cycle=cyc)
+            elif s.startswith(('[l2-stall]', '[coh-stall]', '[xbar-ar-stall]', '[xbar-aw-stall]',
+                               '[dcache-stall]')):
+                kv = dict(RE_KV.findall(s))
+                if 'cyc' in kv and kv['cyc'].isdigit():
+                    run.set_cyc(int(kv['cyc']))
+                tag_ = s[1:s.index(']')]
+                why = s.split()[1] if tag_ in ('l2-stall', 'coh-stall') else ''
+                if tag_ == 'l2-stall':
+                    et = 'stall.l3' if 'i_l3' in s else 'stall.l2'
+                    et += '.mshr' if ' mshr[' in s else '.fsm'
+                elif tag_ == 'coh-stall':
+                    mslot = re.search(r' (ar|aw|inv)\[\d+\]', s)
+                    et = 'stall.coh.' + (mslot.group(1) if mslot else 'hub')
+                elif tag_ == 'dcache-stall':
+                    et = 'stall.dcache'
+                else:
+                    ch = tag_.split('-')[1]
+                    blk = ('full' if kv.get('full') == '1' else
+                           'selocc' if (kv.get('selocc') == '1' and
+                                        kv.get('lkupsel') != kv.get(ch + 'sel')) else
+                           'slave' if kv.get(ch) == '0' else 'other')
+                    et = f'stall.xbar.{ch}.{blk}'
+                line_ = kv.get('line') or kv.get('addr')
+                run.ev('stall', et, core=core_of(s), addr=hx(line_) if line_ else None,
+                       aux=why or None, detail=kv, raw=s)
             elif s.startswith('[seq-gap]'):
                 kv = dict(RE_KV.findall(s))
-                run.cycle = int(kv.get('t', run.cycle))
+                run.set_cyc(int(kv.get('t', run.cycle)))
                 run.ev('seqgap', 'seqgap', core=core_of(s),
                        addr=hx(kv['front']) if 'front' in kv else None,
                        pc=hx(kv['redpc']) if 'redpc' in kv else None, aux=f"src={kv.get('src')}", raw=s)
@@ -359,7 +421,7 @@ def parse_log(run):
                 # `threads`/`profile` reflect live boot position, not just endpoint.
                 kv = dict(RE_KV.findall(s))
                 cyc = int(kv.get('cyc', run.cycle))
-                run.cycle = cyc
+                run.set_cyc(cyc)
                 c_ = core_of(s)
                 hart = int(kv.get('hart', 0))
                 ret = int(kv.get('retired', 0))
@@ -405,14 +467,20 @@ def parse_log(run):
                         # that simply ran out of cycles while every core still
                         # retired is 'incomplete' (needs a larger budget), not a
                         # deadlock. idle.wfi/seqgap/budget-tail are not wedge proof.
-                        wedged = any((r[5] == 'hang' and r[6] != 'idle.wfi') or
+                        wedged = any((r[5] == 'hang' and not r[6].startswith('idle.')) or
                                      r[5] == 'assert' for r in run.rows)
                         run.verdict = 'wedged' if wedged else 'incomplete'
                     else:
                         run.verdict = ('pass' if mv.group(1) == 'SUCCESS'
                                        else f'fail(tohost={mv.group(2)})')
-                    run.cycle = int(mv.group(3))
+                    run.set_cyc(int(mv.group(3)))
                     run.ev('verdict', 'verdict.tohost', aux=run.verdict, raw=s)
+            elif '*** TERMINATED (SIGTERM) ***' in s:
+                mv = re.search(r'after (\d+) cycles', s)
+                if mv:
+                    run.set_cyc(int(mv.group(1)))
+                run.verdict = 'stopped'
+                run.ev('verdict', 'verdict.sigterm', aux=run.verdict, raw=s)
             elif line.startswith(b'[uart] ') and b'uart_bytes=' not in line:
                 ch = line[7:-1]
                 if ch in (b'', bytes([13])):
@@ -428,6 +496,7 @@ def parse_log(run):
             else:
                 n_other += 1
         hang_close()
+        flush_pending_census(None)
         if ubuf:
             uart_line(bytes(ubuf), ucyc)
     run.counts = {'wbuffer_dropped': n_wb, 'boot_lines': n_boot, 'unclassified_lines': n_other}
@@ -536,14 +605,27 @@ def ingest_run(db, tag, test, kind, log, out_dir, meta, args):
         db.execute('DELETE FROM run WHERE id=?', (row[0],))
     t0 = time.time()
     run = Run(tag, test, kind, log, meta)
-    parse_log(run)
+    if kind == 'build_fail':
+        run.verdict = 'build_fail'
+        err_txt = log.read_text(errors='replace').strip()[:400]
+        run.ev('verdict', 'verdict.build_fail', exact=False, aux='gcc_build_fail', raw=err_txt)
+    else:
+        parse_log(run)
+    if meta.get('oracle') in ('oracle_ok', 'oracle_bad') and run.verdict and (
+            run.verdict == 'pass' or run.verdict.startswith('fail(')):
+        run.verdict = meta['oracle']
+    if run.verdict is None and kind != 'witness':
+        # no harness end-of-test line: a runner wall-clock kill ('timeout') or
+        # a log still being written. Never a pass.
+        run.verdict = {'timeout': 'killed(wall)', 'build_fail': 'build_fail'}.get(
+            meta.get('state'), 'no-verdict')
     rev = re.search(r'(rfix\d+[a-z]*|r\d+[a-z0-9]*)', tag)
     cur = db.execute(
         'INSERT INTO run(tag,test,kind,rev,int_tag,model_sha,elf,argv,budget,log_path,log_bytes,log_mtime,'
         'last_cycle,verdict,ingested_utc) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         (tag, test, kind, rev.group(1) if rev else None, meta.get('intTag'), meta.get('modelSha256'),
          meta.get('elf'), json.dumps(meta.get('argv')), int(meta.get('budget') or 0), str(log),
-         st.st_size, st.st_mtime, run.cycle, run.verdict,
+         st.st_size, st.st_mtime, run.max_cycle, run.verdict,
          time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())))
     rid = cur.lastrowid
     db.executemany('INSERT INTO event(run_id,seq,cycle,cycle_exact,core,hart,class,etype,addr,pc,aux,detail,raw)'
@@ -593,10 +675,10 @@ def ingest_run(db, tag, test, kind, log, out_dir, meta, args):
                 n_rv += len(rows)
     # sampled PC profile
     n_pc = 0
-    if files and args.profile_step and run.cycle > 4 * args.profile_step:
+    if files and args.profile_step and run.max_cycle > 4 * args.profile_step:
         for base_hart, p in files:
             c = 0
-            while c < run.cycle:
+            while c < run.max_cycle:
                 for r in rvfi_read(p, c, c + 4000, 48, base_hart // max(1, len(harts))):
                     db.execute('INSERT INTO pc_sample VALUES(?,?,?,?,?,?,?)',
                                (rid, r[0], r[1], r[2], r[3], r[4], pc_region(int(r[4], 16))))
@@ -604,7 +686,7 @@ def ingest_run(db, tag, test, kind, log, out_dir, meta, args):
                 c += args.profile_step
     db.commit()
     print(f'  + {tag}/{test}: {len(run.rows)} events, {len(run.census)} census, {len(run.uart)} uart, '
-          f'{n_rv} rvfi, {n_pc} pc samples, last_cycle={run.cycle}, verdict={run.verdict} '
+          f'{n_rv} rvfi, {n_pc} pc samples, last_cycle={run.max_cycle}, verdict={run.verdict} '
           f'[{time.time() - t0:.0f}s]', flush=True)
 
 
@@ -643,15 +725,37 @@ def discover(root, tag):
             meta = json.loads((out / 'witness.json').read_text())
         found.append(('boot', 'witness', wit, meta))
         return out, found
-    for name, kind in (('smokes-results.json', 'smoke'), ('probe-results.json', 'probe')):
+    # mc-directed-results.json is written after every test; its
+    # smokes-results.json mirror only when the suite ends, so a stopped or
+    # still-running suite is discovered through the former.
+    seen = set()
+    res = {}
+    for name, kind in (('smokes-results.json', 'smoke'), ('mc-directed-results.json', 'smoke'),
+                       ('probe-results.json', 'probe')):
         if (out / name).is_file():
             res = json.loads((out / name).read_text())
             for test, e in res.get('tests', {}).items():
                 log = out / f'{test}.log'
-                if log.is_file():
-                    found.append((test, kind, log,
-                                  {'intTag': res.get('intTag'), 'modelSha256': res.get('modelSha256'),
-                                   'argv': e.get('argv'), 'elf': (e.get('argv') or [None])[-1]}))
+                gcc_log = out / f'{test}.gcc.log'
+                meta = {'intTag': res.get('intTag'), 'modelSha256': res.get('modelSha256'),
+                        'argv': e.get('argv'), 'elf': (e.get('argv') or [None])[-1],
+                        'state': e.get('state'), 'oracle': e.get('oracle'),
+                        'test_kind': e.get('kind')}
+                if log.is_file() and test not in seen:
+                    seen.add(test)
+                    found.append((test, kind, log, meta))
+                elif e.get('state') == 'build_fail' and gcc_log.is_file() and test not in seen:
+                    seen.add(test)
+                    found.append((test, 'build_fail', gcc_log, meta))
+    # A test in flight when its runner died has a model log and no entry.
+    if (out / 'elf').is_dir():
+        for elf in sorted((out / 'elf').glob('*.elf')):
+            log = out / f'{elf.stem}.log'
+            if elf.stem not in seen and log.is_file() and log.stat().st_size:
+                seen.add(elf.stem)
+                found.append((elf.stem, 'smoke', log,
+                              {'intTag': res.get('intTag'), 'modelSha256': res.get('modelSha256'),
+                               'elf': str(elf), 'state': 'in-flight'}))
     return out, found
 
 

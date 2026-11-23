@@ -28,6 +28,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -72,12 +73,12 @@ TESTS = [
     ('mc_shared_line_xcore',  'mc_shared_line_coherence.S', ['-DPEER_HART=2'], 'pass'),
     ('mc_shared_line_sibling','mc_shared_line_coherence.S', ['-DPEER_HART=1'], 'pass'),
     ('mc_shared_line_quiet',  'mc_shared_line_quiet.S',   [], 'pass'),
-    ('mc_shared_line_resident','mc_shared_line_resident.S', [], 'pass'),
+    ('mc_shared_line_resident','mc_shared_line_resident.S', ['-DPEER_HART=2'], 'pass'),
     ('mc_multi_writer_line',  'mc_multi_writer_line.S',   [], 'pass'),
     ('mc_l2_write_read',      'mc_l2_write_read.S',       [], 'pass'),
     ('mc_l3_evict_inclusion','mc_l3_evict_inclusion.S',   [], 'pass'),
     ('mc_l3_stride_scan',     'mc_l3_stride_scan.S',      [], 'pass'),
-    ('mc_two_inval_backpressure','mc_two_inval_backpressure.S', [], 'pass'),
+    ('mc_two_inval_backpressure','mc_two_inval_backpressure.S', ['-DPEER_HART=2'], 'pass'),
     ('mc_store_load_new_line','mc_store_load_new_line.S', [], 'pass'),
     ('mc_cbo_contended',      'mc_cbo_contended.S',       [], 'pass'),
     ('mc_cbo_ewt',            'mc_cbo_ewt.S',             [], 'pass'),
@@ -120,9 +121,12 @@ TESTS = [
     # so kind='pass' is correct whether they skip or really run the CAS.
     ('mini_amocas_d',         'mini_amocas_d.S',          [], 'pass'),
     ('zacas_amocas_d',        'zacas_amocas_d.S',         [], 'pass'),
+    ('mc_amo_ld_order',       'mc_amo_ld_order.S',        [], 'pass'),
     ('zacas_amocas_w',        'zacas_amocas_w.S',         [], 'pass'),
     ('mc_cas_lock_handoff',   'mc_cas_lock_handoff.S',    [], 'pass'),
     ('mc_spo_cas_stream',     'mc_spo_cas_stream.S',      [], 'pass'),
+    # --- FP / multi-port OoO stress -----------------------------------------
+    ('mc_fp_alu2_stress',     'mc_fp_alu2_stress.S',      [], 'pass'),
     # --- traps / CSR / exceptions ------------------------------------------
     ('mc_csr_prologue',       'mc_csr_prologue.S',        [], 'pass'),
     ('mini_csr_expected_trap','mini_csr_expected_trap.S', [], 'pass'),
@@ -145,6 +149,10 @@ TESTS = [
     # other harts hold stale translations; each must sfence.vma and observe the
     # new mapping. Targets g6lc_tlb_hit_onehot0 / PTW invalidate path.
     ('mc_smode_shootdown',    'mc_smode_shootdown.S',     [], 'pass'),
+    # DIAG probe: pt1[] leaf PTEs = sentinel 0x1122334455667788 so the
+    # [ptw-err] pte field reveals which physical qword the lvl2 PTW read
+    # actually returns (right-addr-wrong-data vs wrong-address).
+    ('mc_smode_ptprobe',      'mc_smode_ptprobe.S',       [], 'oracle_neg'),
 ]
 
 
@@ -226,7 +234,10 @@ def main():
             continue
         entry['tohost'] = '0x' + format(int(tohost[0].split()[0], 16), 'x')
         log = out / f'{name}.log'
-        run_cmd = [str(model), f"+tohost_addr={entry['tohost']}", '+debug_disable',
+        # Line-buffer stdout so long tests stream [cycprog]/diagnostics live
+        # instead of sitting in a block buffer until exit (see witness runner).
+        model_cmd = (['stdbuf', '-oL'] if shutil.which('stdbuf') else []) + [str(model)]
+        run_cmd = [*model_cmd, f"+tohost_addr={entry['tohost']}", '+debug_disable',
                    f'+max-cycles={budget}', *extra, str(elf)]
         timed_out = False
         try:

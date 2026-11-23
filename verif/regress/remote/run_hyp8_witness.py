@@ -22,6 +22,7 @@ positive milestones in run-hyp8.log.
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -51,7 +52,16 @@ def main():
             elf = cand
             break
     assert elf is not None, f'no fw_payload.elf with sha {want} under {RUNS}'
-    cmd = [str(model), f'+tohost_addr={tohost}', '+debug_disable',
+    # Line-buffer the model's stdout: these witnesses run for days and every
+    # diagnostic ([cycprog]/[hang]/[stall-census]) goes through stdio -> a
+    # block-buffered run-hyp8.log, leaving the run blind until ~1.5M cycles or
+    # exit. `stdbuf -oL` streams heartbeats in real time when coreutils is
+    # present (it always is on the harness image); fall back to direct exec.
+    if shutil.which('stdbuf'):
+        launch_model = ['stdbuf', '-oL', str(model)]
+    else:
+        launch_model = [str(model)]
+    cmd = [*launch_model, f'+tohost_addr={tohost}', '+debug_disable',
            f'+max-cycles={budget}', *extra, str(elf)]
     log = out / 'run-hyp8.log'
     wait = [w for w in os.environ.get('HYP8_WAIT_PIDS', '').split(',') if w]

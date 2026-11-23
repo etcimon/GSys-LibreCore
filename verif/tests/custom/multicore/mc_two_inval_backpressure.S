@@ -29,6 +29,13 @@
 #        32+((mcause<<1)|1) on a trap.
 #
 # Needs NrCores >= 2. Requires +debug_disable and +tohost_addr.
+# PEER_HART selects the writer hart (default 1; pass -DPEER_HART=2 under SMT2
+# so the writer runs on core 1 rather than core 0's shared-L1 SMT sibling).
+
+#ifndef PEER_HART
+#define PEER_HART 1
+#endif
+  .equ CLINT_MSIP, 0x02000000
 
   .equ LINE_A,  0x80090000
   .equ LINE_B,  0x80090100
@@ -45,7 +52,9 @@ _start:
   csrr t0, mhartid
   la   t1, trap_vec
   csrw mtvec, t1
-  bnez t0, hart1
+  li   t1, PEER_HART
+  beq  t0, t1, hart1
+  bnez t0, hart1_park
 
   # ---- hart 0: the observer ----
   li   s1, LINE_A
@@ -55,6 +64,12 @@ _start:
   sd   zero, 0(s2)
   sd   zero, 0(s3)
   fence rw, rw
+#if PEER_HART > 1
+  li   t0, CLINT_MSIP
+  li   t1, 1
+  sw   t1, (4 * PEER_HART)(t0)  # release peer core from cluster boot hold
+  fence rw, rw
+#endif
 
   # Cache both lines. These loads must MISS and fill, so hart 0 genuinely holds
   # copies that hart 1's writes have to invalidate.
