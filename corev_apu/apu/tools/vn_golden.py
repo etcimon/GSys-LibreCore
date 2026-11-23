@@ -12417,6 +12417,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 else:
                     break
             _mdraw = int(_n) if _n else 1
+        # dindcnt: vkCmdDrawIndirectCount — the draw count is a u32 in
+        # countBuffer (ib2 at buffer offset 0x100) clamped to maxDrawCount,
+        # NOT a record operand.  _cdraw stride-stepped 16B command structs
+        # fill ib2; the stored count selects how many actually issue.
+        is_dcnt = 'dindcnt' in gfx
+        _cdraw, _cmax, _ccount = 4, 4, 2
         # statvp: pipeline carries a static pViewportState and the
         # command buffer emits NO SetViewport/SetScissor — coverage must
         # come from the ObjPay-baked viewport/scissor (the CTS
@@ -15767,8 +15773,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             ]
         # G3b-iii F8: the drawind/drawindx operand+index buffer — the
         # indirect operand sits at byte offset 4 (4-mod-8 alignment
-        # arm), the drawindx u16 index list at offset 0x20
-        if is_drawind or is_drawindx:
+        # arm), the drawindx u16 index list at offset 0x20; dindcnt
+        # reuses it for both the stride-stepped commands and the count u32
+        if is_drawind or is_drawindx or is_dcnt:
             seg_a1 += [
                 ('vkCreateBuffer', dict(
                     device=X['dev'],
@@ -16000,7 +16007,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         vmem_words = vb_words + \
             ([0] * ((0x800 - 4 * len(vb_words)) // 4) +
              vb2_words if is_wide else [])
-        if is_drawind or is_drawindx:
+        if is_drawind or is_drawindx or is_dcnt:
             # drawindxmesh issues a repeated {0,1,2} index list so the
             # indexed draw spans multiple vertex batches and exercises
             # post-transform vertex reuse across batches.  The count is
@@ -16018,10 +16025,16 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 _icount = int(_n) if _n else 240
             # drawindmd<N> packs N identical 16-byte commands back-to-back
             # (stride == command size); drawindx keeps the single 20-byte
-            # struct plus its trailing index-list words below
+            # struct plus its trailing index-list words below; dindcnt
+            # packs _cdraw structs and a count u32 at buffer offset 0x100.
             vmem_words += [0] * (0x301 - len(vmem_words)) + \
                 ([_icount, 1, 0, 0] * _mdraw if is_drawind
+                 else [_icount, 1, 0, 0] * _cdraw if is_dcnt
                  else [_icount, 1, 0, 0] + [0])
+            if is_dcnt:
+                # countBuffer==ib2, countBufferOffset=0x100 -> vmem word
+                # 0x340 holds the u32 draw count the executor clamps
+                vmem_words += [0] * (0x340 - len(vmem_words)) + [_ccount]
             if is_drawindx:
                 if is_dixmesh:
                     _ix = [j % 3 for j in range(_icount)]
@@ -16264,6 +16277,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             ([('vkCmdDrawIndirect', dict(
                 commandBuffer=cbdraw, buffer=X['ib2'], offset=4,
                 drawCount=_mdraw, stride=16))] if is_drawind else
+             [('vkCmdDrawIndirectCount', dict(
+                 commandBuffer=cbdraw, buffer=X['ib2'], offset=4,
+                 countBuffer=X['ib2'], countBufferOffset=0x100,
+                 maxDrawCount=_cmax, stride=16))] if is_dcnt else
              [('vkCmdDrawIndexedIndirect', dict(
                  commandBuffer=cbdraw, buffer=X['ib2'], offset=4,
                  drawCount=1, stride=20))] if is_drawindx else

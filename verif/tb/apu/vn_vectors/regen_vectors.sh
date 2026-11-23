@@ -172,6 +172,10 @@ python3 $G --graphics-session ue_gpos_statvp_1  1
 # ind_base_q[2] arm)
 python3 $G --graphics-session ue_gpos_drawind_1  1
 python3 $G --graphics-session ue_gpos_drawindx_1 1
+# dindcnt: vkCmdDrawIndirectCount — count u32 in countBuffer (ib2+0x100)
+# clamped to maxDrawCount=4; stored count=2 issues two stride-stepped
+# draws over the shared triangle footprint
+python3 $G --graphics-session ue_gpos_dindcnt_1 1
 python3 $G --graphics-session ue_gpos_blend_1    1
 # BGRA colour-write-mask pair: B8G8R8A8_UNORM attachment (vkfmt 44)
 # stores bytes [B,G,R,A]; cwmr keeps logical R only (mask 0x1), cwmb
