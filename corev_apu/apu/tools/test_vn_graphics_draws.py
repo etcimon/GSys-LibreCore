@@ -328,8 +328,34 @@ class DrawTests(unittest.TestCase):
         self.f.end()
         self.assertEqual(self.state().plans, [])
 
+    def test_indirect_multi_draw_expands_one_plan_per_command(self):
+        # drawCount=2 stride=16 -> two stride-stepped indirect commands,
+        # each becoming its own draw plan (multi-draw-indirect support)
+        self.g.pipeline()
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind_pipeline()
+        self.draw('vkCmdDrawIndirect', buffer=self.XB, offset=0, drawCount=2, stride=16)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        plans = self.state().plans
+        self.assertEqual(len(plans), 2)
+        for plan in plans:
+            self.assertEqual(plan.command, 'vkCmdDrawIndirect')
+            self.assertEqual(plan.values, (2, 16, 0))
+            self.assertEqual(plan.indirect.size, 16)
+            plan.validate()
+
     def test_indirect_profile_violations_are_refused(self):
-        for kwargs in (dict(drawCount=2, stride=16), dict(drawCount=1, stride=8),
+        # multi-draw-indirect is supported (drawCount>1 expands to one
+        # plan per stride-stepped command — see draw_replay coverage), so
+        # the refused cases are the genuine profile violations: a count
+        # beyond the executor operation budget, a stride below the
+        # command record size, and an out-of-bounds offset.  Each passes
+        # an explicit valid offset so the intended check is what fires.
+        for kwargs in (dict(drawCount=300, stride=16, offset=0),
+                       dict(drawCount=1, stride=8, offset=0),
                        dict(drawCount=1, stride=16, offset=60)):
             with self.subTest(kwargs=kwargs):
                 case = DrawTests()
