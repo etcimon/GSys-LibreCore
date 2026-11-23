@@ -21,10 +21,17 @@ class DynamicCommand(Recording):
 
 
 def capture(engine, current, name, record):
-    if name not in ('vkCmdSetViewport', 'vkCmdSetScissor'):
+    base = name in ('vkCmdSetViewport', 'vkCmdSetScissor')
+    counted = name in ('vkCmdSetViewportWithCount', 'vkCmdSetScissorWithCount')
+    if not (base or counted):
         return None
-    viewport = name == 'vkCmdSetViewport'
-    if (record['imm'][:2] != [0, 1] or record['chain'] or
+    viewport = 'Viewport' in name
+    # base carries {first,count} in imm[0:2]; *WithCount drops first and
+    # carries only count in imm[0] (always writes slots [0,count)).  The
+    # bounded profile is single-slot (maxVps=maxScissors=1), so only the
+    # count==1 record shape is admitted — identical pay payload to base.
+    shape = record['imm'][:2] == [0, 1] if base else record['imm'][0] == 1
+    if (not shape or record['chain'] or
             len(record['pay']) != (6 if viewport else 4)):
         raise ValueError('graphics dynamic first/count/payload exceeds profile')
     values = tuple(record['pay'])

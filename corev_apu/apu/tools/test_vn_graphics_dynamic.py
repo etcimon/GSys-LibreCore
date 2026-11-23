@@ -39,6 +39,21 @@ class DynamicTests(unittest.TestCase):
                 extent=self.w.structure('VkExtent2D', width=width, height=height))])
         return self.snapshot()
 
+    def viewport_wc(self, values=(0, 0, 8, 4, 0, 1), *, count=1):
+        words = tuple(map(bits, values))
+        self.f.command('vkCmdSetViewportWithCount', commandBuffer=self.f.CB,
+            viewportCount=count, pViewports=[self.w.structure('VkViewport',
+                **dict(zip(('x', 'y', 'width', 'height', 'minDepth', 'maxDepth'), words)))])
+        return self.snapshot()
+
+    def scissor_wc(self, values=(0, 0, 8, 4), *, count=1):
+        x, y, width, height = values
+        self.f.command('vkCmdSetScissorWithCount', commandBuffer=self.f.CB,
+            scissorCount=count, pScissors=[self.w.structure('VkRect2D',
+                offset=self.w.structure('VkOffset2D', x=x, y=y),
+                extent=self.w.structure('VkExtent2D', width=width, height=height))])
+        return self.snapshot()
+
     def refuses(self, method, *args, **kwargs):
         case = DynamicTests()
         case.setUp()
@@ -86,6 +101,20 @@ class DynamicTests(unittest.TestCase):
     def test_first_and_count_are_checked_before_truncation(self):
         for method in ('viewport', 'scissor'):
             for kwargs in (dict(first=1), dict(first=65536), dict(count=0), dict(count=2)):
+                with self.subTest(method=method, kwargs=kwargs):
+                    self.refuses(method, **kwargs)
+
+    def test_withcount_count1_matches_base_dynamic_state(self):
+        for wc, base in ((self.viewport_wc, self.viewport),
+                         (self.scissor_wc, self.scissor)):
+            with self.subTest(wc=wc.__name__):
+                snap = wc()
+                self.assertEqual(snap.kind, base().kind)
+                self.assertEqual(snap.values, base().values)
+
+    def test_withcount_count_above_single_slot_is_refused(self):
+        for method in ('viewport_wc', 'scissor_wc'):
+            for kwargs in (dict(count=0), dict(count=2)):
                 with self.subTest(method=method, kwargs=kwargs):
                     self.refuses(method, **kwargs)
 

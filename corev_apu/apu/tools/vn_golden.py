@@ -5614,6 +5614,8 @@ class FrontModel(ObjectTable, PayloadMemory):
                                 session['T'].get('vkCmdBeginRenderPass2'),
                                 session['T'].get('vkCmdSetViewport'),
                                 session['T'].get('vkCmdSetScissor'),
+                                session['T'].get('vkCmdSetViewportWithCount'),
+                                session['T'].get('vkCmdSetScissorWithCount'),
                                 session['T'].get('vkCmdSetBlendConstants'),
                                 session['T'].get('vkCmdBindIndexBuffer'),
                                 session['T']['vkCmdPipelineBarrier'],

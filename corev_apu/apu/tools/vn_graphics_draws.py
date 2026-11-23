@@ -73,7 +73,8 @@ class GraphicsDraws:
         return handled
 
     def _state(self, name, record):
-        if name in ('vkCmdSetViewport', 'vkCmdSetScissor'):
+        if name in ('vkCmdSetViewport', 'vkCmdSetScissor',
+                    'vkCmdSetViewportWithCount', 'vkCmdSetScissorWithCount'):
             return self._dynamic(name, record)
         if name == 'vkCmdBindVertexBuffers':
             return self._vertex_bindings(record)
@@ -95,7 +96,7 @@ class GraphicsDraws:
 
     def _dynamic(self, name, record):
         snapshot = record.get('native_graphics_dynamic')
-        kind = 'viewport' if name == 'vkCmdSetViewport' else 'scissor'
+        kind = 'viewport' if 'Viewport' in name else 'scissor'
         if not isinstance(snapshot, DynamicCommand) or snapshot.kind != kind:
             raise KeyError('graphics draw dynamic snapshot is unavailable')
         values = dynamic_values(self.engine, self.context_id, snapshot)
