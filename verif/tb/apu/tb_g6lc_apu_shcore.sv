@@ -328,7 +328,7 @@ module tb_g6lc_apu_shcore;
     // §12.3 F5: bindings -> aperture descriptor records + sideband.
     // 5-word entries {set,binding,size,addr,aux={kind,dyn,idx}};
     // elements of a (set,binding) share one boff row.
-    desc = '0;
+    desc = '{default: '0};
     begin
       int ecnt [4];
       int dord [4];
@@ -479,7 +479,7 @@ module tb_g6lc_apu_shcore;
     checks = 0; cases = 0; fails = 0; cyc = 0;
     wr_en = 0; commit = 0; retire = 0; work = 0; work_ctype = 0;
     sm_req = 0; sm_pl = '0;
-    work_imm = '0; disp_slot = 0; desc = '0; push_n = 0; push = '0;
+    work_imm = '0; disp_slot = 0; desc = '{default: '0}; push_n = 0; push = '0;
     for (int i = 0; i < MEMW; i++) mem[i] = '0;
     repeat (8) @(negedge clk); rst_n = 1;
     repeat (4) @(negedge clk);

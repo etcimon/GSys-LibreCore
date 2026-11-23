@@ -930,7 +930,7 @@ module tb_g6lc_apu_shwave
     // an image/sampler bind — 5 meta words follow carrying the
     // record's bytes 10..27 ({h,w},{layers,mdim,fmt},swz,smp0,smp1).
     base = hoff + n;
-    desc = '0;
+    desc = '{default: '0};
     begin
       int ecnt [4];                    // record cursor (32 B units)
       int dord [4];                    // dynamic-element ordinal
@@ -1563,7 +1563,7 @@ module tb_g6lc_apu_shwave
     if (!$value$plusargs("n_seeds=%d", n_seeds) || n_seeds > 3)
       n_seeds = 3;
     wr_en = 0; commit = 0; retire = 0; work = 0; work_ctype = 0;
-    work_imm = '0; disp_slot = 0; desc = '0; push_n = 0; push = '0;
+    work_imm = '0; disp_slot = 0; desc = '{default: '0}; push_n = 0; push = '0;
     for (int i = 0; i < MEMW; i++) mem[i] = '0;
     repeat (8) @(negedge clk); rst_n = 1;
     repeat (4) @(negedge clk);

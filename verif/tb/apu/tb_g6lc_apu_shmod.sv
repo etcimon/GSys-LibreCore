@@ -353,10 +353,10 @@ module tb_g6lc_apu_shmod;
     minst(15, 4); mw(5); mw(5); mw(0);
     cases++; run_synth("twoentry", APU_SH_FAULT_TWO_ENTRY, 15);
 
-    // LocalSize 16*16*1 = 256 > 128 (maxComputeWorkGroupInvocations)
+    // LocalSize 16*16*2 = 512 > 256 (maxComputeWorkGroupInvocations)
     mheader(32); minst(17, 2); mw(1); minst(14, 3); mw(0); mw(1);
     minst(15, 4); mw(5); mw(4); mw(0);
-    minst(16, 6); mw(4); mw(17); mw(16); mw(16); mw(1);
+    minst(16, 6); mw(4); mw(17); mw(16); mw(16); mw(2);
     cases++; run_synth("biglocal", APU_SH_FAULT_LOCALSIZE, 16);
 
     // > ShaderRegs registers: 260 OpVariable in the function

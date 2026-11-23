@@ -8170,7 +8170,7 @@ module g6lc_apu_vnfront
               state_q  <= StOtReq;
             end else begin
               sem_sig_ph_q <= sem_sig_ph_q + 2'd1;
-              stg_i_q      <= stg_i_q + 16'd1;
+              stg_i_q      <= stg_i_q + 1'b1;
               stg_ret_q    <= StSigSemRd;
               state_q      <= StStgRd;
             end
