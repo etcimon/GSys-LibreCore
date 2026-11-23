@@ -548,7 +548,7 @@ module tb_g6lc_apu_cmdexec;
   logic [31:0] img2_h, view2_h, rp2_h, fb2_h, gpipe1_h;
   logic [31:0] qry_h, qry2_h, qry3_h;
   logic [31:0] cp_mem_h, cp_buf_h;
-  logic [31:0] ind_mem_h, ind_buf_h;
+  logic [31:0] ind_mem_h, ind_buf_h, ind_mem2_h, ind_buf2_h;
   localparam int QRY_EXT = 28672;   // result-extent word base in paymem
   // COPY dst aperture: dedicated memory at byte base 0x8000 -> apm
   // word 0x2000, kept clear of the shared buf0/buf1 region (0x4000)
@@ -1412,6 +1412,127 @@ module tb_g6lc_apu_cmdexec;
         if (got_work[w] == APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_EXT) ndi++;
       check("sdi no lost", flost[12] === 1'b0);
       check("sdi drawCount=1 work", ndi == 1);
+      cases++;
+    end
+
+    // ---- DrawIndirectCount: countBuffer resolve + clamp (type 165) --
+    // Two bound buffers: the commands buffer (aperture 0xA000 -> apm
+    // 0x2800) holds four packed VkDrawIndirectCommand at stride 16; the
+    // countBuffer (aperture 0xC000 -> apm 0x3000) holds a u32 draw
+    // count.  Submit A count=2/maxDrawCount=5 -> 2 draws proves the
+    // countBuffer word is really read (not maxDrawCount=5).  Submit B
+    // count=9/maxDrawCount=4 -> 4 draws exercises the clamp.  Reuses
+    // the gpipe1_h/rp2_h/fb2_h subpass-1 draw scaffolding.
+    tb_drv = 1'b1;
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0076,
+          APU_VN_KIND_VK_DEVICE_MEMORY, .size(64'd256));
+    ind_mem_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETAUXHI, 64'h1000_0000_0000_0076,
+          APU_VN_KIND_VK_DEVICE_MEMORY,
+          .mask(32'hFFFF_FFFF), .value(32'h0000_A000));
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0077,
+          APU_VN_KIND_VK_BUFFER, .size(64'd256));
+    ind_buf_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETBIND, 64'h1000_0000_0000_0077,
+          APU_VN_KIND_VK_BUFFER, .size(64'd256),
+          .mem_id(64'h1000_0000_0000_0076));
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0078,
+          APU_VN_KIND_VK_DEVICE_MEMORY, .size(64'd256));
+    ind_mem2_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETAUXHI, 64'h1000_0000_0000_0078,
+          APU_VN_KIND_VK_DEVICE_MEMORY,
+          .mask(32'hFFFF_FFFF), .value(32'h0000_C000));
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0079,
+          APU_VN_KIND_VK_BUFFER, .size(64'd256));
+    ind_buf2_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETBIND, 64'h1000_0000_0000_0079,
+          APU_VN_KIND_VK_BUFFER, .size(64'd256),
+          .mem_id(64'h1000_0000_0000_0078));
+    for (int i = 0; i < 4; i++) begin
+      i_emem.apm[32'h2800 + i*4 + 0] = 32'd3;
+      i_emem.apm[32'h2800 + i*4 + 1] = 32'd1;
+      i_emem.apm[32'h2800 + i*4 + 2] = 32'd0;
+      i_emem.apm[32'h2800 + i*4 + 3] = 32'd0;
+    end
+    // ---- submit A: count=2, maxDrawCount=5 -> 2 draws ----
+    i_emem.apm[32'h3000] = 32'd2;
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[16], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT, gpipe1_h,
+                APU_VN_KIND_VK_PIPELINE, 0));
+    begin
+      apu_cmdrec_rec_t rr = mkrec(
+          APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT, rp2_h,
+          APU_VN_KIND_VK_RENDER_PASS, 0);
+      rr.handle[1] = fb2_h; rr.kind[1] = APU_VN_KIND_VK_FRAMEBUFFER;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0, rr, 16'd1);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_EXT, 0, 0, 0));
+    begin
+      apu_cmdrec_rec_t dr = mkrec(
+          APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_COUNT_EXT, ind_buf_h,
+          APU_VN_KIND_VK_BUFFER, 32'd5);
+      dr.handle[1] = ind_buf2_h; dr.kind[1] = APU_VN_KIND_VK_BUFFER;
+      dr.imm[1] = 32'd16;   // stride
+      dr.imm[4] = 32'd0;    // countBufferOffset lo
+      dr.imm[5] = 32'd0;    // countBufferOffset hi
+      cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0, dr);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_END_RENDER_PASS_EXT, 0, 0, 0));
+    cr_op(APU_CMDREC_OP_END, cbd[16], 0, '0);
+    tb_drv = 1'b0;
+    begin
+      int w0 = work_i, ndi = 0;
+      fclr[13] = 1'b1; @(negedge clk); fclr[13] = 1'b0; @(negedge clk);
+      submit(5'd13, 1, cbd[16], cb_h, 32'h0, 32'h0);
+      wait_fence(13, 8000);
+      for (int w = w0; w < work_i; w++)
+        if (got_work[w] ==
+            APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_COUNT_EXT) ndi++;
+      check("mdc no lost", flost[13] === 1'b0);
+      check("mdc count=2 work", ndi == 2);
+      cases++;
+    end
+    // ---- submit B: count=9, maxDrawCount=4 -> 4 draws (clamp) ----
+    tb_drv = 1'b1;
+    i_emem.apm[32'h3000] = 32'd9;
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[16], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT, gpipe1_h,
+                APU_VN_KIND_VK_PIPELINE, 0));
+    begin
+      apu_cmdrec_rec_t rr = mkrec(
+          APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT, rp2_h,
+          APU_VN_KIND_VK_RENDER_PASS, 0);
+      rr.handle[1] = fb2_h; rr.kind[1] = APU_VN_KIND_VK_FRAMEBUFFER;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0, rr, 16'd1);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_EXT, 0, 0, 0));
+    begin
+      apu_cmdrec_rec_t dr = mkrec(
+          APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_COUNT_EXT, ind_buf_h,
+          APU_VN_KIND_VK_BUFFER, 32'd4);
+      dr.handle[1] = ind_buf2_h; dr.kind[1] = APU_VN_KIND_VK_BUFFER;
+      dr.imm[1] = 32'd16;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0, dr);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_END_RENDER_PASS_EXT, 0, 0, 0));
+    cr_op(APU_CMDREC_OP_END, cbd[16], 0, '0);
+    tb_drv = 1'b0;
+    begin
+      int w0 = work_i, ndi = 0;
+      fclr[14] = 1'b1; @(negedge clk); fclr[14] = 1'b0; @(negedge clk);
+      submit(5'd14, 1, cbd[16], cb_h, 32'h0, 32'h0);
+      wait_fence(14, 8000);
+      for (int w = w0; w < work_i; w++)
+        if (got_work[w] ==
+            APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_COUNT_EXT) ndi++;
+      check("mdc clamp no lost", flost[14] === 1'b0);
+      check("mdc clamp count=9->4 work", ndi == 4);
       cases++;
     end
 
