@@ -1838,6 +1838,16 @@ module g6lc_apu_cmdexec
               clr_ok_q   <= 1'b0;
               pay_ret_q  <= StNextBuf;
               xf_for_q   <= 2'd0;
+              // per-record indirect state: a submission lost mid-fetch
+              // (StUnpReq) can leave ind_q/ind_cnt_q/ind_loop_q set —
+              // clear them here so the next record's StXfMemCpl/StDsDone
+              // never sees a stale indirect operand or loop.  StRdCpl
+              // runs once per record before dispatch re-arms these and
+              // never fires inside the multi-draw StDsDone->StIndRd loop.
+              ind_q       <= 1'b0;
+              ind_cnt_q   <= 1'b0;
+              ind_loop_q  <= 1'b0;
+              ind_left_q  <= '0;
               state_q <= StResReq;
             end
           end
