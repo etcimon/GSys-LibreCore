@@ -1441,7 +1441,7 @@ module g6lc_apu_cmdexec
         ds_pool_q   <= '0;   ds_epoch_q <= '0;
         ds_i_q      <= '0;   ds_nb_q <= '0;
         ds_rw0_q    <= '0;
-        desc_q      <= '0;
+        desc_q      <= '{default: '0};
         ds_rh_q     <= '0;
         pay_bind_q  <= 1'b0;
         pay_nset_q  <= '0;   pay_dnb_q <= '0;
@@ -1493,7 +1493,7 @@ module g6lc_apu_cmdexec
         cp_i_q      <= '0; cp_nc_q    <= '0; cp_rb_q <= '0;
         cp_cw_q     <= '0; cp_av_q    <= '0; cp_rbase_q <= '0;
         cp_fw_q     <= '0; cp_tw_q    <= '0; cp_rw_q <= '0;
-        rd_q        <= '0;
+        rd_q        <= '{default: '0};
         xf_for_q    <= '0; xf_xoff_q <= '0;
         dr_bq       <= '0; dr_vbmask_q <= '0; dr_pi_q <= '0;
         dr_bcdyn_q  <= 1'b0; dr_dynmask_q <= '0;
@@ -2330,7 +2330,7 @@ module g6lc_apu_cmdexec
                     lost_q  <= 1'b1;
                     state_q <= StUnpReq;
                   end else begin
-                    desc_q  <= '0;
+                    desc_q  <= '{default: '0};
                     state_q <= StDsPipeReq;
                   end
                 end else if (rec_q.ctype ==
@@ -2406,7 +2406,7 @@ module g6lc_apu_cmdexec
                     lost_q  <= 1'b1;
                     state_q <= StUnpReq;
                   end else begin
-                    desc_q  <= '0;
+                    desc_q  <= '{default: '0};
                     rd_q.op          <= APU_RAST_OP_DRAW;
                     rd_q.ca          <= ca_q;
                     rd_q.ca_valid    <= ca_valid_q;
@@ -2531,7 +2531,7 @@ module g6lc_apu_cmdexec
               rd_gpay_q   <= 32'(ot_cpl_i.entry.aux[31:16]) << 6;
               dr_vbmask_q <= '0;
               dr_pi_q     <= '0;
-              desc_q      <= '0;
+              desc_q      <= '{default: '0};
               rs_fault_q  <= 1'b0;
               rs_spec_q   <= '0;
               pbr_addr_q  <= (32'(ot_cpl_i.entry.aux[31:16]) << 6) +
@@ -3103,7 +3103,7 @@ module g6lc_apu_cmdexec
                     rec_q.imm[0] <= f_iw(3'd0);
                     rec_q.imm[1] <= f_iw(3'd1);
                     rec_q.imm[2] <= f_iw(3'd2);
-                    desc_q  <= '0;
+                    desc_q  <= '{default: '0};
                     state_q <= StDsPipeReq;
                   end
                   // VkDrawIndirectCommand / VkDrawIndexedIndirect-
@@ -3114,7 +3114,7 @@ module g6lc_apu_cmdexec
                   APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT,
                   APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_COUNT_EXT,
                   APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_COUNT_EXT: begin
-                    desc_q  <= '0;
+                    desc_q  <= '{default: '0};
                     rd_q.op          <= APU_RAST_OP_DRAW;
                     rd_q.ca          <= ca_q;
                     rd_q.ca_valid    <= ca_valid_q;

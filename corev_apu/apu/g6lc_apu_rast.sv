@@ -1889,7 +1889,7 @@ module g6lc_apu_rast
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
         st_q <= S_IDLE;
-        dr_q <= '0; desc_q <= '0; push_n_q <= '0; push_q <= '0;
+        dr_q <= '{default: '0}; desc_q <= '{default: '0}; push_n_q <= '0; push_q <= '0;
         wid_q <= '0; robust_q <= '0; code_q <= '0;
         scr_ok_q <= 1'b0;
         vsi_q <= '0; vso_q <= '0; fsi_q <= '0; fso_q <= '0;
