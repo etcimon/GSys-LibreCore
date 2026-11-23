@@ -90,6 +90,33 @@ def replay(images, record, name, *, compute=False, device=None):
             raise ValueError('event signal crosses command-buffer devices')
         images.operations.append(EventSignal((entry,), name == 'vkCmdSetEvent'))
         return
+    if name == 'vkCmdWaitEvents2':
+        # synchronization2: imm[0]=eventCount; the retained payload leads
+        # with `count` resolved event-handle words then `count`
+        # self-delimiting VkDependencyInfo barrier blocks (per-event
+        # dependency model).  No global stage/access — each barrier carries
+        # its own u64 masks.
+        count = imm[0] & 0xFFFF
+        dep_count = count
+        if (count > MAX_EVENTS or not count or any(imm[1:7]) or
+                record.get('payload_words', 0) < count):
+            raise ValueError('sync2 event wait record exceeds native profile')
+        entries = []
+        for word in images.payload(record, count):
+            _, entry = images.remember(word, golden.KIND['VkEvent'])
+            if device is not None and entry['parent'] != device:
+                raise ValueError('event wait crosses command-buffer devices')
+            entries.append(entry)
+        if entries:
+            if images._remaining() < 1:
+                raise MemoryError('event wait operation budget exhausted')
+            images.operations.append(EventWait(tuple(entries)))
+        stream = images.payload(record, record['payload_words'] - count,
+                                offset=count)
+        from vn_image_barriers import replay_sync2_wait2
+        replay_sync2_wait2(images, stream, dep_count,
+                           compute=compute, device=device)
+        return
     count = imm[0]
     memory, buffers, barrier_count = imm[3], imm[4], imm[5]
     barrier_words = memory * 2 + buffers * 10 + barrier_count * WORDS

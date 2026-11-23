@@ -176,7 +176,8 @@ class TransferReplay:
                     replay_sync2_barrier(images, record, compute=compute,
                                          device=pool['parent'])
                 elif name in ('vkCmdSetEvent', 'vkCmdResetEvent', 'vkCmdWaitEvents',
-                              'vkCmdResetEvent2', 'vkCmdSetEvent2'):
+                              'vkCmdResetEvent2', 'vkCmdSetEvent2',
+                              'vkCmdWaitEvents2'):
                     replay_event(images, record, name, compute=compute,
                                  device=pool['parent'])
                 elif name in ('vkCmdBeginConditionalRenderingEXT',

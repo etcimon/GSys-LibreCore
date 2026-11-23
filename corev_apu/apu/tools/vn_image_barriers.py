@@ -58,6 +58,23 @@ def sync2_fields(prefix=''):
             [p('pImageMemoryBarriers.' + f) for f in SYNC2_IMAGE])
 
 
+# Per-VkDependencyInfo scalar members kept so the retained pay stream is
+# self-delimiting: dependencyFlags (validated == 0) then the three barrier
+# counts, each immediately followed by that array's staged element words.
+# WaitEvents2 carries eventCount such structs, so its pay repeats this
+# [flags, memCount, mem..., bufCount, buf..., imgCount, img...] block.
+SYNC2_DEP_COUNTS = ('memoryBarrierCount', 'bufferMemoryBarrierCount',
+                    'imageMemoryBarrierCount')
+
+
+def sync2_dep_info(prefix=''):
+    """Keep paths for one VkDependencyInfo's own scalars (flags + the
+    three barrier counts).  Combined with sync2_fields() these let a
+    consumer walk the pay stream without a side table."""
+    p = lambda n: prefix + n
+    return [p('dependencyFlags')] + [p(n) for n in SYNC2_DEP_COUNTS]
+
+
 def capture(engine, front, record, base=0):
     memory, buffers, images = record['imm'][3:6]
     length = memory * 2 + buffers * 10 + images * WORDS
@@ -231,21 +248,12 @@ def replay(images, record, *, compute=False, device=None, offset=0):
         entry['layout'] = r[3]
 
 
-def replay_sync2(images, record, *, compute=False, device=None):
-    """Replay a synchronization2 barrier record (vkCmdPipelineBarrier2 /
-    SetEvent2 / WaitEvents2 dependency payload).  imm[0]=dependencyFlags,
-    imm[1:4]=memory/buffer/image barrier counts; pay holds per-barrier
-    u64 stage/access masks plus the buffer/image handle+range fields."""
-    imm = record['imm']
-    memory, buffers, count = imm[1], imm[2], imm[3]
-    if (imm[0] or any(n < 0 for n in (memory, buffers, count)) or
-            memory + buffers + count > 16):
-        raise ValueError('sync2 dependency/barrier count exceeds coherent profile')
-    length = (memory * SYNC2_MEMORY_WORDS +
-              buffers * SYNC2_BUFFER_WORDS + count * SYNC2_IMAGE_WORDS)
-    if record.get('payload_words') != length:
-        raise ValueError('sync2 barrier payload is not retained exactly')
-    data = images.payload(record, length) if length else []
+def _sync2_barriers(images, data, memory, buffers, count, *,
+                    compute=False, device=None):
+    """Validate + replay one flat synchronization2 barrier stream
+    ([memory 8w][buffer 16w][image 19w] per element) into typed barrier
+    Transfer ops.  Shared by replay_sync2 (singular pDependencyInfo) and
+    the per-dependencyInfo blocks of vkCmdWaitEvents2."""
     if buffers + count > images._remaining():
         raise MemoryError('sync2 barrier operation budget exhausted')
     for i in range(memory):
@@ -328,3 +336,145 @@ def replay_sync2(images, record, *, compute=False, device=None):
         if old_layout != 0 and old_layout != cur:
             raise ValueError('sync2 image barrier oldLayout does not match current layout')
         entry['layout'] = new_layout
+
+
+def replay_sync2(images, record, *, compute=False, device=None):
+    """Replay a synchronization2 barrier record (vkCmdPipelineBarrier2 /
+    SetEvent2 dependency payload).  imm[0]=dependencyFlags,
+    imm[1:4]=memory/buffer/image barrier counts; pay holds per-barrier
+    u64 stage/access masks plus the buffer/image handle+range fields."""
+    imm = record['imm']
+    memory, buffers, count = imm[1], imm[2], imm[3]
+    if (imm[0] or any(n < 0 for n in (memory, buffers, count)) or
+            memory + buffers + count > 16):
+        raise ValueError('sync2 dependency/barrier count exceeds coherent profile')
+    length = (memory * SYNC2_MEMORY_WORDS +
+              buffers * SYNC2_BUFFER_WORDS + count * SYNC2_IMAGE_WORDS)
+    if record.get('payload_words') != length:
+        raise ValueError('sync2 barrier payload is not retained exactly')
+    data = images.payload(record, length) if length else []
+    _sync2_barriers(images, data, memory, buffers, count,
+                    compute=compute, device=device)
+
+
+def dep_info_stream(pay, start, count):
+    """Walk `count` VkDependencyInfo blocks in a staged pay stream.
+
+    Each block is self-delimiting:
+      [dependencyFlags][memoryBarrierCount][memory 8w x N]
+      [bufferMemoryBarrierCount][buffer 16w x N]
+      [imageMemoryBarrierCount][image 19w x N]
+    Yields (flags, memory, buffers, images, mem_data, buf_data, img_data)
+    where the *_data slices are the contiguous per-type barrier words.
+    Returns the offset just past the last block."""
+    p = start
+    out = []
+    for _ in range(count):
+        if p + 4 > len(pay):
+            raise ValueError('sync2 dependency-info stream is truncated')
+        flags, memory = pay[p], pay[p + 1]
+        p += 2
+        mem = pay[p:p + memory * SYNC2_MEMORY_WORDS]
+        p += memory * SYNC2_MEMORY_WORDS
+        if p >= len(pay):
+            raise ValueError('sync2 dependency-info stream is truncated')
+        buffers = pay[p]
+        p += 1
+        buf = pay[p:p + buffers * SYNC2_BUFFER_WORDS]
+        p += buffers * SYNC2_BUFFER_WORDS
+        if p >= len(pay):
+            raise ValueError('sync2 dependency-info stream is truncated')
+        images = pay[p]
+        p += 1
+        img = pay[p:p + images * SYNC2_IMAGE_WORDS]
+        p += images * SYNC2_IMAGE_WORDS
+        out.append((flags, memory, buffers, images, mem, buf, img))
+    return out, p
+
+
+def _dep_info_handles(data, buffers, images, off_buf, off_img, front,
+                      engine):
+    """Resolve embedded VkBuffer/VkImage ids inside one dep-info barrier
+    group to {gen,slot} record handles, in place on `data`."""
+    for i in range(buffers):
+        p = off_buf + i * SYNC2_BUFFER_WORDS + 10
+        value = data[p] | data[p + 1] << 32
+        status, slot, entry = front.resolve(
+            value, engine.golden.KIND['VkBuffer'])
+        if status != 'OK' or entry['ctx'] != front.ctx:
+            raise KeyError('sync2 buffer barrier refers to stale/foreign resource')
+        data[p:p + 2] = [entry['gen'] << 16 | slot, 0]
+    for i in range(images):
+        p = off_img + i * SYNC2_IMAGE_WORDS + 12
+        value = data[p] | data[p + 1] << 32
+        status, slot, entry = front.resolve(
+            value, engine.golden.KIND['VkImage'])
+        if status != 'OK' or entry['ctx'] != front.ctx:
+            raise KeyError('sync2 image barrier refers to stale/foreign resource')
+        data[p:p + 2] = [entry['gen'] << 16 | slot, 0]
+
+
+def capture_sync2_wait2(engine, front, record):
+    """Canonicalize the vkCmdWaitEvents2 retained payload: 2 words per
+    event id lead, then `eventCount` self-delimiting VkDependencyInfo
+    blocks.  Resolves embedded buffer/image barrier handles to
+    {gen,slot} in place and bounds every count/range."""
+    count = record['imm'][0] & 0xFFFF
+    base = 2 * count
+    if record['chain'] or base > len(record['pay']):
+        raise ValueError('sync2 wait2 payload chain/count exceeds profile')
+    data = list(record['pay'])
+    p = base
+    total = 0
+    for _ in range(count):
+        # [dependencyFlags][memoryBarrierCount][mem 8w][bufCount]
+        # [buf 16w][imgCount][img 19w]
+        if p + 4 > len(data):
+            raise ValueError('sync2 wait2 dependency-info stream is truncated')
+        flags, memory = data[p], data[p + 1]
+        if flags or memory < 0 or memory > 16:
+            raise ValueError('sync2 wait2 dependency/barrier count exceeds profile')
+        p += 2
+        mem_end = p + memory * SYNC2_MEMORY_WORDS
+        if mem_end > len(data):
+            raise ValueError('sync2 wait2 dependency-info stream is truncated')
+        p = mem_end
+        buffers = data[p]
+        p += 1
+        buf_start = p
+        buf_end = p + buffers * SYNC2_BUFFER_WORDS
+        if buffers < 0 or buf_end > len(data):
+            raise ValueError('sync2 wait2 dependency-info stream is truncated')
+        p = buf_end
+        images = data[p]
+        p += 1
+        img_start = p
+        img_end = p + images * SYNC2_IMAGE_WORDS
+        if images < 0 or img_end > len(data):
+            raise ValueError('sync2 wait2 dependency-info stream is truncated')
+        p = img_end
+        total += memory + buffers + images
+        if total > 16:
+            raise ValueError('sync2 wait2 total barrier count exceeds profile')
+        _dep_info_handles(data, buffers, images, buf_start, img_start,
+                          front, engine)
+    if p != len(data):
+        raise ValueError('sync2 wait2 payload has trailing words')
+    record['pay'] = data
+
+
+def replay_sync2_wait2(images, stream, count, *, compute=False, device=None):
+    """Replay the `count` VkDependencyInfo blocks trailing a vkCmdWaitEvents2
+    event-id list.  `stream` is the retained pay slice starting at the first
+    dependencyFlags word; each block is self-delimiting (see
+    dep_info_stream).  The leading resolved event handles and the EventWait
+    op itself are emitted by the caller."""
+    blocks, end = dep_info_stream(stream, 0, count)
+    if end != len(stream):
+        raise ValueError('sync2 wait2 dependency-info stream is malformed')
+    for flags, memory, buffers, images_, mem, buf, img in blocks:
+        if flags or memory + buffers + images_ > 16:
+            raise ValueError('sync2 wait2 dependency/barrier count exceeds profile')
+        flat = list(mem) + list(buf) + list(img)
+        _sync2_barriers(images, flat, memory, buffers, images_,
+                        compute=compute, device=device)

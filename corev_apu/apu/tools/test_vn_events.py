@@ -107,6 +107,17 @@ class EventTests(unittest.TestCase):
                        event=event or self.EVENT,
                        pDependencyInfo=self.dependency_info(**kwargs))
 
+    def wait_events2(self, events=None, deps=None, **kwargs):
+        # vkCmdWaitEvents2 carries one VkDependencyInfo per event
+        # (pDependencyInfos is len=eventCount on the wire).
+        events = [self.EVENT] if events is None else events
+        deps = deps if deps is not None else [self.dependency_info(**kwargs)]
+        if len(deps) == 1 and len(events) > 1:
+            deps = deps * len(events)
+        self.f.command('vkCmdWaitEvents2', commandBuffer=self.f.CB,
+            eventCount=len(events), pEvents=events,
+            pDependencyInfos=deps)
+
     def status(self, event=None):
         self.f.command('vkSeekReplyCommandStreamMESA', position=0)
         self.f.command('vkGetEventStatus', device=self.w.DEVICE,
@@ -252,6 +263,71 @@ class EventTests(unittest.TestCase):
         self.host_set()
         self.f.drain()
         self.assertEqual(job.state, 'done')
+
+    def test_wait_events2_replays_events_and_per_event_barriers(self):
+        # one VkDependencyInfo per event; buffer+image barriers each retain
+        # a typed Transfer op after the ordered EventWait (memory barriers
+        # validate scope only), matching the base WaitEvents profile.
+        self.images.create(usage=0x17)
+        self.host_set(self.SECOND)
+        self.f.begin()
+        self.set_event()
+        self.wait_events2([self.EVENT, self.SECOND],
+                          deps=[self.dependency_info(buffers=1),
+                                self.dependency_info(images=1)])
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertEqual([op.__class__.__name__ for op in job.operations],
+                         ['EventSignal', 'EventWait', 'Transfer', 'Transfer'])
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+
+    def test_wait_events2_blocks_until_all_events_signal(self):
+        self.host_set(self.SECOND)
+        self.f.begin()
+        self.wait_events2([self.EVENT, self.SECOND], memory=1)
+        self.f.end()
+        job = self.f.enqueue()
+        self.f.service.poll()
+        self.assertEqual(job.state, 'running')
+        self.host_set()
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+
+    def test_wait_events2_rejects_nonzero_dependency_flags(self):
+        # dependencyFlags is kept into the retained stream and fails
+        # closed at capture (command time), faulting the recording stream.
+        bad_flag = self.w.structure(
+            'VkDependencyInfo', dependencyFlags=1, memoryBarrierCount=0,
+            pMemoryBarriers=[], bufferMemoryBarrierCount=0,
+            pBufferMemoryBarriers=[], imageMemoryBarrierCount=0,
+            pImageMemoryBarriers=[])
+        self.f.begin()
+        with self.assertRaises(ValueError, msg='dependencyFlags'):
+            self.wait_events2(deps=[bad_flag])
+
+    def test_wait_events2_rejects_out_of_profile_dependencies(self):
+        self.images.create(usage=0x17)
+        # a sync2-only high stage bit, an incompatible access/stage pair,
+        # and an out-of-range buffer all refuse at replay — each
+        # atomically, before any op is emitted.
+        for deps in (
+                [self.dependency_info(memory=1, src=1 << 32)],
+                [self.dependency_info(memory=1, dst_access=0x20)],
+                [self.dependency_info(buffers=1, src=0x10)]):
+            self.f.begin()
+            self.wait_events2(deps=deps)
+            self.f.end()
+            with self.assertRaises(ValueError, msg=str(deps)):
+                self.f.enqueue()
+            self.assertFalse(self.e.transfers.active)
+            self.assertFalse(self.e.replay.held)
+
+    def test_wait_events2_needs_live_barrier_resources(self):
+        # a stale image handle fails object resolution at capture time
+        self.f.begin()
+        with self.assertRaises(KeyError):
+            self.wait_events2(deps=[self.dependency_info(images=1)])
 
     def test_host_reset_clears_signaled_state(self):
         self.host_set()

@@ -17,7 +17,8 @@ from vn_native_submit import NativeSubmissions, check_submission_modes
 from vn_image_barriers import (FIELDS as BARRIER_FIELDS,
                                capture as capture_barrier,
                                capture_sync2 as capture_sync2_barrier,
-                               sync2_fields)
+                               capture_sync2_wait2 as capture_sync2_wait2_barrier,
+                               sync2_dep_info, sync2_fields)
 from vn_native_layouts import capture as capture_layout, attach as attach_layout
 from vn_native_pipelines import capture as capture_pipeline, attach as attach_pipeline
 from vn_native_rendering import capture as capture_rendering, attach as attach_rendering
@@ -83,7 +84,8 @@ def load_decoder(native_timeline=False):
             profile.setdefault('keep', {})[_cmd] = {
                 'fields': sync2_fields()}
         profile.setdefault('keep', {})['vkCmdWaitEvents2'] = {
-            'fields': sync2_fields('pDependencyInfos.')}
+            'fields': (['pEvents'] + sync2_dep_info('pDependencyInfos.') +
+                       sync2_fields('pDependencyInfos.'))}
         profile.setdefault('keep', {})['vkCmdBeginConditionalRenderingEXT'] = {
             'fields': ['buffer', 'offset', 'flags']}
     model = generator.Model(profile)
@@ -214,6 +216,10 @@ class LinearExecution:
                                                     'vkCmdSetEvent2'):
             # singular pDependencyInfo: barrier structs lead the payload
             capture_sync2_barrier(self, current.frontend, record)
+        elif self.submissions.enabled and name == 'vkCmdWaitEvents2':
+            # pEvents ids lead (2 words each), then eventCount
+            # self-delimiting VkDependencyInfo blocks
+            capture_sync2_wait2_barrier(self, current.frontend, record)
         elif self.submissions.enabled and name == 'vkCmdWaitEvents':
             # retained payload leads with 2 words per event id; the
             # barrier structs follow verbatim after capture canonicalizes

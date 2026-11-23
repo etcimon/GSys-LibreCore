@@ -5621,12 +5621,13 @@ class FrontModel(ObjectTable, PayloadMemory):
                                 rec['pay'][2 * nb + i] & 0xFFFFFFFF
                                 if 2 * nb + i < len(rec['pay']) else 0)
                     elif ct in (session['T'].get('vkCmdExecuteCommands'),
-                                session['T'].get('vkCmdWaitEvents')):
+                                session['T'].get('vkCmdWaitEvents'),
+                                session['T'].get('vkCmdWaitEvents2', -1)):
                         # §5a G3b-iii: imm[0] staged u64 ids re-resolve
                         # to one {gen,slot} handle word each — command
                         # buffers for ExecuteCommands, events for
-                        # WaitEvents; a record-time miss stores 0 and
-                        # the executor refuses it at replay
+                        # WaitEvents/WaitEvents2; a record-time miss stores
+                        # 0 and the executor refuses it at replay
                         hkind = KIND['VkCommandBuffer'] \
                             if ct == session['T'].get(
                                 'vkCmdExecuteCommands') \
@@ -5639,10 +5640,13 @@ class FrontModel(ObjectTable, PayloadMemory):
                             pwords.append(
                                 ((be['gen'] << 16) | bs)
                                 if bst == 'OK' else 0)
-                        if ct == session['T'].get('vkCmdWaitEvents'):
-                            # native profile: capture_barrier has already
-                            # canonicalized the retained memory/buffer/
-                            # image barrier words trailing the event ids
+                        if ct in (session['T'].get('vkCmdWaitEvents'),
+                                  session['T'].get('vkCmdWaitEvents2', -1)):
+                            # native profile: capture_barrier/capture_sync2
+                            # has already canonicalized the retained barrier
+                            # words trailing the event ids — for WaitEvents2
+                            # that tail is the self-delimiting
+                            # VkDependencyInfo block stream
                             pwords += [w & 0xFFFFFFFF for w in
                                        rec['pay'][2 * (rec['imm'][0]
                                                       & 0xFFFF):]]
@@ -5661,7 +5665,6 @@ class FrontModel(ObjectTable, PayloadMemory):
                                 session['T']['vkCmdPipelineBarrier'],
                                 session['T'].get('vkCmdPipelineBarrier2', -1),
                                 session['T'].get('vkCmdSetEvent2', -1),
-                                session['T'].get('vkCmdWaitEvents2', -1),
                                 session['T']['vkCmdCopyBuffer'],
                                 session['T'].get('vkCmdCopyBuffer2', -1),
                                 session['T']['vkCmdFillBuffer'],
