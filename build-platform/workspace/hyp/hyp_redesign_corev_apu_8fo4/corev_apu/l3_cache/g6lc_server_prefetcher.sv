@@ -104,75 +104,119 @@ assign dn_req_o  = up_req_i;
 
     typedef struct packed {
       logic                      valid;
-      logic [AXI_ADDR_WIDTH-1:0] addr;   // last demand line
-      logic signed [31:0]        stride; // bytes
-      logic [2:0]                conf;   // train confidence
+      logic [AXI_ADDR_WIDTH-1:0] addr;     // last demand line
+      // A136 registered expected next address (addr + stride) so match is a
+      // pure equality compare with no 64-bit add ahead of it.
+      logic [AXI_ADDR_WIDTH-1:0] exp_addr;
+      logic signed [31:0]        stride;   // bytes
+      logic [2:0]                conf;     // train confidence
     } stream_t;
 
     stream_t [NR_STREAMS-1:0] st_q, st_d;
-    logic signed [31:0] delta;
-    logic [NR_STREAMS-1:0] hit_stream;
+    logic [NR_STREAMS-1:0] match_s, retrain_s, hit_stream, alloc_oh;
+    logic signed [31:0]    delta_s [NR_STREAMS];
+    logic [AXI_ADDR_WIDTH-1:0] hit_pf_addr [NR_STREAMS];
+    logic [AXI_ADDR_WIDTH-1:0] alloc_pf_addr;
+    logic any_hit, any_free;
     logic train, issue;
     logic [AXI_ADDR_WIDTH-1:0] pf_addr, demand_line;
     logic demand_ar;
+    // 1-cycle speculative training tap off the demand AR channel: demand AR
+    // still bypasses at 0 cycles directly to dn_req_o, while stream matching
+    // runs off registered inputs (breaking the cross-module cluster->pf cone).
+    logic                      tr_ar_q;
+    logic [AXI_ADDR_WIDTH-1:0] tr_line_q;
 
     assign demand_ar = up_req_i.ar_valid;
     assign demand_line = {up_req_i.ar.addr[AXI_ADDR_WIDTH-1:OFF], {OFF{1'b0}}};
 
-    // Match / allocate stream on demand AR
-    always_comb begin
-      st_d = st_q;
-      train = 1'b0;
-      issue = 1'b0;
-      pf_addr = '0;
-      hit_stream = '0;
-      delta = '0;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        tr_ar_q   <= 1'b0;
+        tr_line_q <= '0;
+      end else begin
+        tr_ar_q   <= demand_ar;
+        tr_line_q <= demand_line;
+      end
+    end
 
-      if (demand_ar) begin
-        // Find matching stream (same or strided)
-        for (int unsigned s = 0; s < NR_STREAMS; s++) begin
-          if (st_q[s].valid) begin
-            // r127-u: delta is signed[31:0]; (a-b) mod 2^32 depends only on the
-            // low 32 bits of each operand, so the 64-bit subtract narrows to
-            // 32 with a bit-identical result — halves the carry chain on the
-            // match path. demand_line/st_q[s].addr are line-aligned (low OFF
-            // bits zero), so the truncated operands stay exact.
-            delta = signed'(demand_line[31:0] - st_q[s].addr[31:0]);
-            if (demand_line == st_q[s].addr + (st_q[s].stride)) begin
-              hit_stream[s] = 1'b1;
-              st_d[s].addr = demand_line;
-              if (st_q[s].conf != 3'b111) st_d[s].conf = st_q[s].conf + 1'b1;
-              train = 1'b1;
-              // Issue stride + next-line prefetch
-              issue = (st_q[s].conf >= 3'd2);
-              pf_addr = demand_line + (st_q[s].stride * PF_DISTANCE[31:0]);
-            end else if (delta != 0 && st_q[s].conf < 3'd2) begin
-              // Re-train stride
-              st_d[s].stride = delta;
-              st_d[s].addr = demand_line;
-              st_d[s].conf = 3'd1;
-              hit_stream[s] = 1'b1;
-              train = 1'b1;
-            end
-          end
-        end
-        // Allocate free stream if no hit
-        if (hit_stream == '0) begin
-          for (int unsigned s = 0; s < NR_STREAMS; s++) begin
-            if (!st_q[s].valid && hit_stream == '0) begin
-              st_d[s].valid = 1'b1;
-              st_d[s].addr = demand_line;
-              st_d[s].stride = LINE_BYTES[31:0]; // default next-line
-              st_d[s].conf = 3'd0;
-              hit_stream[s] = 1'b1;
-              train = 1'b1;
-              // Always next-line PF at distance
-              issue = 1'b1;
-              pf_addr = demand_line + (LINE_BYTES * PF_DISTANCE);
-            end
+    // Precompute first free stream slot purely from st_q flops (independent of
+    // demand match) and the next-line alloc prefetch address in parallel.
+    logic [NR_STREAMS-1:0] inv_v_s;
+    for (genvar gs = 0; gs < NR_STREAMS; gs++) begin : gen_alloc_oh
+      assign inv_v_s[gs] = !st_q[gs].valid;
+      if (gs == 0) begin : gen_s0
+        assign alloc_oh[0] = inv_v_s[0];
+      end else begin : gen_sn
+        assign alloc_oh[gs] = inv_v_s[gs] && !(|inv_v_s[gs-1:0]);
+      end
+    end
+    assign any_free      = |inv_v_s;
+    assign alloc_pf_addr = tr_line_q + AXI_ADDR_WIDTH'(LINE_BYTES * PF_DISTANCE);
+
+    localparam bit PF_DIST_POW2 = (PF_DISTANCE > 0) && ((PF_DISTANCE & (PF_DISTANCE - 1)) == 0);
+    localparam int unsigned PF_DIST_SH = (PF_DISTANCE <= 1) ? 0 : $clog2(PF_DISTANCE);
+
+    logic [AXI_ADDR_WIDTH-1:0] match_exp_s [NR_STREAMS];
+    logic [AXI_ADDR_WIDTH-1:0] retrain_exp_s [NR_STREAMS];
+    logic [AXI_ADDR_WIDTH-1:0] alloc_exp_addr;
+    assign alloc_exp_addr = tr_line_q + AXI_ADDR_WIDTH'(LINE_BYTES);
+
+    // Parallel per-stream match / retrain evaluation off registered tr_line_q
+    // and st_q (constant-index per stream, all 64b adds unconditional outside
+    // if-guards to avoid A146 broadcast billing).
+    always_comb begin : gen_match_eval
+      for (int unsigned s = 0; s < NR_STREAMS; s++) begin
+        logic signed [31:0] d_s;
+        logic signed [AXI_ADDR_WIDTH-1:0] str_ext, d_ext, str_dist;
+        d_s = signed'(tr_line_q[31:0] - st_q[s].addr[31:0]);
+        delta_s[s] = d_s;
+        match_s[s] = st_q[s].valid && (tr_line_q == st_q[s].exp_addr);
+        retrain_s[s] = st_q[s].valid && !match_s[s] && (d_s != '0) && (st_q[s].conf < 3'd2);
+        hit_stream[s] = match_s[s] | retrain_s[s];
+        str_ext  = {{(AXI_ADDR_WIDTH-32){st_q[s].stride[31]}}, st_q[s].stride};
+        d_ext    = {{(AXI_ADDR_WIDTH-32){d_s[31]}}, d_s};
+        str_dist = PF_DIST_POW2 ? (str_ext <<< PF_DIST_SH)
+                                : (str_ext * $signed(AXI_ADDR_WIDTH'(PF_DISTANCE)));
+        hit_pf_addr[s]   = tr_line_q + AXI_ADDR_WIDTH'(str_dist);
+        match_exp_s[s]   = tr_line_q + AXI_ADDR_WIDTH'(str_ext);
+        retrain_exp_s[s] = tr_line_q + AXI_ADDR_WIDTH'(d_ext);
+      end
+      any_hit = |hit_stream;
+    end
+
+    // Per-stream constant-index state update + decoupled hit/alloc issue select
+    always_comb begin : gen_stream_upd
+      logic                      hit_issue;
+      logic [AXI_ADDR_WIDTH-1:0] hit_addr;
+      st_d      = st_q;
+      hit_issue = 1'b0;
+      hit_addr  = '0;
+      for (int unsigned s = 0; s < NR_STREAMS; s++) begin
+        if (tr_ar_q) begin
+          if (match_s[s]) begin
+            st_d[s].addr     = tr_line_q;
+            st_d[s].exp_addr = match_exp_s[s];
+            if (st_q[s].conf != 3'b111) st_d[s].conf = st_q[s].conf + 1'b1;
+            hit_issue = (st_q[s].conf >= 3'd2);
+            hit_addr  = hit_pf_addr[s];
+          end else if (retrain_s[s]) begin
+            st_d[s].stride   = delta_s[s];
+            st_d[s].addr     = tr_line_q;
+            st_d[s].exp_addr = retrain_exp_s[s];
+            st_d[s].conf     = 3'd1;
+          end else if (!any_hit && alloc_oh[s]) begin
+            st_d[s].valid    = 1'b1;
+            st_d[s].addr     = tr_line_q;
+            st_d[s].exp_addr = alloc_exp_addr;
+            st_d[s].stride   = LINE_BYTES[31:0];
+            st_d[s].conf     = 3'd0;
           end
         end
       end
+      train   = tr_ar_q && (any_hit || any_free);
+      issue   = tr_ar_q && (any_hit ? hit_issue : any_free);
+      pf_addr = any_hit ? hit_addr : alloc_pf_addr;
     end
 
     always_ff @(posedge clk_i or negedge rst_ni) begin

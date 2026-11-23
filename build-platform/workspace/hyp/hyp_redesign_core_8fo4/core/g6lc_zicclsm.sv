@@ -105,10 +105,11 @@ module g6lc_zicclsm
     logic [3:0] n0, n1, n0_q, n0_d, n1_q, n1_d;
     logic split_now;
     lsu_ctrl_t beat0, beat1;
-    logic [63:0] lo64, hi64, assembled, lo_mask, hi_mask;
+    logic [63:0] b0_in64, b0_aligned, b1_assembled, st_b1_data;
     logic is_load;
     logic hold_v_q, hold_v_d;
-    logic [G6LCCfg.XLEN-1:0] hold_r_q, hold_r_d;
+    logic [63:0] hold_r_q, hold_r_d;
+    fu_op        hold_op_q, hold_op_d;
     logic [G6LCCfg.TRANS_ID_BITS-1:0] hold_tid_q, hold_tid_d;
 
     assign off = ctrl_i.vaddr[2:0];
@@ -118,6 +119,27 @@ module g6lc_zicclsm
     assign split_now = ctrl_i.valid && zicclsm_eligible(ctrl_i.operation, ctrl_i.fu) &&
                        !ctrl_i.is_speculative_load_miss && wraps(off, sz);
     assign is_load = orig_q.fu == LOAD;
+
+    // A136 + A10: byte-granular 8:1 muxes replace three 64-bit dynamic shifts
+    // and 64-bit mask subtractors. Beat-0 data is right-aligned by off_q at
+    // capture (1+ cycle early), and beat-1 assembly selects per byte lane.
+    assign b0_in64 = 64'(ld_result_fu_i);
+    logic [63:0] b0_q64, orig_data64;
+    assign b0_q64      = 64'(beat0_data_q);
+    assign orig_data64 = 64'(orig_q.data);
+    for (genvar b = 0; b < 8; b++) begin : gen_byte_mux
+      logic [2:0] b0_src, b1_src, st_src;
+      assign b0_src = 3'(b) + off_q;
+      assign b0_aligned[b*8 +: 8] = b0_in64[b0_src*8 +: 8];
+      assign b1_src = 3'(b) - n0_q[2:0];
+      assign b1_assembled[b*8 +: 8] = (4'(b) < n0_q)
+          ? b0_q64[b*8 +: 8]
+          : b0_in64[b1_src*8 +: 8];
+      assign st_src = 3'(b) + n0_q[2:0];
+      assign st_b1_data[b*8 +: 8] = ((4'(b) + n0_q) < 4'd8)
+          ? orig_data64[st_src*8 +: 8]
+          : 8'h00;
+    end
 
     always_comb begin
       beat0 = orig_q;
@@ -132,7 +154,7 @@ module g6lc_zicclsm
       end else begin
         beat0.be = ((8'((8'b1 << n0_q) - 1)) << orig_q.vaddr[2:0]);
         beat1.vaddr = orig_q.vaddr + G6LCCfg.VLEN'(n0_q);
-        beat1.data = orig_q.data >> (8 * n0_q);
+        beat1.data = G6LCCfg.XLEN'(st_b1_data);
         beat1.be = 8'((8'b1 << n1_q) - 1);
       end
       beat0.valid = 1'b1;
@@ -148,6 +170,7 @@ module g6lc_zicclsm
       n1_d           = n1_q;
       hold_v_d       = 1'b0;
       hold_r_d       = hold_r_q;
+      hold_op_d      = hold_op_q;
       hold_tid_d     = hold_tid_q;
       ctrl_o         = ctrl_i;
       pop_ld_byp_o   = pop_ld_fu_i;
@@ -160,11 +183,6 @@ module g6lc_zicclsm
       st_result_o    = st_result_fu_i;
       st_ex_o        = st_ex_fu_i;
       st_tid_o       = st_tid_fu_i;
-      lo64           = '0;
-      hi64           = '0;
-      assembled      = '0;
-      lo_mask        = '0;
-      hi_mask        = '0;
 
       unique case (state_q)
         IDLE: begin
@@ -200,7 +218,7 @@ module g6lc_zicclsm
               pop_ld_byp_o = 1'b1;
               state_d      = IDLE;
             end else begin
-              beat0_data_d = ld_result_fu_i;
+              beat0_data_d = G6LCCfg.XLEN'(b0_aligned);
               state_d      = B1_ACTIVE;
             end
           end else if (is_load && pop_ld_fu_i) state_d = B0_WAIT;
@@ -225,7 +243,7 @@ module g6lc_zicclsm
               pop_ld_byp_o = 1'b1;
               state_d      = IDLE;
             end else begin
-              beat0_data_d = ld_result_fu_i;
+              beat0_data_d = G6LCCfg.XLEN'(b0_aligned);
               state_d      = B1_ACTIVE;
             end
           end
@@ -266,13 +284,9 @@ module g6lc_zicclsm
           ld_valid_o   = 1'b0;
           st_valid_o   = 1'b0;
           if (is_load && ld_valid_fu_i) begin
-            lo_mask = (64'(1) << (8 * n0_q)) - 64'(1);
-            hi_mask = (64'(1) << (8 * n1_q)) - 64'(1);
-            lo64 = (64'(beat0_data_q) >> (8 * unsigned'(off_q))) & lo_mask;
-            hi64 = 64'(ld_result_fu_i) & hi_mask;
-            assembled = (hi64 << (8 * n0_q)) | lo64;
             hold_v_d     = 1'b1;
-            hold_r_d     = finish_load(orig_q.operation, assembled);
+            hold_r_d     = b1_assembled;
+            hold_op_d    = orig_q.operation;
             hold_tid_d   = orig_q.trans_id;
             pop_ld_byp_o = 1'b1;
             state_d      = IDLE;
@@ -291,7 +305,7 @@ module g6lc_zicclsm
 
       if (hold_v_q) begin
         ld_valid_o  = 1'b1;
-        ld_result_o = hold_r_q;
+        ld_result_o = finish_load(hold_op_q, hold_r_q);
         ld_tid_o    = hold_tid_q;
         ld_ex_o     = '0;
       end
@@ -335,6 +349,7 @@ module g6lc_zicclsm
         n1_q         <= '0;
         hold_v_q     <= 1'b0;
         hold_r_q     <= '0;
+        hold_op_q    <= LD;
         hold_tid_q   <= '0;
       end else begin
         state_q      <= state_d;
@@ -345,6 +360,7 @@ module g6lc_zicclsm
         n1_q         <= n1_d;
         hold_v_q     <= hold_v_d;
         hold_r_q     <= hold_r_d;
+        hold_op_q    <= hold_op_d;
         hold_tid_q   <= hold_tid_d;
       end
     end

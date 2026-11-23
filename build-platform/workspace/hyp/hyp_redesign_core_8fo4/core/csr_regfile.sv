@@ -1094,14 +1094,22 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
   // ----------------
   // CSR Read logic
   // ----------------
-  assign mstatus_extended = G6LCCfg.IS_XLEN64 ? mstatus_q[G6LCCfg.XLEN-1:0] :
-                              {{G6LCCfg.XLEN - 32{1'b0}}, mstatus_q.sd, mstatus_q.wpri3[7:0], mstatus_q[22:0]};
+  // A105/A134: derive mstatus.sd / vsstatus.sd at CSR/RVFI read time instead
+  // of chaining mstatus_d.fs -> mstatus_d.sd at the tail of csr_update.
+  logic mstatus_sd_rd, vsstatus_sd_rd;
+  assign mstatus_sd_rd  = (G6LCCfg.RVS || G6LCCfg.RVF || G6LCCfg.AiCfg.MatrixEn) &&
+                          ((mstatus_q.xs == riscv::Dirty) || (mstatus_q.fs == riscv::Dirty));
+  assign vsstatus_sd_rd = (G6LCCfg.RVS || G6LCCfg.RVF || G6LCCfg.AiCfg.MatrixEn) &&
+                          ((vsstatus_q.xs == riscv::Dirty) || (vsstatus_q.fs == riscv::Dirty));
+  assign mstatus_extended = G6LCCfg.IS_XLEN64
+      ? {mstatus_sd_rd, mstatus_q[G6LCCfg.XLEN-2:0]}
+      : {{G6LCCfg.XLEN - 32{1'b0}}, mstatus_sd_rd, mstatus_q.wpri3[7:0], mstatus_q[22:0]};
   assign mstatush = {24'h0, mstatus_q.mpv, mstatus_q.gva, mstatus_q.mbe, mstatus_q.sbe, 4'h0};
   if (G6LCCfg.RVH) begin
     if (G6LCCfg.IS_XLEN64) begin : gen_vsstatus_64read
-      assign vsstatus_extended = vsstatus_q[G6LCCfg.XLEN-1:0];
+      assign vsstatus_extended = {vsstatus_sd_rd, vsstatus_q[G6LCCfg.XLEN-2:0]};
     end else begin : gen_vsstatus_32read
-      assign vsstatus_extended = {vsstatus_q.sd, vsstatus_q.wpri3[7:0], vsstatus_q[22:0]};
+      assign vsstatus_extended = {vsstatus_sd_rd, vsstatus_q.wpri3[7:0], vsstatus_q[22:0]};
     end
   end else begin
     assign vsstatus_extended = '0;
@@ -3618,12 +3626,9 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
       end
     end
 
-    // hardwired extension registers
-    if (G6LCCfg.RVS || G6LCCfg.RVF || G6LCCfg.AiCfg.MatrixEn) begin
-      mstatus_d.sd = (mstatus_d.xs == riscv::Dirty) | (mstatus_d.fs == riscv::Dirty);
-    end else begin
-      mstatus_d.sd = 1'b0;
-    end
+    // hardwired extension registers — sd is synthesized at read time in
+    // mstatus_extended (bit- and RVFI-identical; removes mstatus_d.fs -> sd).
+    mstatus_d.sd = 1'b0;
 
     // reserve PMPCFG bits 5 and 6 (hardwire to 0)
     for (int i = 0; i < G6LCCfg.NrPMPEntries; i++) pmpcfg_d[i].reserved = 2'b0;

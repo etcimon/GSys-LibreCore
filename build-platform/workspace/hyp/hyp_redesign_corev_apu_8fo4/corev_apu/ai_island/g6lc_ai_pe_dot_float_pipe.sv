@@ -786,8 +786,12 @@ assign fmt_ok = (numfmt_i == AI_FMT_FP8_E4M3) ||
   logic signed [MAXW-1:0] final_bfp_sum;
   logic signed [15:0]     final_block_exp;
 
+  // A118: bfp_mant_exp_to_fp32 returns signed zero whenever mant==0 (ignoring
+  // exp) and final_result already gates on !red_fin[LEVELS], so gating
+  // final_block_exp on (final_bfp_sum != 0) is redundant and adds 8.7 FO4 of
+  // 640-bit OR-reduction directly ahead of the FP32 pack.
   assign final_bfp_sum     = red[LEVELS][0];
-  assign final_block_exp   = (red_fin[LEVELS] && final_bfp_sum != MAXW'(0)) ? s2_block_exp_piped[LEVELS] : 16'sd0;
+  assign final_block_exp   = s2_block_exp_piped[LEVELS];
 
   logic [36:0] final_result;
 

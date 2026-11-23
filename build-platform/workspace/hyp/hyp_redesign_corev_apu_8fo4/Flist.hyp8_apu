@@ -3,6 +3,7 @@
 # ${HYP_APU_DIR} = root of hyp_redesign_corev_apu_8fo4/ in this workspace
 # self-contained: no upstream tree references
 # ${HYP_CORE_DIR} = root of hyp_redesign_core_8fo4/ in this workspace
+# ${HYP_STORAMIC_DIR} = root of hyp_redesign_storamic_8fo4/ in this workspace
 # TOP: g6lc_soc (synthesizable APU/SoC top — clk_core/clk_uncore domains,
 #      g6lc_hart + axi_xbar + CLINT/PLIC/DM/bootrom/UART/timer + DRAM port)
 +incdir+${HYP_CORE_DIR}/core/include/
@@ -403,6 +404,7 @@ ${HYP_APU_DIR}/corev_apu/l3_cache/g6lc_server_prefetcher.sv
 ${HYP_APU_DIR}/corev_apu/l3_cache/g6lc_l3_top.sv
 ${HYP_APU_DIR}/corev_apu/src/g6lc_cluster.sv
 ${HYP_APU_DIR}/corev_apu/include/g6lc_ai_island_cfg_pkg.sv
+-f ${HYP_APU_DIR}/storamic/Flist.storamic_soc_hyp8
 ${HYP_APU_DIR}/corev_apu/src/g6lc_ai_dram_backend.sv
 ${HYP_APU_DIR}/corev_apu/src/g6lc_ai_litedram_wrap.sv
 ${HYP_APU_DIR}/corev_apu/src/g6lc_ai_dram_channels.sv

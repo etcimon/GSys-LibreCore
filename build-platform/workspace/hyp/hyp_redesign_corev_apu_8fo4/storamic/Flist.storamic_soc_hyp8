@@ -1,0 +1,17 @@
+-f ${HYP_STORAMIC_DIR}/Flist.storamic_hyp8
+${HYP_APU_DIR}/corev_apu/include/g6lc_storamic_soc_cfg_pkg.sv
+${HYP_APU_DIR}/storamic/g6lc_storamic_attach.sv
+${HYP_APU_DIR}/storamic/g6lc_storamic_ctrl_bridge.sv
+${HYP_APU_DIR}/storamic/g6lc_storamic_axi_gate.sv
+${HYP_APU_DIR}/storamic/g6lc_storamic_cpu_pause.sv
+${HYP_APU_DIR}/storamic/g6lc_storamic_dma_axi.sv
+${HYP_APU_DIR}/storamic/g6lc_storamic_durable_store.sv
+${HYP_APU_DIR}/storamic/g6lc_storamic_model_store.sv
+${HYP_APU_DIR}/storamic/g6lc_storamic_model_stick.sv
+${HYP_APU_DIR}/storamic/g6lc_storamic_sim_mem.sv
+${HYP_APU_DIR}/storamic/g6lc_storamic_dmi_sberror.sv
+${HYP_APU_DIR}/storamic/g6lc_storamic_checkpoint_model.sv
+${HYP_APU_DIR}/storamic/g6lc_storamic_checkpoint_endpoint.sv
+${HYP_APU_DIR}/storamic/g6lc_storamic_boot_recovery.sv
+${HYP_APU_DIR}/storamic/g6lc_storamic_native_ckpt.sv
+${HYP_APU_DIR}/storamic/g6lc_storamic_native_providers.sv

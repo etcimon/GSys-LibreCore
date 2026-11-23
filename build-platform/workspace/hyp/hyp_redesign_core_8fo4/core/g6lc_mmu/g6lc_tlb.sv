@@ -708,16 +708,37 @@ module g6lc_tlb
   end
 
   // The fill lands on the lowest overlapped entry, else on the PLRU victim.
-  // !lu_hit_o is the existing install arbitration (see the svt-plan note at
-  // the top of the module); the invariant above does not depend on it.
-  assign fill_fire      = update_i.valid && !lu_hit_o;
-  assign fill_ovl_first = fill_ovl & (~fill_ovl + TLB_ENTRIES'(1));
-  assign fill_we        = (|fill_ovl) ? fill_ovl_first : replace_en;
+  // A140 prefix-OR isolate (no carry chain) + A135 hoist loop-invariant fill
+  // tag payload outside the per-entry update loop so fill_we never broadcasts
+  // across vpn_to_store normalization.
+  assign fill_fire = update_i.valid && !lu_hit_o;
+  for (genvar e = 0; e < TLB_ENTRIES; e++) begin : gen_fill_ovl_first
+    if (e == 0) begin : gen_e0
+      assign fill_ovl_first[0] = fill_ovl[0];
+    end else begin : gen_en
+      assign fill_ovl_first[e] = fill_ovl[e] & ~(|fill_ovl[e-1:0]);
+    end
+  end
+  assign fill_we = (|fill_ovl) ? fill_ovl_first : replace_en;
+
+  assign vpn_to_store = (update_i.is_napot_64k && G6LCCfg.SvnapotEn)
+      ? {update_i.vpn[G6LCCfg.VpnLen-1:4], 4'b0}
+      : update_i.vpn;
+  logic [$bits(tags_q[0])-1:0] fill_tag_bits;
+  assign fill_tag_bits = {
+    update_i.asid,
+    update_i.vmid,
+    update_i.hart,
+    ((G6LCCfg.PtLevels + HYP_EXT) * (G6LCCfg.VpnLen / G6LCCfg.PtLevels))'(vpn_to_store),
+    update_i.is_page,
+    update_i.v_st_enbl,
+    1'b1,
+    G6LCCfg.SvnapotEn ? update_i.is_napot_64k : 1'b0
+  };
 
   always_comb begin : update_flush
-    tags_n                 = tags_q;
-    content_n              = content_q;
-    vpn_to_store           = '0;
+    tags_n    = tags_q;
+    content_n = content_q;
 
     for (int unsigned i = 0; i < TLB_ENTRIES; i++) begin
       gppn[i] = '0;
@@ -779,25 +800,7 @@ module g6lc_tlb
         // overlapped by the translation being filled: evicted
         tags_n[i].valid = 1'b0;
       end else if (fill_fire && fill_we[i]) begin
-        vpn_to_store = update_i.vpn;
-        if (update_i.is_napot_64k && G6LCCfg.SvnapotEn) begin
-          // Svnapot: For a NAPOT entry, normalize the VPN by clearing the lower bits before storage
-          // This ensures that any address within the 64KiB range will match the same stored tag
-          vpn_to_store[3:0] = 4'b0;
-        end
-        //update tag
-        tags_n[i] = {
-          update_i.asid,
-          update_i.vmid,
-          update_i.hart,
-          // Zero-extended VPN to fit the tag width
-          ((G6LCCfg.PtLevels + HYP_EXT) * (G6LCCfg.VpnLen / G6LCCfg.PtLevels))'(vpn_to_store),
-          update_i.is_page,
-          update_i.v_st_enbl,
-          1'b1,
-          G6LCCfg.SvnapotEn ? update_i.is_napot_64k : 1'b0  // Svnapot: Propagate the NAPOT flag into the TLB entry
-        };
-        // update content as well
+        tags_n[i]        = fill_tag_bits;
         content_n[i].pte = update_i.content;
         if (G6LCCfg.RVH) content_n[i].gpte = update_i.g_content;
       end

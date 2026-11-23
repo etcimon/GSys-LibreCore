@@ -259,44 +259,47 @@ module g6lc_decode_s3
     // frm legality (legal modes are 3'b000..3'b100)
     ill_frm = frm_req_i && (frm_i > 3'd4);
 
-    // --- pre-clearing-arm set accumulation (emit order preserved) ---
-    illA = illegal_i | ill_rs1rd | ill_sret_u | ill_sret_tsr | ill_mret |
-           ill_dret | ill_wfi_tw | ill_wfi_u;
-    virA = v_rs1rd | v_sret_u | v_sret_tsr | v_wfi_vtw | v_wfi_u;
-    // r115-E115-C: the SFENCE.VMA / HFENCE.VVMA / HFENCE.GVMA arms are
-    // opcode-disjoint (dec_i.op is single-valued, c_sf/c_hvv/c_hgv can
-    // never co-fire), so the emit's serial override chain collapses to a
-    // single priority select: at most one arm writes, its value replaces
-    // the accumulated set, then the arm-local tvm intercepts OR in (each
-    // already implies its own hit condition). Same last-writer result.
+    // A39 flat balanced legality reduction: eliminate serial fence_ill ->
+    // ill_g0 -> illD muxes by computing sf_ill/hv_ill directly as parallel
+    // AND terms alongside the other mutually-exclusive opcode arms.
     begin : p_fence_override
-      logic sf_hit, hvv_hit, hgv_hit;
-      logic sf_vhit, hvv_vhit, hgv_vhit;
-      sf_hit   = c_sf  && !(G6LCCfg.RVH && v_i);
-      hvv_hit  = c_hvv && !v_i;
-      hgv_hit  = c_hgv && !v_i;
-      sf_vhit  = c_sf  && G6LCCfg.RVH && v_i;
-      hvv_vhit = c_hvv && v_i;
-      hgv_vhit = c_hgv && v_i;
-      illD = (sf_hit | hvv_hit | hgv_hit)
-             ? (sf_hit ? ~(G6LCCfg.RVS && priv_ms_rd0) : !priv_ms_rd0)
-             : illA;
-      illD = illD | ill_sf_tvm | ill_hgv_tvm;
-      virD = (sf_vhit | hvv_vhit | hgv_vhit)
-             ? (sf_vhit ? (priv_lvl_i != riscv::PRIV_LVL_S) : 1'b1)
-             : virA;
-      virD = virD | v_sf_tvm;
+      logic sf_hit, hvv_hit, hgv_hit, fence_any, sf_ill, hv_ill;
+      logic sf_vhit, hvv_vhit, hgv_vhit, vfence_any, sf_vir, hv_vir;
+      logic ill_g0, ill_g1, ill_g2, vir_g0, vir_g1;
+      sf_hit     = c_sf  && !(G6LCCfg.RVH && v_i);
+      hvv_hit    = c_hvv && !v_i;
+      hgv_hit    = c_hgv && !v_i;
+      fence_any  = sf_hit | hvv_hit | hgv_hit;
+      sf_ill     = sf_hit && !(G6LCCfg.RVS && priv_ms_rd0);
+      hv_ill     = (hvv_hit | hgv_hit) && !priv_ms_rd0;
+      sf_vhit    = c_sf  && G6LCCfg.RVH && v_i;
+      hvv_vhit   = c_hvv && v_i;
+      hgv_vhit   = c_hgv && v_i;
+      vfence_any = sf_vhit | hvv_vhit | hgv_vhit;
+      sf_vir     = sf_vhit && (priv_lvl_i != riscv::PRIV_LVL_S);
+      hv_vir     = hvv_vhit | hgv_vhit;
+      ill_g0 = sf_ill | hv_ill | ill_sf_tvm | ill_hgv_tvm;
+      ill_g1 = ill_rs1rd | ill_sret_u | ill_sret_tsr | ill_mret;
+      ill_g2 = ill_dret | ill_wfi_tw | ill_wfi_u | (illegal_i && !fence_any);
+      illA   = ill_g1 | ill_g2;
+      illD   = ill_g0 | illA;
+      vir_g0 = sf_vir | hv_vir | v_sf_tvm;
+      vir_g1 = v_rs1rd | v_sret_u | v_sret_tsr | v_wfi_vtw | v_wfi_u;
+      virA   = vir_g1;
+      virD   = vir_g0 | virA;
     end
   end
 
   always_comb begin : legality_out
-    // --- post arms: HLV/HSV, CBO, fs, frm (set-only, last in the emit) ---
-    illegal = ~ex_i.valid ? (illD | ill_hlv | ill_ci | ill_cf | ill_cz |
-                             ill_fp | ill_frm)
-                          : illegal_i;
-    virt    = ~ex_i.valid & (virD | v_hlv | v_ci | v_cf | v_cz);
-    fix_add = ill_sret_u | v_sret_u | ill_sret_tsr | v_sret_tsr |
-              ill_wfi_tw | v_wfi_vtw | ill_wfi_u | v_wfi_u;
+    // --- post arms: HLV/HSV, CBO, fs, frm (balanced 2-level OR) ---
+    logic ill_post0, ill_post1, vir_post;
+    ill_post0 = ill_hlv | ill_ci | ill_cf | ill_cz;
+    ill_post1 = ill_fp | ill_frm;
+    vir_post  = v_hlv | v_ci | v_cf | v_cz;
+    illegal = ~ex_i.valid ? (illD | ill_post0 | ill_post1) : illegal_i;
+    virt    = ~ex_i.valid && (virD | vir_post);
+    fix_add = (ill_sret_u | v_sret_u | ill_sret_tsr | v_sret_tsr) |
+              (ill_wfi_tw | v_wfi_vtw | ill_wfi_u | v_wfi_u);
     opfix   = ex_i.valid ? dec_i.op
             : fix_ci ? g6lc_core_pkg::CBO_FLUSH
             : (fix_add ? g6lc_core_pkg::ADD : dec_i.op);

@@ -48,7 +48,8 @@ module fpu_wrap
     output logic       [         G6LCCfg.FLen-1:0] result_o,
     output logic                                   fpu_valid_o,
     output exception_t                             fpu_exception_o,
-    output logic                                   fpu_early_valid_o
+    output logic                                   fpu_early_valid_o,
+    input  logic                                   fpu_out_ready_i
 );
 
   // this is a workaround
@@ -593,7 +594,7 @@ module fpu_wrap
           fpu_op_q     <= fpu_op_d;
           fpu_op_mod_q <= fpu_op_mod_d;
           fpu_srcfmt_q <= fpu_srcfmt_d;
-          fpu_dstfmt_q <= fpu_dstfmt_q;
+          fpu_dstfmt_q <= fpu_dstfmt_d;
           fpu_ifmt_q   <= fpu_ifmt_d;
           fpu_rm_q     <= fpu_rm_d;
           fpu_vec_op_q <= fpu_vec_op_d;
@@ -695,7 +696,7 @@ module fpu_wrap
     assign fpu_status         = zfa_out_valid ? zfa_status : fpnew_status;
     assign result_tag         = zfa_out_valid ? zfa_tag : fpnew_tag;
     assign fpu_out_valid      = zfa_out_valid | fpnew_out_valid_bulk;
-    assign fpu_early_valid_o  = zfa_out_valid | fpnew_early;
+    assign fpu_early_valid_o  = fpu_out_valid | fpnew_early;
 
     // Pack status flag into exception cause, tval ignored in wb, exception is always invalid
     assign fpu_exception_o.cause = {59'h0, fpu_status};
@@ -705,13 +706,14 @@ module fpu_wrap
     assign fpu_exception_o.tinst = '0;
     assign fpu_exception_o.gva = '0;
 
-    // Downstream write port is dedicated to FPU and always ready
-    assign fpu_out_ready = 1'b1;
+    // Downstream write port is shared with ALU2 when SuperscalarEn && NrALUs>=2;
+    // backpressure holds fpnew/zfa and owner_live_q until the port is free.
+    assign fpu_out_ready = fpu_out_ready_i;
 
     // Downstream valid from unit. OoO: a return may complete only while its
     // transaction id still owns the slot and is uncancelled -- the stale-return
     // gate the S2 leaf exercises.
-    assign fpu_valid_o = fpu_out_valid && (!G6LCCfg.OoOEn ||
+    assign fpu_valid_o = fpu_out_valid && fpu_out_ready && (!G6LCCfg.OoOEn ||
         (!flush_i &&
 `ifndef G6LC_MUT_FP_NO_OWNER_LIVE
          owner_live_q[result_tag] &&
@@ -728,7 +730,7 @@ module fpu_wrap
     assign fpu_early_valid_o = '0;
     logic _unused;
     assign _unused = &{1'b0, fpu_valid_i, fu_data_i, fpu_fmt_i, fpu_rm_i, fpu_frm_i,
-                       fpu_prec_i, flush_i, cancelled_mask_i, state_q};
+                       fpu_prec_i, flush_i, cancelled_mask_i, state_q, fpu_out_ready_i};
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) state_q <= READY;
       else         state_q <= state_d;

@@ -1304,43 +1304,41 @@ module wt_dcache_wbuffer
         assign exp_hit[i]  = (|fwd_ent[i].valid) && (fwd_ent[i].wtag == rtrn_wb.wtag);
         assign exp_free[i] = !(|fwd_ent[i].valid);
       end
-      // Lowest set bit, same overwrite order as the old downward scan.
-      function automatic logic [FixupForwardDepth-1:0] fwd_lowest(
-          input logic [FixupForwardDepth-1:0] x);
-        logic [FixupForwardDepth-1:0] below;
-        below = x << 1;
-        for (int unsigned l = 1; l < FixupForwardDepth; l = l << 1)
-          below = below | (below << l);
-        return x & ~below;
-      endfunction
-      // r127: both lowest-set isolates are formed side by side and the
-      // hit/free choice is a per-slot select (same value as the former
-      // single ternary over two function calls).
+      // A140/A146: flat genvar prefix-OR isolates (replaces opaque fwd_lowest
+      // function calls) + per-slot, per-byte continuous overlay (eliminates
+      // nested if-guard select broadcast across fixup_wbuffer_o[i].user/data).
       logic [FixupForwardDepth-1:0] exp_pick_hit, exp_pick_free;
-      assign exp_pick_hit  = fwd_lowest(exp_hit);
-      assign exp_pick_free = fwd_lowest(exp_free);
+      logic any_exp_hit;
+      assign any_exp_hit = |exp_hit;
       for (genvar gi = 0; gi < FixupForwardDepth; gi++) begin : gen_exp_pick
-        logic any_hit;
-        assign any_hit      = |exp_hit;
-        assign exp_pick[gi] = any_hit ? exp_pick_hit[gi] : exp_pick_free[gi];
+        if (gi == 0) begin : gen_g0
+          assign exp_pick_hit[0]  = exp_hit[0];
+          assign exp_pick_free[0] = exp_free[0];
+        end else begin : gen_gn
+          assign exp_pick_hit[gi]  = exp_hit[gi]  && !(|exp_hit[gi-1:0]);
+          assign exp_pick_free[gi] = exp_free[gi] && !(|exp_free[gi-1:0]);
+        end
+        assign exp_pick[gi] = any_exp_hit ? exp_pick_hit[gi] : exp_pick_free[gi];
       end
-      always_comb begin : p_fixup_wbuffer
-        fixup_wbuffer_o = fwd_ent;
-        // Same-cycle VOID ACK overlay. The match was already resolved
-        // against the snapshot tag, so this mux does not re-scan.
-        if (fixup_export_push) begin
-          for (int unsigned i = 0; i < FixupForwardDepth; i++) begin
-            if (exp_pick[i]) begin
-              fixup_wbuffer_o[i].wtag   = leg_push_paddr_q[G6LCCfg.PLEN-1:G6LCCfg.XLEN_ALIGN_BYTES];
-              fixup_wbuffer_o[i].valid |= fixup_be_push;
-              for (int b = 0; b < G6LCCfg.XLEN/8; b++) begin
-                if (fixup_be_push[b]) begin
-                  fixup_wbuffer_o[i].data[b*8+:8] = fixup_data_push[b*8+:8];
-                  if (G6LCCfg.DATA_USER_EN != 0)
-                    fixup_wbuffer_o[i].user[b*8+:8] = fixup_user_push[b*8+:8];
-                end
-              end
-            end
+      for (genvar i = 0; i < FixupForwardDepth; i++) begin : gen_fixup_out
+        logic slot_push;
+        assign slot_push = fixup_export_push && exp_pick[i];
+        assign fixup_wbuffer_o[i].wtag  = slot_push
+            ? leg_push_paddr_q[G6LCCfg.PLEN-1:G6LCCfg.XLEN_ALIGN_BYTES]
+            : fwd_ent[i].wtag;
+        assign fixup_wbuffer_o[i].valid = slot_push
+            ? (fwd_ent[i].valid | fixup_be_push)
+            : fwd_ent[i].valid;
+        for (genvar b = 0; b < G6LCCfg.XLEN / 8; b++) begin : gen_fb
+          logic byte_we;
+          assign byte_we = slot_push && fixup_be_push[b];
+          assign fixup_wbuffer_o[i].data[b*8 +: 8] = byte_we
+              ? fixup_data_push[b*8 +: 8] : fwd_ent[i].data[b*8 +: 8];
+          if (G6LCCfg.DATA_USER_EN != 0) begin : gen_fu
+            assign fixup_wbuffer_o[i].user[b*8 +: 8] = byte_we
+                ? fixup_user_push[b*8 +: 8] : fwd_ent[i].user[b*8 +: 8];
+          end else begin : gen_no_fu
+            assign fixup_wbuffer_o[i].user[b*8 +: 8] = fwd_ent[i].user[b*8 +: 8];
           end
         end
       end

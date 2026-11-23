@@ -862,34 +862,37 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
   logic                  submit_src_sb_mux;
   logic [QidWidth-1:0]   submit_qid_mux;
   logic [31:0]           submit_ticket_mux;
-  // E2b L1: flat leaf conjunctions (l_eng_let reads leaves only).
+  // E2b L1 + A38/A146 output-family split: separate 1-bit control
+  // (submit_valid_mux/submit_src_sb_mux) from qid/ticket/512-bit desc_mux and
+  // replicate selects per byte/word lane to eliminate 512-bit select broadcast.
   wire engine_let_through = l_eng_let;
-  wire sb_let_through = l_eng_let && !fetch_submit_pending_q;
-  wire db_let_through = l_eng_let && !fetch_submit_pending_q && !l_sb_stk_or_imm;
-  always_comb begin
-    submit_desc_mux = db_desc_hold_q;
-    submit_src_sb_mux = 1'b0;
-    if (fetch_submit_pending_q && engine_let_through) begin
-      submit_valid_mux = 1'b1;
-      submit_src_sb_mux = fetch_src_sb_q;
-      submit_qid_mux = fetch_qid_q;
-      submit_ticket_mux = fetch_ticket_q;
-      submit_desc_mux = fetch_desc;
-    end else if ((sb_enq_sticky_q || sb_imm_submit) && sb_let_through) begin
-      submit_valid_mux  = 1'b1;
-      submit_src_sb_mux = 1'b1;
-      submit_qid_mux    = QidWidth'(sb_imm_submit ? sb_qid_i : sb_qid_hold_q);
-      submit_ticket_mux = sb_imm_submit ? sb_ticket_eff : sb_ticket_hold_q;
-      submit_desc_mux = sb_imm_submit ? desc_bits : sb_desc_hold_q;
-    end else if ((submit_pulse_q || db_pending_q) && db_let_through) begin
-      submit_valid_mux  = 1'b1;
-      submit_qid_mux    = db_qid_q;
-      submit_ticket_mux = db_ticket_q;
-    end else begin
-      submit_valid_mux  = 1'b0;
-      submit_qid_mux    = db_qid_q;
-      submit_ticket_mux = db_ticket_q;
-    end
+  wire sb_let_through     = l_eng_let && !fetch_submit_pending_q;
+  wire db_let_through     = l_eng_let && !fetch_submit_pending_q && !l_sb_stk_or_imm;
+  wire sel_sub_fetch      = fetch_submit_pending_q && engine_let_through;
+  wire sel_sub_sb         = !sel_sub_fetch && (sb_enq_sticky_q || sb_imm_submit) && sb_let_through;
+  wire sel_sub_db         = !sel_sub_fetch && !sel_sub_sb && (submit_pulse_q || db_pending_q) && db_let_through;
+  assign submit_valid_mux  = sel_sub_fetch || sel_sub_sb || sel_sub_db;
+  assign submit_src_sb_mux = sel_sub_fetch ? fetch_src_sb_q : sel_sub_sb;
+  assign submit_qid_mux    = sel_sub_fetch ? fetch_qid_q :
+                             sel_sub_sb    ? QidWidth'(sb_imm_submit ? sb_qid_i : sb_qid_hold_q) :
+                                             db_qid_q;
+  for (genvar b = 0; b < 4; b++) begin : gen_sub_tkt_lane
+    logic s_f, s_sb, s_imm;
+    assign s_f   = fetch_submit_pending_q && engine_let_through;
+    assign s_sb  = !s_f && (sb_enq_sticky_q || sb_imm_submit) && sb_let_through;
+    assign s_imm = sb_imm_submit;
+    assign submit_ticket_mux[b*8 +: 8] = s_f  ? fetch_ticket_q[b*8 +: 8] :
+                                         s_sb ? (s_imm ? sb_ticket_eff[b*8 +: 8] : sb_ticket_hold_q[b*8 +: 8]) :
+                                                db_ticket_q[b*8 +: 8];
+  end
+  for (genvar w = 0; w < ($bits(desc_bits_t) / 8); w++) begin : gen_sub_desc_lane
+    logic d_f, d_sb, d_imm;
+    assign d_f   = fetch_submit_pending_q && engine_let_through;
+    assign d_sb  = !d_f && (sb_enq_sticky_q || sb_imm_submit) && sb_let_through;
+    assign d_imm = sb_imm_submit;
+    assign submit_desc_mux[w*8 +: 8] = d_f  ? fetch_desc[w*8 +: 8] :
+                                       d_sb ? (d_imm ? desc_bits[w*8 +: 8] : sb_desc_hold_q[w*8 +: 8]) :
+                                              db_desc_hold_q[w*8 +: 8];
   end
 
 
@@ -2121,43 +2124,30 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
   assign cpl_room_free = (CplCntW+3)'(cpl_count) + (CplCntW+3)'(busy_engine)
       + (CplCntW+3)'(!fetch_ready) + (CplCntW+3)'(fetch_start_q)
       + (CplCntW+3)'(fetch_submit_pending_q);
-  // E2b L1: flat leaf conjunctions on l_cpl_room; fetch_error_fire's
-  // leaf set is inlined inside fetch_refuse_fire (no L1->L1 read).
+  // E2b L1: flat leaf conjunctions on l_cpl_room; since !done_valid and
+  // l_cpl_room are already conjucted, excluding fetch_error_fire reduces to
+  // !(EnableDmaFetch && fetch_err_complete_q).
   assign fetch_error_fire = EnableDmaFetch && fetch_err_complete_q && !done_valid &&
       l_cpl_room;
-  assign fetch_refuse_fire = fetch_refuse_q && !done_valid
-      && !(EnableDmaFetch && fetch_err_complete_q && !done_valid && l_cpl_room)
-      && !(EnableDmaFetch && fetch_done && fetch_err)
-      && l_cpl_room;
+  assign fetch_refuse_fire = fetch_refuse_q && !done_valid && l_cpl_room
+      && !(EnableDmaFetch && fetch_err_complete_q)
+      && !(EnableDmaFetch && fetch_done && fetch_err);
 
-  // Completion FIFO push/pop (combinational one-cycle pulses into i_cpl_fifo)
-  always_comb begin
-    cpl_push         = 1'b0;
-    cpl_pop          = 1'b0;
-    cpl_push_ticket  = '0;
-    cpl_push_status  = '0;
-    cpl_push_irq     = 1'b0;
-    // Engine completion
-    if (done_valid) begin
-      cpl_push        = 1'b1;
-      cpl_push_ticket = done_ticket;
-      cpl_push_status = done_status;
-      cpl_push_irq    = done_irq;
-    end else if (fetch_error_fire) begin
-      cpl_push        = 1'b1;
-      cpl_push_ticket = fetch_err_ticket_q;
-      cpl_push_status = ST_ERR;
-      cpl_push_irq    = 1'b0;
-    end else if (fetch_refuse_fire) begin
-      cpl_push        = 1'b1;
-      cpl_push_ticket = fetch_refuse_ticket_q;
-      cpl_push_status = fetch_refuse_status_q;
-      cpl_push_irq    = 1'b0;
-    end
-    // DONE claim: pop head (PLIC discipline)
-    if (req_i && we_i && (addr_i[15:0] == 16'h010C) && wdata_i[0]) begin
-      cpl_pop = 1'b1;
-    end
+  // Completion FIFO push/pop split by output family with per-byte ticket mux (A38/A146).
+  assign cpl_push        = done_valid || fetch_error_fire || fetch_refuse_fire;
+  assign cpl_pop         = req_i && we_i && (addr_i[15:0] == 16'h010C) && wdata_i[0];
+  assign cpl_push_irq    = done_valid ? done_irq : 1'b0;
+  assign cpl_push_status = done_valid       ? done_status :
+                           fetch_error_fire ? ST_ERR :
+                           fetch_refuse_fire ? fetch_refuse_status_q : '0;
+  for (genvar b = 0; b < 4; b++) begin : gen_cpl_tkt_lane
+    logic c_d, c_e, c_r;
+    assign c_d = done_valid;
+    assign c_e = !c_d && fetch_error_fire;
+    assign c_r = !c_d && !c_e && fetch_refuse_fire;
+    assign cpl_push_ticket[b*8 +: 8] = c_d ? done_ticket[b*8 +: 8] :
+                                       c_e ? fetch_err_ticket_q[b*8 +: 8] :
+                                       c_r ? fetch_refuse_ticket_q[b*8 +: 8] : 8'h00;
   end
 
   // ------------------------------------------------------------------ reads

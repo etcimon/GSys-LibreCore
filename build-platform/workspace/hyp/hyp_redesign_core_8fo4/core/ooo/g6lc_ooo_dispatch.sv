@@ -1100,7 +1100,7 @@ module g6lc_ooo_dispatch
   // r44: the FP-use class predicates (rs1/rs2/imm use the FP operand
   // file) captured at the same iqi_take edge as iss_sbe_q/iss_fpsel_q —
   // state-derived, no new latency, holds exactly when those hold.
-  logic [NP-1:0]           iss_fpa_q, iss_fpb_q, iss_fpc_q;
+  logic [NP-1:0]           iss_fpa_q, iss_fpb_q, iss_fpc_q, iss_amocas_q;
   logic [NP-1:0]           iss_spec_q;
   logic [NP-1:0][1:0]      iss_spec_ab_q;
   logic [NP-1:0][1:0][G6LCCfg.TRANS_ID_BITS-1:0] iss_ptid_q;
@@ -1164,6 +1164,7 @@ module g6lc_ooo_dispatch
         iss_fpa_q[p] <= '0;
         iss_fpb_q[p] <= '0;
         iss_fpc_q[p] <= '0;
+        iss_amocas_q[p] <= '0;
         iss_spec_q[p] <= '0;
         iss_spec_ab_q[p] <= '0;
         iss_ptid_q[p] <= '0;
@@ -1187,6 +1188,8 @@ module g6lc_ooo_dispatch
                           iqi_sbe[p].ooo_renamed && is_rs2_fpr(iqi_sbe[p].op);
           iss_fpc_q[p] <= G6LCCfg.FpPresent && fp_port_sel[p] &&
                           iqi_sbe[p].ooo_renamed && is_imm_fpr(iqi_sbe[p].op);
+          iss_amocas_q[p] <= iqi_sbe[p].ooo_renamed &&
+                             is_amo_cas(iqi_sbe[p].op);
           iss_spec_q[p]  <= iqi_spec[p];
           iss_spec_ab_q[p] <= iqi_spec_ab[p];
           iss_ptid_q[p]  <= iqi_ptid[p];
@@ -1485,18 +1488,14 @@ module g6lc_ooo_dispatch
       end
     end
     // Zacas AMOCAS: GPR operand_c = the expected value, read from the PRF
-    // at p_rs3 (= prd_old, the OLD physical register rd overwrote). An
-    // integer writeback bypass mirrors hit_a/hit_b so a same-cycle producer
-    // forwards correctly; the committed-producer case is covered by the
-    // PRF read itself (arch rdata is stale under renaming).
-    logic amocas_c;
+    // at p_rs3 (= prd_old, the OLD physical register rd overwrote).
+    // A134 + A146: pre-registered iss_amocas_q[p] and per-byte replicated
+    // one-hot quadrant selects (same pattern as gen_op_lane for op_a/op_b).
     logic [G6LCCfg.NrWbPorts-1:0] hit_cg;
     logic [WLV:0][G6LCCfg.NrWbPorts-1:0][G6LCCfg.XLEN-1:0] ocg;
-    logic [G6LCCfg.XLEN-1:0] op_c_gpr;
-    assign amocas_c = iss_sbe_q[p].ooo_renamed &&
-                      is_amo_cas(iss_sbe_q[p].op);
+    logic [G6LCCfg.FLen-1:0] prf_c_w, ocg_w;
     for (genvar w = 0; w < G6LCCfg.NrWbPorts; w++) begin : gen_hit_cg
-      assign hit_cg[w] = wb_value_valid[w] && amocas_c &&
+      assign hit_cg[w] = wb_value_valid[w] && iss_amocas_q[p] &&
                         (wb_prd[w] == PRF_W'(iss_sbe_q[p].p_rs3)) &&
                         (wb_prd[w] != '0);
       assign ocg[0][w] = {G6LCCfg.XLEN{hit_cg[w]}} & wb_data_i[w];
@@ -1514,16 +1513,27 @@ module g6lc_ooo_dispatch
         end
       end
     end
-    assign op_c_gpr = (|hit_cg) ? ocg[WLV][0] : prf_rdata[NP*2+p];
+    assign prf_c_w = G6LCCfg.FLen'(prf_rdata[NP*2+p]);
+    assign ocg_w   = G6LCCfg.FLen'(ocg[WLV][0]);
     assign issue_op_a_o[p] = op_a_agu[p];
     assign issue_op_b_o[p] = op_b_pre[p];
     assign issue_op_a_valid_o[p] = issue_valid_o[p] && iss_sbe_q[p].ooo_renamed;
     assign issue_op_b_valid_o[p] = issue_valid_o[p] && iss_sbe_q[p].ooo_renamed;
-    // operand_c: AMOCAS takes the GPR physical read; FP keeps fprf/bypass.
-    assign issue_op_c_o[p] = amocas_c ? G6LCCfg.FLen'(op_c_gpr)
-                                      : ((|fh_c) ? oc[WLV][0] : fprf_rdata[2]);
+    for (genvar ol = 0; ol < G6LCCfg.FLen / 8; ol++) begin : gen_opc_lane
+      logic lc_amo, lc_gb, lc_gf, lc_fb, lc_ff;
+      assign lc_amo = iss_amocas_q[p];
+      assign lc_gb  = lc_amo && (|hit_cg);
+      assign lc_gf  = lc_amo && !(|hit_cg);
+      assign lc_fb  = !lc_amo && (|fh_c);
+      assign lc_ff  = !lc_amo && !(|fh_c);
+      assign issue_op_c_o[p][8*ol +: 8] =
+          (ocg_w[8*ol +: 8]         & {8{lc_gb}}) |
+          (prf_c_w[8*ol +: 8]       & {8{lc_gf}}) |
+          (oc[WLV][0][8*ol +: 8]    & {8{lc_fb}}) |
+          (fprf_rdata[2][8*ol +: 8] & {8{lc_ff}});
+    end
     assign issue_op_c_valid_o[p] = issue_valid_o[p] &&
-                                   (iss_fpc_q[p] || amocas_c);
+                                   (iss_fpc_q[p] || iss_amocas_q[p]);
   end
 
   // Live AGU at issue: vaddr = imm + rs1 (matches load_store_unit AGU)

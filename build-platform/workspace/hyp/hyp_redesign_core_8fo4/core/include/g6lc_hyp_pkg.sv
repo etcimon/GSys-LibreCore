@@ -121,6 +121,11 @@ package g6lc_hyp_pkg;
     // AMO_RESULT_FORM), so every profile binds 2 until the ==1 arm is
     // written.
     int unsigned MissunitResultStages;
+    // SMT: resident-cycle bound on the RR/HYBRID quantum; 0 = fetch-count
+    // quantum only. A resident hart whose fetch rate is low (spin loops)
+    // yields after this many cycles even if it has not reached
+    // SmtFetchQuantum fetches.
+    int unsigned SmtCycleQuantum;
   } g6lc_hyp_cfg_t;
 
   // Pre-redesign behaviour: single stages, no banking, no overrides.
@@ -171,7 +176,8 @@ package g6lc_hyp_pkg;
       // r76 note: wt_dcache_missunit registers the formed AMO result
       // unconditionally (AMO_RESULT_FORM), so even the pre-redesign
       // profile carries 2 — the ==1 arm does not exist yet.
-      MissunitResultStages: 2
+      MissunitResultStages: 2,
+      SmtCycleQuantum: 0
   };
 
   // The 8-FO4 operating point.
@@ -239,7 +245,8 @@ package g6lc_hyp_pkg;
       AesStages: 1,
       // Same r76 note as HypDefault: the formed-result register is
       // unconditional in today's missunit.
-      MissunitResultStages: 2
+      MissunitResultStages: 2,
+      SmtCycleQuantum: 16384
   };
 
   // r76 deep-publish profile: Hyp8 with LoadPubStages==2. The registered
@@ -295,7 +302,8 @@ package g6lc_hyp_pkg;
       CsrReadMuxStages: 1,
       CommitStages: 1,
       AesStages: 1,
-      MissunitResultStages: 2
+      MissunitResultStages: 2,
+      SmtCycleQuantum: 16384
   };
 
   // r127: the profile the integrated core has actually run. Until r127
@@ -422,6 +430,7 @@ package g6lc_hyp_pkg;
     ok &= h.CommitStages inside {1, 2};
     ok &= h.AesStages inside {1, 3};
     ok &= h.MissunitResultStages inside {1, 2};
+    ok &= (h.SmtCycleQuantum == 0) || (h.SmtCycleQuantum >= 256);
     return ok;
   endfunction
 

@@ -927,6 +927,27 @@ assign wbuffer_all[k] = wbuffer_data_i[k];
     end
   end
 
+  // r-casdiag: read-port stall detector. A port ctrl holds rd_req_i high in
+  // IDLE/READ_WAIT until the arbiter grants (rd_ack_o). When a request is
+  // pending but NO port is granted for many consecutive cycles, the blocker
+  // is rd_port_busy = wr_cl_vld_i | inv_req_i (missunit line-install vs
+  // wbuffer fixup invalidation). Dump the breakdown to name the stuck side.
+  int unsigned rd_stall_c = 0;
+  always @(posedge clk_i) begin
+    if (!rst_ni) rd_stall_c = 0;
+    else if (smt_mem_trace) begin
+      if ((|rd_req_i) && !(|rd_ack_o)) rd_stall_c++;
+      else rd_stall_c = 0;
+      if ((rd_stall_c == 200) || ((rd_stall_c > 200) && ((rd_stall_c % 500) == 0))) begin
+        $display("[dcache-stall] cyc=%0d n=%0d req=%b ack=%b masked=%b prio=%b portbusy=%b wrclvld=%b invreq=%b refill=%b wrclwe=%b wrreq=%b wrack=%b wrdenied=%b invack=%b",
+                 smt_mem_cycle, rd_stall_c, rd_req_i, rd_ack_o, rd_req_masked,
+                 rd_req_prio, rd_port_busy, wr_cl_vld_i, inv_req_i, refill_line,
+                 wr_cl_we_i, wr_req_i, wr_ack_o, wr_denied, inv_ack_o);
+        $fflush;
+      end
+    end
+  end
+
   // T43 invariant: a missunit line write / invalidation writes its own valid
   // bits (at most one way set -- the refilled way), never another path's.
   missunit_vld_write_own_bits :

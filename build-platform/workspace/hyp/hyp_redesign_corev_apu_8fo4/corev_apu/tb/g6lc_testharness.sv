@@ -1086,7 +1086,16 @@ module g6lc_testharness #(
 `else
     .slave      ( dram_lat     ),
 `endif
-    .init_done_o( dram_init_done ),
+    .storamic_ctrl_req_i     ( '0             ),
+    .storamic_ctrl_resp_o    (                ),
+    .storamic_irq_o          (                ),
+    .init_done_o             ( dram_init_done ),
+    .service_ready_o         (                ),
+    .storamic_power_cut_i    ( 1'b0           ),
+    .storamic_save_i         ( 1'b0           ),
+    .storamic_restore_i      ( 1'b0           ),
+    .storamic_save_busy_o    (                ),
+    .storamic_restore_done_o (                ),
     .ch_r_beats_o ( dram_ch_r_beats ),
     .ch_w_beats_o ( dram_ch_w_beats )
   );

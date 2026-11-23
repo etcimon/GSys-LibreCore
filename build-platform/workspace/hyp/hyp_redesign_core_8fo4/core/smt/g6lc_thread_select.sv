@@ -23,7 +23,10 @@
 module g6lc_thread_select
   import config_pkg::*;
 #(
-    parameter config_pkg::g6lc_cfg_t G6LCCfg = config_pkg::g6lc_cfg_empty
+    parameter config_pkg::g6lc_cfg_t G6LCCfg = config_pkg::g6lc_cfg_empty,
+    // SMT: resident-cycle bound on the RR/HYBRID quantum; 0 = fetch-count
+    // quantum only (a low-fetch-rate resident yields after this many cycles).
+    parameter int unsigned CycQuantum = 0
 ) (
     input  logic clk_i,
     input  logic rst_ni,
@@ -79,6 +82,7 @@ module g6lc_thread_select
   localparam int unsigned Q_W    = (Q_MAX <= 1) ? 1 : $clog2(Q_MAX + 1);
   localparam int unsigned ST_MAX = G6LCCfg.SmtStarveLimit;
   localparam int unsigned ST_W   = (ST_MAX <= 1) ? 1 : $clog2(ST_MAX + 1);
+  localparam int unsigned CQ_W   = (CycQuantum <= 1) ? 1 : $clog2(CycQuantum + 1);
   localparam smt_policy_t POLICY = G6LCCfg.SmtPolicy;
 
   if (NH <= 1) begin : gen_single_hart
@@ -104,6 +108,8 @@ module g6lc_thread_select
     logic [HID_W-1:0] active_q, active_d;
     logic [HID_W-1:0] rr_ptr_q, rr_ptr_d;  // next RR candidate after active
     logic [Q_W-1:0]   quantum_q, quantum_d;
+    logic [CQ_W-1:0]  cyc_q, cyc_d;
+    logic             cyc_hit;
     logic [ST_W-1:0]  starve_q[NH];
     logic [ST_W-1:0]  starve_d[NH];
     // After activate, suppress miss-switch briefly so an I$ fill can complete.
@@ -122,6 +128,7 @@ module g6lc_thread_select
     logic [7:0] unissued_age_q;
     logic [5:0] uniss_pend_q, uniss_pend_d;
     logic       t0_extra_q, t0_extra_d;
+    logic       t0_defer_q, t0_defer_d;
     localparam logic [4:0] MISS_SWITCH_BLACKOUT = 5'd16;
     localparam logic [7:0] MISS_STALL_THRESH = 8'd32;
     localparam logic [5:0] SMT_UNISS_WAIT = 6'd47;
@@ -278,6 +285,12 @@ module g6lc_thread_select
     end
     assign peer_starve = am_vld[TSL][0] ? am_idx[TSL][0] : active_q;
 
+    // Cycle-bound quantum: a resident hart whose fetch rate is too low to
+    // reach SmtFetchQuantum (spin loops) still yields once it has stayed
+    // resident for CycQuantum cycles. Constant-0 when CycQuantum == 0.
+    assign cyc_hit = (CycQuantum != 0) &&
+                     (cyc_q >= CQ_W'(CycQuantum - 1));
+
     // hyp8 r3: the single composed next-state writer billed as one dense
     // cone. Split into the raw policy select, the ordered gate chain
     // (uniss -> t0 -> trap_hold -> drain -> hold), and independent
@@ -309,7 +322,8 @@ module g6lc_thread_select
           end
         end
         SMT_RR: begin
-          if (fetch_fire_i && (quantum_q >= Q_W'(Q_MAX - 1)) && found_peer) begin
+          if (((fetch_fire_i && (quantum_q >= Q_W'(Q_MAX - 1))) || cyc_hit) &&
+              found_peer) begin
             do_pol      = 1'b1;
             rq_pol = 1'b1;
             nxt_pol      = peer_any;
@@ -338,8 +352,9 @@ module g6lc_thread_select
             do_pol    = 1'b1;
             ry_pol = 1'b1;
             nxt_pol    = peer_unpaused;
-          end else if (fetch_fire_i &&
-                       (quantum_q >= Q_W'(Q_MAX - 1)) && found_peer) begin
+          end else if (((fetch_fire_i &&
+                         (quantum_q >= Q_W'(Q_MAX - 1))) || cyc_hit) &&
+                       found_peer) begin
             do_pol      = 1'b1;
             rq_pol = 1'b1;
             nxt_pol      = peer_any;
@@ -382,10 +397,26 @@ module g6lc_thread_select
       // I4bg: after lui/addi t0, suppress *quantum/starve* only so one more
       // fetch can take the cave tail. Miss-switch still fires (I4bh
       // also-miss lost the nat cookie).
+      // The deferral is one fetch, once: t0_imm_i re-arms t0_extra_q on every
+      // `li t0` issue, and a resident loop that opens with one (OpenSBI
+      // _wait_for_boot_hart: li t0,2 ... div x3 ... bne) has it set at every
+      // fetch_fire, the only cycle the quantum predicate is evaluated. Unbounded,
+      // the quantum switch was suppressed forever and the boot hart never ran
+      // again (fw_payload: hart 0 frozen at 6333 retired from cycle ~32k).
+      // t0_defer_q records the deferral already granted to this resident; a
+      // switch taken with t0_extra_q set banks smt_t0_next (I4bi), as the
+      // miss-switch always has.
+      t0_defer_d = t0_defer_q;
+`ifdef G6LC_MUT_SMT_T0_DEFER_UNBOUNDED
+      // Leaf-bench mutation (tb_g6lc_thread_select_t0): the pre-fix gate.
       if (t0_extra_q && do_g1 && (rq_g1 || rs_g1)) begin
+`else
+      if (t0_extra_q && do_g1 && (rq_g1 || rs_g1) && !t0_defer_q) begin
+`endif
         do_g1 = 1'b0;
         rq_g1 = 1'b0;
         rs_g1 = 1'b0;
+        t0_defer_d = 1'b1;
       end
       if (t0_imm_i) t0_extra_d = 1'b1;
       else if (do_g1) t0_extra_d = 1'b0;
@@ -543,6 +574,13 @@ module g6lc_thread_select
                        : !fetch_fire_i ? quantum_q
                        : (quantum_q >= Q_W'(Q_MAX - 1)) ? Q_W'(Q_MAX)
                                                         : quantum_q + 1'b1;
+    // Resident-cycle counter for the cycle-bounded quantum: counts every
+    // cycle the current hart stays resident (fetch or not) and saturates at
+    // CycQuantum. Cleared only on a real handoff/hold boundary; flush_i does
+    // not reset it, the same rule quantum_q follows (see the comment above).
+    assign cyc_d       = (hold_i || do_switch) ? '0
+                       : (cyc_q >= CQ_W'(CycQuantum)) ? CQ_W'(CycQuantum)
+                                                    : cyc_q + 1'b1;
     assign activate_age_d = hold_i    ? activate_age_q
                           : do_switch ? '0
                           : (activate_age_q == 5'h1F) ? 5'h1F
@@ -594,10 +632,12 @@ module g6lc_thread_select
         pause_req_q      <= '0;
         rr_ptr_q         <= HID_W'(1 % NH);  // prefer hart 1 as first alternate
         quantum_q        <= '0;
+        cyc_q            <= '0;
         activate_age_q   <= '0;
         stall_age_q      <= '0;
         uniss_pend_q     <= '0;
         t0_extra_q       <= 1'b0;
+        t0_defer_q       <= 1'b0;
         t0_bank_q        <= 1'b0;
         switch_q         <= 1'b0;
         reason_miss_q    <= 1'b0;
@@ -631,6 +671,7 @@ module g6lc_thread_select
             (active_d != active_q) ? (pause_req_d & ~(NH'(1) << active_d)) : pause_req_d;
         rr_ptr_q         <= rr_ptr_d;
         quantum_q        <= quantum_d;
+        cyc_q            <= cyc_d;
         activate_age_q   <= activate_age_d;
         stall_age_q      <= stall_age_d;
         // Reset the unissued-head wait on an actual switch so the next resident
@@ -638,6 +679,7 @@ module g6lc_thread_select
         // saturated count that would disable the I4bc delay entirely.
         uniss_pend_q     <= do_switch ? '0 : uniss_pend_d;
         t0_extra_q       <= t0_extra_d;
+        t0_defer_q       <= (do_switch || hold_i) ? 1'b0 : t0_defer_d;
         t0_bank_q        <= do_switch & t0_extra_q;
         switch_q         <= do_switch;
         reason_miss_q    <= do_switch & reason_miss;

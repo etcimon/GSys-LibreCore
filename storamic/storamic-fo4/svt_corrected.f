@@ -1,0 +1,26 @@
+# sv-timing generated filelist — do not hand-edit without review
+# auto-correct project emit — review before use in host builds
+include/g6lc_storamic_cfg_pkg__svt.sv
+include/g6lc_storamic_pkg__svt.sv
+include/g6lc_storamic_checkpoint_pkg__svt.sv
+include/g6lc_storamic_pad_pkg__svt.sv
+fabric/g6lc_storamic_region_pkg__svt.sv
+discovery/g6lc_storamic_discovery_pkg__svt.sv
+fabric/g6lc_storamic_checkpoint_ctrl__svt.sv
+fabric/g6lc_storamic_checkpoint_io__svt.sv
+fabric/g6lc_storamic_checkpoint_media__svt.sv
+fabric/g6lc_storamic_store_guard__svt.sv
+fabric/g6lc_storamic_checkpoint_service__svt.sv
+fabric/g6lc_storamic_checkpoint_policy__svt.sv
+frontend/g6lc_storamic_axi_refuse__svt.sv
+frontend/g6lc_storamic_axi_memory__svt.sv
+fabric/g6lc_storamic_slot_mux__svt.sv
+discovery/g6lc_storamic_sync__svt.sv
+discovery/g6lc_storamic_discovery__svt.sv
+discovery/g6lc_storamic_discovery_set__svt.sv
+frontend/g6lc_storamic_regs__svt.sv
+host/virtio/g6lc_storamic_virtio_mmio__svt.sv
+host/virtio/g6lc_storamic_virtio_ring__svt.sv
+host/virtio/g6lc_storamic_virtio_blk__svt.sv
+host/virtio/g6lc_storamic_virtio_dev__svt.sv
+g6lc_storamic_top__svt.sv

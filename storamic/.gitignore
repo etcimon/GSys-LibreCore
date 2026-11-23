@@ -1,0 +1,6 @@
+# Exclude large regenerable sv-timing IR/analysis dumps; keep emitted SV, flists, and manifests.
+*.ir.json
+baseline.json
+emitted_post.json
+correct_result.json
+*.log

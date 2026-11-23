@@ -1033,7 +1033,9 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
       endcase
     end
     assign fwd_res[s] = {fwd_hi, fwd_lo};
-    assign v_raw = (fwd_src != 3'd7) ||
+    // A118: (fwd_src != 3'd7) is exact-equivalent to (|wb_hit), removing the
+    // serial 4-port fwd_src priority encode off the valid/stall critical cone.
+    assign v_raw = (|wb_hit) ||
                    (fwd_i.sbe[s].valid & ~fwd_i.sbe[s].ex.valid);
     assign fwd_res_valid[s] = v_raw &&
         !(G6LCCfg.RVA && g6lc_core_pkg::is_amo(fwd_i.sbe[s].op));
@@ -1665,17 +1667,17 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
   // ld s4,0x20(sp)@0x8001379a deadlock). Grant at most one memory ack per
   // cycle; losers stay in the IQ and retry next cycle. Exception lanes
   // (ex.valid) trap and never reach the LSU, so they are not candidates.
+  // A119/A136: flat genvar prefix-OR replaces serial mem_seen loop carry.
   logic [G6LCCfg.NrIssuePorts-1:0] lsu_mem_cand, lsu_mem_grant;
-  always_comb begin
-    automatic logic mem_seen;
-    mem_seen = 1'b0;
-    for (int unsigned p = 0; p < G6LCCfg.NrIssuePorts; p++) begin
-      lsu_mem_cand[p] = issue_instr_valid_i[p] && !fu_busy[p] &&
-                        !issue_instr_i[p].ex.valid && !stall_raw[p] &&
-                        (issue_instr_i[p].fu == LOAD ||
-                         issue_instr_i[p].fu == STORE);
-      lsu_mem_grant[p] = lsu_mem_cand[p] && !mem_seen;
-      if (lsu_mem_cand[p]) mem_seen = 1'b1;
+  for (genvar p = 0; p < G6LCCfg.NrIssuePorts; p++) begin : gen_lsu_mem_arb
+    assign lsu_mem_cand[p] = issue_instr_valid_i[p] && !fu_busy[p] &&
+                             !issue_instr_i[p].ex.valid && !stall_raw[p] &&
+                             (issue_instr_i[p].fu == LOAD ||
+                              issue_instr_i[p].fu == STORE);
+    if (p == 0) begin : gen_p0
+      assign lsu_mem_grant[0] = lsu_mem_cand[0];
+    end else begin : gen_pn
+      assign lsu_mem_grant[p] = lsu_mem_cand[p] && !(|lsu_mem_cand[p-1:0]);
     end
   end
   for (genvar i = 0; i < G6LCCfg.NrIssuePorts; i++) begin : gen_ackpre
@@ -1706,16 +1708,7 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
         end
       end
     end
-    // In-order multi-issue: a bubble on port k kills ports k+1..N-1.
-    // Under OoO each held lane drains independently -- a nonempty lane
-    // must be able to ack while a lower lane is empty -- so the strict
-    // lane-prefix kill applies only to the in-order stream.
     if (G6LCCfg.SuperscalarEn) begin
-      if (!G6LCCfg.OoOEn) begin
-        for (int unsigned p = 1; p < G6LCCfg.NrIssuePorts; p++) begin
-          if (!issue_ack_o[p-1]) issue_ack_o[p] = 1'b0;
-        end
-      end
       // Soft-ladder B1 (b1-amo-spin-lock): AMO only on issue port 0 under SS.
       // Port-1 AMO + hang-7 younger-cancel left amo_buffer wedged (depth 1,
       // no flush_ex on mispredict). store_unit cancel kill recovers that;
@@ -1723,6 +1716,55 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
       if (G6LCCfg.RVA) begin
         for (int unsigned p = 1; p < G6LCCfg.NrIssuePorts; p++) begin
           if (g6lc_core_pkg::is_amo(issue_instr_i[p].op)) issue_ack_o[p] = 1'b0;
+        end
+      end
+      // Single-pipe mutual exclusion across all issue ports (NrIssuePorts > 2):
+      // ex_stage has ONE one-cycle pipe (ALU0/branch/CSR/AES, asserted one-hot
+      // on one_cycle_select), ONE ALU2 pipe, ONE MULT pipe, and ONE FPU pipe
+      // (LSU is already single-granted by lsu_mem_grant above). gen_fu_busy
+      // only inspects port i-1, and g6lc_flu_reserve only separates colliding
+      // writeback cycles, so two ops on non-adjacent ports (or held across take
+      // cycles) could otherwise ack together and silently drop one packet in
+      // ex_stage (mc_l3_stride_scan / mini_l2_hot_scan commit-head wedges).
+      // Also pause new ALU2 acks while fpu_early_valid_i is high so ALU2
+      // cannot starve a stalled FPU writeback on the shared fpu_valid_o port.
+      begin
+        automatic logic oc_taken   = 1'b0;
+        automatic logic alu2_taken = 1'b0;
+        automatic logic mul_taken  = 1'b0;
+        automatic logic fpu_taken  = 1'b0;
+        for (int unsigned p = 0; p < G6LCCfg.NrIssuePorts; p++) begin
+          if (issue_ack_o[p] && !issue_instr_i[p].ex.valid) begin
+            if (issue_instr_i[p].fu == ALU && use_alu2[p]) begin
+              if (alu2_taken || (G6LCCfg.FpPresent && fpu_early_valid_i))
+                issue_ack_o[p] = 1'b0;
+              else
+                alu2_taken = 1'b1;
+            end else if ((issue_instr_i[p].fu == ALU) ||
+                         (issue_instr_i[p].fu == CTRL_FLOW) ||
+                         (issue_instr_i[p].fu == CSR) ||
+                         (issue_instr_i[p].fu == AES)) begin
+              if (oc_taken) issue_ack_o[p] = 1'b0;
+              else          oc_taken = 1'b1;
+            end else if (issue_instr_i[p].fu == MULT) begin
+              if (mul_taken) issue_ack_o[p] = 1'b0;
+              else           mul_taken = 1'b1;
+            end else if (G6LCCfg.FpPresent &&
+                         (issue_instr_i[p].fu == FPU ||
+                          issue_instr_i[p].fu == FPU_VEC)) begin
+              if (fpu_taken) issue_ack_o[p] = 1'b0;
+              else           fpu_taken = 1'b1;
+            end
+          end
+        end
+      end
+      // In-order multi-issue: a bubble on port k kills ports k+1..N-1.
+      // Under OoO each held lane drains independently -- a nonempty lane
+      // must be able to ack while a lower lane is empty -- so the strict
+      // lane-prefix kill applies only to the in-order stream.
+      if (!G6LCCfg.OoOEn) begin
+        for (int unsigned p = 1; p < G6LCCfg.NrIssuePorts; p++) begin
+          if (!issue_ack_o[p-1]) issue_ack_o[p] = 1'b0;
         end
       end
       // iter-012 note: force SI (issue_ack_o[p>0]=0) was PEEL_FDT-negative

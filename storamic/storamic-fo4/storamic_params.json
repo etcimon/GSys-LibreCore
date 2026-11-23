@@ -1,0 +1,19 @@
+{
+  "Enable": 1,
+  "CheckpointRequested": 0,
+  "NativeBound": 0,
+  "DramClass": 0,
+  "NrChannels": 1,
+  "IdWidth": 4,
+  "AddrWidth": 64,
+  "DataWidth": 64,
+  "UserWidth": 1,
+  "Slots": 4,
+  "Regions": 4,
+  "MapEn": 1,
+  "BootMapEn": 1,
+  "SeqWidth": 32,
+  "RamRspDelay": 0,
+  "ModelWords": 8192,
+  "NumWords": 8192
+}

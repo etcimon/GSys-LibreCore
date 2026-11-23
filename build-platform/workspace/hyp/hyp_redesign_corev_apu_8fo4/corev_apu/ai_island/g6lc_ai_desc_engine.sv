@@ -389,17 +389,17 @@ module g6lc_ai_desc_engine
     return WriteCompletion && wr_en && (d.ptr_done != '0);
   endfunction
 
-  // BEGIN sv-timing auto-correct (balance_mux rewrite)
-  // --- BalanceMux arm staging (latency-neutral) ---
-  logic svt_bm_p6654_n23316_0;
-  logic [64-1:0] svt_bm_p6654_n23316_1;
-  var type(check_addr_o) svt_bm_top_p6654_n23316;
-  always_comb begin : svt_bm_top_p6654_n23316_stage
-    svt_bm_p6654_n23316_0 = state_q == ST_CHK_A;
-    svt_bm_p6654_n23316_1 = svt_bm_p6654_n23316_0 ? desc_q.ptr_a : desc_q.ptr_b;
-    svt_bm_top_p6654_n23316 = type(check_addr_o)'(g6lc_ai_island_cfg_pkg::ai_beat_lo(svt_bm_p6654_n23316_1, BeatBytes));
+  // A146 per-byte replicated select for 64-bit check_addr / check_len muxes:
+  // avoids a single 1-bit `state_q == ST_CHK_A` net broadcasting across 64 loads.
+  logic [AddrWidth-1:0] chk_ab_ptr, chk_ab_addr, chk_ab_len;
+  for (genvar b = 0; b < (AddrWidth / 8); b++) begin : gen_chk_ab_lane
+    logic is_chk_a_b;
+    assign is_chk_a_b = (state_q == ST_CHK_A);
+    assign chk_ab_ptr[b*8 +: 8] = is_chk_a_b ? desc_q.ptr_a[b*8 +: 8] : desc_q.ptr_b[b*8 +: 8];
+    assign chk_ab_len[b*8 +: 8] = is_chk_a_b ? len_a_q[b*8 +: 8]      : len_b_q[b*8 +: 8];
   end
-  // END sv-timing auto-correct (balance_mux rewrite)
+  assign chk_ab_addr = AddrWidth'(g6lc_ai_island_cfg_pkg::ai_beat_lo(chk_ab_ptr, BeatBytes));
+
   logic [AddrWidth-1:0] len_a_q, len_b_q;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin len_a_q <= '0; len_b_q <= '0; end
@@ -424,11 +424,10 @@ module g6lc_ai_desc_engine
     case (state_q)
       ST_CHK_A, ST_CHK_B: begin
         check_req_o = 1'b1;
-        check_addr_o = svt_bm_top_p6654_n23316; // sv-timing: BalanceMux/rebalance #658 RHS rewrite
-            // sv-timing: (RHS rewrite continuation removed) state_q == ST_CHK_A ? desc_q.ptr_a : desc_q.ptr_b, BeatBytes);
+        check_addr_o = chk_ab_addr;
         // r29: bus lengths are prepared facts (registered from the span
         // results, which settle at least one cycle before ST_CHK_A).
-        check_len_o = state_q == ST_CHK_A ? len_a_q : len_b_q;
+        check_len_o = chk_ab_len;
         check_need_r_o = 1'b1;
       end
       ST_CHK_C: begin

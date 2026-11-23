@@ -2099,7 +2099,8 @@ assign irq_active = irq_i[smt_active_hart];
       !(G6LCCfg.DebugEn && set_debug_pc);
 
   g6lc_thread_select #(
-      .G6LCCfg(G6LCCfg)
+      .G6LCCfg(G6LCCfg),
+      .CycQuantum(HypCfg.SmtCycleQuantum)
   ) i_smt_thread_select (
       .clk_i,
       .rst_ni,

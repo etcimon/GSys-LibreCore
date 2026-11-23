@@ -74,13 +74,20 @@ module g6lc_l2_pf #(
 
   typedef struct packed {
     logic                      valid;
-    logic [PAGETAG_W-1:0]      page;      // region tag = 4 KiB page number
-    logic [LINE_BITS-1:0]      last;      // last trained line index
-    logic signed [DLT_W-1:0]   stride;    // previous within-page delta
-    logic                      seen;      // a first delta has been recorded
-    logic [1:0]                conf;      // confirmed-delta count (saturates 3)
-    logic [PW-1:0]             pend;      // armed candidates not yet emitted
-    logic [PW-1:0]             ahead;     // next pend offset (1..PF_DISTANCE)
+    logic [PAGETAG_W-1:0]      page;         // region tag = 4 KiB page number
+    logic [LINE_BITS-1:0]      last;         // last trained line index
+    logic signed [DLT_W-1:0]   stride;       // previous within-page delta
+    logic                      seen;         // a first delta has been recorded
+    logic [1:0]                conf;         // confirmed-delta count (saturates 3)
+    logic [PW-1:0]             pend;         // armed candidates not yet emitted
+    logic [PW-1:0]             ahead;        // next pend offset (1..PF_DISTANCE)
+    // A136 registered derived candidate: offset within the 4 KiB page and its
+    // in-page predicate, maintained incrementally on arm (ahead=1) and emit
+    // (ahead+=1). Since every emitted candidate is guaranteed in-page, the full
+    // candidate line is `{page, cand_off}` with zero emit-path multiply or
+    // 58-bit addition.
+    logic [PAGE_LBITS-1:0]     cand_off;
+    logic                      cand_in_page;
   } stream_t;
 
   stream_t [NR_STREAMS-1:0] st_q, st_d;
@@ -94,14 +101,18 @@ module g6lc_l2_pf #(
   logic                      cnd_vld_q, cnd_vld_d;
   logic [LINE_BITS-1:0]      cnd_line_q, cnd_line_d;
 
-  // r127-aa: parallel emit-evaluation scratch — per-stream constant-index
-  // results (emit-ok / page-clear / candidate line / rr-position) plus the
-  // winner one-hot and its position. Written only inside the emit always_comb.
+  // Parallel emit-evaluation scratch — per-stream constant-index results
+  // (emit-ok / page-clear / next-offset / rr-position) plus winner one-hot.
   logic [NR_STREAMS-1:0]     em_ok, em_pc, em_win, em_blk;
-  logic [LINE_BITS-1:0]      em_bs [NR_STREAMS];
   logic [SW-1:0]             em_ps [NR_STREAMS];
+  logic [PAGE_LBITS-1:0]     em_next_off [NR_STREAMS];
+  logic [NR_STREAMS-1:0]     em_next_in_page;
   logic [SW-1:0]             em_wpos;
   logic                       em_any;
+  logic                      emit_en;
+  logic                      cnd_vld_after_take;
+  logic [NR_STREAMS-1:0]     train_match;
+  logic [NR_STREAMS-1:0]     alloc_oh;
 
   function automatic logic [PAGETAG_W-1:0] page_of(
       input logic [LINE_BITS-1:0] l);
@@ -161,28 +172,15 @@ module g6lc_l2_pf #(
 // sv-timing: origin <src>/corev_apu/l2_cache/g6lc_l2_pf.sv:156:11 edit=662
   // relocation t1_balance_bundle; balance_mux credit path 16332 node 22105 exclusive residual 177.4->88.7 (latency-neutral) extras=0
   // END sv-timing auto-correct (balance_mux rewrite)
-assign train_line = train_line_i[AXI_ADDR_WIDTH-1:OFF_BITS];
-  always_comb begin
-    train_hit     = 1'b0;
-    train_hit_idx = '0;
+  assign train_line = train_line_i[AXI_ADDR_WIDTH-1:OFF_BITS];
+  always_comb begin : p_train_match
     for (int unsigned s = 0; s < NR_STREAMS; s++) begin
-      if (st_q[s].valid && (st_q[s].page == page_of(train_line))) begin
-        train_hit     = 1'b1;
-        train_hit_idx = SW'(s);
-      end
+      train_match[s] = st_q[s].valid && (st_q[s].page == page_of(train_line));
     end
+    train_hit = |train_match;
   end
 
   // BEGIN sv-timing auto-correct (balance_mux rewrite)
-  // --- BalanceMux arm staging (latency-neutral) ---
-  logic svt_bm_p16342_n22116_0;
-  logic [2-1:0] svt_bm_p16342_n22116_1;
-  var type(st_d[train_hit_idx].conf) svt_bm_top_p16342_n22116;
-  always_comb begin : svt_bm_top_p16342_n22116_stage
-    svt_bm_p16342_n22116_0 = st_q[train_hit_idx].conf == 2'd3;
-    svt_bm_p16342_n22116_1 = st_q[train_hit_idx].conf + 2'd1;
-    svt_bm_top_p16342_n22116 = type(st_d[train_hit_idx].conf)'(svt_bm_p16342_n22116_0 ? st_q[train_hit_idx].conf : svt_bm_p16342_n22116_1);
-  end
   // --- BalanceMux arm staging (latency-neutral) ---
   logic svt_bm_p6263_n22101_0;
   logic [4-1:0] svt_bm_p6263_n22101_1;
@@ -193,170 +191,153 @@ assign train_line = train_line_i[AXI_ADDR_WIDTH-1:OFF_BITS];
     svt_bm_top_p6263_n22101 = type(quiet_d)'(svt_bm_p6263_n22101_0 ? svt_bm_p6263_n22101_1 : '0);
   end
   // END sv-timing auto-correct (balance_mux rewrite)
-  always_comb begin
-    // Hoisted locals — Verilator flags block-scope automatics that are only
-    // conditionally assigned as latches; declare and default them here.
-    int unsigned             em_v;
-    logic                    em_found;
-    logic signed [DLT_W-1:0] tr_d;
-    logic signed [DLT_W-1:0] tr_str;
-    // r127-u: stride*ahead as a per-bit shift-add. `ahead` is PW bits, so the
-    // product is the sum of stride*2^b over the set bits of `ahead`. `es`
-    // sign-extends stride to EM_W *before* shifting (a bare `stride <<< b`
-    // would wrap at DLT_W), each `es <<< b` is a constant shift (free wiring)
-    // plus one conditional add, and LINE_BITS'(em_prod) sign-extends exactly
-    // like the original multiply's cast context. Exhaustive miter-verified
-    // bit-identical; the `*` operator is no longer billed as an atomic
-    // multiplier (~87 FO4 on the emit path).
-    logic signed [EM_W-1:0] em_prod;
-    logic signed [EM_W-1:0] es;
-    // r127-u: in-page range check accumulator — last's within-page offset plus
-    // the signed product, EM_W+1 bits so offset(<=2^PAGE_LBITS-1)+product never
-    // overflows before the xs[EM_W:PAGE_LBITS]==0 range test.
-    logic signed [EM_W:0]   xs;
-    em_v     = '0;
-    em_found = 1'b0;
-    tr_d     = '0;
-    tr_str   = '0;
-    es       = '0;
-    em_prod  = '0;
-    xs       = '0;
-    // r127-aa emit-eval defaults (avoid latches when the emit guard is shut).
-    em_ok = '0; em_pc = '0; em_win = '0; em_blk = '0;
-    em_any = 1'b0; em_wpos = '0;
-    for (int unsigned s = 0; s < NR_STREAMS; s++) begin
-      em_bs[s] = '0; em_ps[s] = '0;
+
+  assign quiet_d            = train_i ? QW'(QUIET) : svt_bm_top_p6263_n22101;
+  assign cnd_vld_after_take = cnd_vld_q && !cand_take_i;
+  assign emit_en            = !cnd_vld_after_take && (quiet_d == '0);
+
+  // Unconditional flop-only precompute (A136/A118): next candidate offset,
+  // rr-order positions, and allocation victim one-hot depend only on st_q/rr_q.
+  logic [NR_STREAMS-1:0] inv_v_s, first_inv_s;
+  logic                  any_inv_s;
+  for (genvar gs = 0; gs < NR_STREAMS; gs++) begin : gen_alloc_oh
+    assign inv_v_s[gs] = !st_q[gs].valid;
+    if (gs == 0) begin : gen_s0
+      assign first_inv_s[0] = inv_v_s[0];
+    end else begin : gen_sn
+      assign first_inv_s[gs] = inv_v_s[gs] && !(|inv_v_s[gs-1:0]);
     end
+    assign alloc_oh[gs] = any_inv_s ? first_inv_s[gs] : (rr_q == SW'(gs));
+  end
+  assign any_inv_s = |inv_v_s;
+
+  always_comb begin : p_emit_prep
+    for (int unsigned s = 0; s < NR_STREAMS; s++) begin
+      logic signed [DLT_W:0] next_xs;
+      next_xs = $signed({{(DLT_W+1-PAGE_LBITS){1'b0}}, st_q[s].cand_off}) +
+                $signed(st_q[s].stride);
+      em_next_off[s]     = next_xs[PAGE_LBITS-1:0];
+      em_next_in_page[s] = !(|next_xs[DLT_W:PAGE_LBITS]);
+      em_ps[s] = SW'( (int'(s) >= int'(rr_q))
+                      ? (int'(s) - int'(rr_q))
+                      : (int'(s) - int'(rr_q) + NR_STREAMS) );
+    end
+  end
+
+  // Parallel emit eligibility + RR-position winner selection (zero arithmetic).
+  always_comb begin : p_emit_pick
+    em_ok   = '0;
+    em_pc   = '0;
+    em_blk  = '0;
+    em_win  = '0;
+    em_any  = 1'b0;
+    em_wpos = '0;
+    for (int unsigned s = 0; s < NR_STREAMS; s++) begin
+      logic retrain_s, armed_s;
+      retrain_s = (QUIET == 0) && train_i && train_match[s];
+      armed_s   = st_q[s].valid && (st_q[s].pend != '0) && !retrain_s;
+      em_ok[s]  = emit_en && armed_s && st_q[s].cand_in_page;
+      em_pc[s]  = emit_en && armed_s && !st_q[s].cand_in_page;
+    end
+    for (int unsigned s = 0; s < NR_STREAMS; s++) begin
+      for (int unsigned t = 0; t < NR_STREAMS; t++) begin
+        if (em_ok[t] && (em_ps[t] < em_ps[s])) em_blk[s] = 1'b1;
+      end
+      em_win[s] = em_ok[s] && !em_blk[s];
+      if (em_win[s]) begin
+        em_any  = 1'b1;
+        em_wpos = em_ps[s];
+      end
+    end
+  end
+
+  // Unconditional per-stream train arithmetic (A118/A146): decouple delta,
+  // stride, and arm candidate calculation from the nested if-guards.
+  logic signed [DLT_W-1:0] tr_d_s [NR_STREAMS];
+  logic signed [DLT_W-1:0] tr_str_s [NR_STREAMS];
+  logic [PAGE_LBITS-1:0]   tr_arm_off_s [NR_STREAMS];
+  logic [NR_STREAMS-1:0]   tr_arm_ip_s;
+  logic [NR_STREAMS-1:0]   tr_confirm_s;
+  logic [1:0]              tr_conf_inc_s [NR_STREAMS];
+  always_comb begin : p_train_prep
+    for (int unsigned s = 0; s < NR_STREAMS; s++) begin
+      logic signed [DLT_W-1:0] d_s, str_s;
+      logic signed [DLT_W:0]   axs;
+      d_s             = delta_of(train_line, st_q[s].last);
+      str_s           = STRIDE_EN ? d_s : DLT_W'(1);
+      axs             = $signed({{(DLT_W+1-PAGE_LBITS){1'b0}}, train_line[PAGE_LBITS-1:0]}) +
+                        $signed(str_s);
+      tr_d_s[s]       = d_s;
+      tr_str_s[s]     = str_s;
+      tr_arm_off_s[s] = axs[PAGE_LBITS-1:0];
+      tr_arm_ip_s[s]  = !(|axs[DLT_W:PAGE_LBITS]);
+      tr_confirm_s[s] = st_q[s].seen && (d_s == st_q[s].stride);
+      tr_conf_inc_s[s]= (st_q[s].conf == 2'd3) ? 2'd3 : (st_q[s].conf + 2'd1);
+    end
+  end
+
+  // Per-stream constant-index state updates (A135 row-local, zero dynamic
+  // st_d[...] indexing on either emit or train).
+  always_comb begin : p_state_upd
     st_d       = st_q;
     rr_d       = rr_q;
-    cnd_vld_d  = cnd_vld_q;
+    cnd_vld_d  = cnd_vld_after_take;
     cnd_line_d = cnd_line_q;
 
-    // ---- quiet window after a demand miss commit ----
-    quiet_d = svt_bm_top_p6263_n22101; // sv-timing: BalanceMux/rebalance #654 RHS rewrite
-    if (train_i) quiet_d = QW'(QUIET);
-
-    // ---- retire the offered candidate ----
-    if (cnd_vld_q && cand_take_i) cnd_vld_d = 1'b0;
-
-    // ---- refill the offer register: round-robin over armed streams ----
-    // r127-aa: parallel per-stream evaluation. st_q is read at constant
-    // indices (unrolled `for s`), the winner is the emitter with the smallest
-    // forward distance from rr_q, and the st_d updates are per-stream
-    // constant-index — this removes the N dynamic st_q[em_s]/st_d[em_s]
-    // barrel muxes of the serial early-exit walk. Semantics are identical
-    // (miter: 11M randomized cases, NR_STREAMS=4 and =3, 0 mismatches): the
-    // first armed+in-page stream in rr-order emits; armed page-bound streams
-    // examined before it get pend=0; streams after it are untouched; the
-    // retrained stream is never a candidate.
-    if (!cnd_vld_d && (quiet_d == '0)) begin
+    if (em_any) begin
+      cnd_vld_d = 1'b1;
       for (int unsigned s = 0; s < NR_STREAMS; s++) begin
-        em_ok[s] = 1'b0; em_pc[s] = 1'b0; em_bs[s] = '0;
-        // A stream being retrained this cycle keeps its new epoch: it is not
-        // an emit candidate (same guard the serial walk applied per em_s).
-        if (st_q[s].valid && (st_q[s].pend != '0) &&
-            !(train_i && train_hit && (train_hit_idx == SW'(s)))) begin
-          es      = $signed(st_q[s].stride);
-          em_prod = '0;
-          for (int unsigned b = 0; b < PW; b++) begin
-            if (st_q[s].ahead[b])
-              em_prod = em_prod + (es <<< b);
-          end
-          // in_page(em_base,last) == within-page offset + signed product
-          // staying inside [0, 2^PAGE_LBITS): the xs[EM_W:PAGE_LBITS]==0
-          // range test, identical to the serial walk (see r127-u note).
-          xs       = $signed({{(EM_W+1-PAGE_LBITS){1'b0}},
-                             st_q[s].last[PAGE_LBITS-1:0]}) + em_prod;
-          em_bs[s] = st_q[s].last + LINE_BITS'(em_prod);
-          if (!(|xs[EM_W:PAGE_LBITS])) em_ok[s] = 1'b1;   // armed && in-page
-          else                        em_pc[s] = 1'b1;   // armed && page-bound
+        if (em_win[s]) begin
+          cnd_line_d           = {st_q[s].page, st_q[s].cand_off};
+          st_d[s].pend         = st_q[s].pend - 1'b1;
+          st_d[s].ahead        = st_q[s].ahead + 1'b1;
+          st_d[s].cand_off     = em_next_off[s];
+          st_d[s].cand_in_page = em_next_in_page[s];
+          rr_d                 = SW'((int'(s) + 1) % NR_STREAMS);
+        end else if (em_pc[s] && (em_ps[s] < em_wpos)) begin
+          st_d[s].pend = '0;
         end
-        // rr-order position of stream s = forward distance from rr_q mod N.
-        // The compare+add form is exact for any NR_STREAMS (no pow2 assume).
-        em_ps[s] = SW'( (int'(s) >= int'(rr_q))
-                        ? (int'(s) - int'(rr_q))
-                        : (int'(s) - int'(rr_q) + NR_STREAMS) );
       end
-      // Winner = emitter with the smallest rr-position. em_ps is a bijection
-      // over streams, so at most one emitter has no earlier-position emitter.
-      em_any = 1'b0; em_wpos = '0;
+    end else begin
       for (int unsigned s = 0; s < NR_STREAMS; s++) begin
-        em_blk[s] = 1'b0;
-        for (int unsigned t = 0; t < NR_STREAMS; t++) begin
-          if (em_ok[t] && (em_ps[t] < em_ps[s])) em_blk[s] = 1'b1;
-        end
-        em_win[s] = em_ok[s] && !em_blk[s];
-        if (em_win[s]) begin em_any = 1'b1; em_wpos = em_ps[s]; end
-      end
-      // Apply: the winner emits; page-bound armed streams positioned before it
-      // were examined first and drop the rest of their burst. With no emitter
-      // every armed page-bound stream was examined, so all get pend=0.
-      if (em_any) begin
-        cnd_vld_d = 1'b1;
-        for (int unsigned s = 0; s < NR_STREAMS; s++) begin
-          if (em_win[s]) begin
-            cnd_line_d = em_bs[s];
-            st_d[s].pend  = st_q[s].pend - 1'b1;
-            st_d[s].ahead = st_q[s].ahead + 1'b1;
-            rr_d = SW'((int'(s) + 1) % NR_STREAMS);
-          end else if (em_pc[s] && (em_ps[s] < em_wpos)) begin
-            st_d[s].pend = '0;
-          end
-        end
-      end else begin
-        for (int unsigned s = 0; s < NR_STREAMS; s++) begin
-          if (em_pc[s]) st_d[s].pend = '0;
-        end
+        if (em_pc[s]) st_d[s].pend = '0;
       end
     end
 
     // ---- train on a demand miss commit ----
-    if (train_i) begin
-      if (train_hit) begin
-        tr_d = delta_of(train_line, st_q[train_hit_idx].last);
-        st_d[train_hit_idx].last = train_line;
-        if (tr_d != 0) begin
-          tr_str = STRIDE_EN ? tr_d : DLT_W'(1);
-          if (st_q[train_hit_idx].seen &&
-              (tr_d == st_q[train_hit_idx].stride)) begin
-            // Equal deltas → confirmed hit. N3: a stream arms only on its
-            // SECOND confirmed hit (conf ≥ 2 counting this one) and then at
-            // most PEND_CAP candidates — the burst cap that keeps PF fills
-            // from crowding demand.
-            st_d[train_hit_idx].stride = tr_str;
-            st_d[train_hit_idx].conf = svt_bm_top_p16342_n22116; // sv-timing: BalanceMux/rebalance #648 RHS rewrite
-                // sv-timing: (RHS rewrite continuation removed) ? st_q[train_hit_idx].conf : st_q[train_hit_idx].conf + 2'd1;
-            if (st_q[train_hit_idx].conf >= 2'd1) begin
-              st_d[train_hit_idx].pend  = PW'(PEND_CAP);
-              st_d[train_hit_idx].ahead = PW'(1);
+    for (int unsigned s = 0; s < NR_STREAMS; s++) begin
+      if (train_i && train_match[s]) begin
+        st_d[s].last = train_line;
+        if (tr_d_s[s] != '0) begin
+          st_d[s].stride = tr_str_s[s];
+          if (tr_confirm_s[s]) begin
+            st_d[s].conf = tr_conf_inc_s[s];
+            if (st_q[s].conf >= 2'd1) begin
+              st_d[s].pend         = PW'(PEND_CAP);
+              st_d[s].ahead        = PW'(1);
+              st_d[s].cand_off     = tr_arm_off_s[s];
+              st_d[s].cand_in_page = tr_arm_ip_s[s];
             end
           end else begin
-            // First/changed delta: (re)train, drop the confidence history.
-            st_d[train_hit_idx].stride = tr_str;
-            st_d[train_hit_idx].seen   = 1'b1;
-            st_d[train_hit_idx].conf   = '0;
-            st_d[train_hit_idx].pend   = '0;
+            st_d[s].seen         = 1'b1;
+            st_d[s].conf         = '0;
+            st_d[s].pend         = '0;
+            st_d[s].cand_off     = '0;
+            st_d[s].cand_in_page = 1'b0;
           end
         end
-      end else begin
-        // New region: first invalid stream, else the round-robin victim.
-        em_v     = rr_q;
-        em_found = 1'b0;
-        for (int unsigned s = 0; s < NR_STREAMS; s++) begin
-          if (!st_q[s].valid && !em_found) begin
-            em_v     = s;
-            em_found = 1'b1;
-          end
-        end
-        st_d[em_v].valid  = 1'b1;
-        st_d[em_v].page   = page_of(train_line);
-        st_d[em_v].last   = train_line;
-        st_d[em_v].stride = '0;
-        st_d[em_v].seen   = 1'b0;
-        st_d[em_v].conf   = '0;
-        st_d[em_v].pend   = '0;
-        st_d[em_v].ahead  = '0;
-        rr_d = SW'((em_v + 1) % NR_STREAMS);
+      end else if (train_i && !train_hit && alloc_oh[s]) begin
+        st_d[s].valid        = 1'b1;
+        st_d[s].page         = page_of(train_line);
+        st_d[s].last         = train_line;
+        st_d[s].stride       = '0;
+        st_d[s].seen         = 1'b0;
+        st_d[s].conf         = '0;
+        st_d[s].pend         = '0;
+        st_d[s].ahead        = '0;
+        st_d[s].cand_off     = '0;
+        st_d[s].cand_in_page = 1'b0;
+        rr_d                 = SW'((int'(s) + 1) % NR_STREAMS);
       end
     end
   end

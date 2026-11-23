@@ -310,9 +310,24 @@ module aes
       default: return {x[7:0],  x[31:8]};
     endcase
   endfunction
+  // A10 single-byte MixColumns specialization for AES32: inputs are
+  // {24'h000000, byte}, so only x[7:0] is nonzero — exact GF(2^8) column
+  // multiplies {3,1,1,2} (fwd) and {0xB,0xD,0x9,0xE} (inv) via 3 xtime steps
+  // instead of a full 4-byte matrix call (26.5 -> ~6 FO4, bit-identical).
+  function automatic logic [7:0] aes_xtime(input logic [7:0] a);
+    return {a[6:0], 1'b0} ^ (a[7] ? 8'h1B : 8'h00);
+  endfunction
   logic [31:0] mix_fwd_w, mix_inv_w;
-  assign mix_fwd_w    = aes_mixcolumn_fwd({24'h000000, sbox_fwd_q});
-  assign mix_inv_w    = aes_mixcolumn_inv({24'h000000, sbox_inv_q});
+  logic [7:0]  f2, i2, i4, i8;
+  assign f2        = aes_xtime(sbox_fwd_q);
+  assign mix_fwd_w = {f2 ^ sbox_fwd_q, sbox_fwd_q, sbox_fwd_q, f2};
+  assign i2        = aes_xtime(sbox_inv_q);
+  assign i4        = aes_xtime(i2);
+  assign i8        = aes_xtime(i4);
+  assign mix_inv_w = {i8 ^ i2 ^ sbox_inv_q,
+                      i8 ^ i4 ^ sbox_inv_q,
+                      i8 ^ sbox_inv_q,
+                      i8 ^ i4 ^ i2};
   assign sbox_fwd_rot = aes_rol8x({24'b0, sbox_fwd_q}, orig_q[5:4]);
   assign sbox_inv_rot = aes_rol8x({24'b0, sbox_inv_q}, orig_q[5:4]);
   assign mix_fwd_rot  = aes_rol8x(mix_fwd_w, orig_q[5:4]);

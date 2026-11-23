@@ -6709,3 +6709,669 @@ witness confirm end-to-end once blockers are cleared.
 Coverage: mc-coverage-t2 4 done (3 pass + mini_l2_hot_scan wedged@1Mcap progExit=0
 bus_err=0 -> budget-marginal L2 stress, NOT confirmed bug); t1 running
 mc_shared_line_resident; mc_chase running. 4 sims total on host -> heavy contention.
+
+cont.85 — throughput/observability quantified; stdbuf line-buffering fix landed
+
+Measured real mc-model throughput from coverage-t1/t2 log mtimes (sequential
+tests, gcc.log->.log deltas): ~140-280 cyc/sec under 4-5-way sim contention
+(mc_hart1_alive 42059cyc/~154s, store_visible 72909/~268s, shared_line_quiet
+662991/~4800s worst-case). Confirms cont.84 estimate; full OpenWrt shell
+(~1.5-3G cyc) is INFEASIBLE by brute-force sim (weeks-months). Strategy stands:
+staged bounded witnesses + directed-test blocker clearance.
+
+OBSERVABILITY FIX APPLIED (was only documented in cont.84):
+  * run_hyp8_witness.py + run_hyp8_mc_directed.py now prepend `stdbuf -oL`
+    to the model argv when coreutils stdbuf is present -> [cycprog]/[hang]/
+    [stall-census] $display stream line-buffered into run-hyp8.log / per-test
+    .log in REAL TIME instead of block-buffering until ~1.5M cyc or exit.
+    py_compile clean. Applies to all FUTURE launches (bounded1m/cycprog13
+    already running stay blind until exit/flush -- bounded1m still yields its
+    2M-cap verdict on exit).
+  * Next witness MUST use the updated runner -> live [cycprog] heartbeats let
+    us watch cycle progress + last_pc per hart and see exactly where/when a
+    stall occurs, turning blind bisect into observable bisect.
+
+TLB structural check (de-risks predicted ~300M g6lc_tlb_hit_onehot0):
+  * hyp8_mc config: UseSharedTlb=0 -> per-core g6lc_tlb (fully-assoc) is the
+    ACTIVE path; g6lc_shared_tlb set-assoc is bypassed. NrHarts=2/core,
+    SmtDrainedHandoff=1 -> HART_TAG=0 so SMT siblings SHARE TLB entries;
+    4 cores = 4 INDEPENDENT TLBs (no cross-core TLB). Shootdown is per-core.
+  * RFIX-131a-07 fill-evicts-all-overlaps fix IS in the active g6lc_tlb path.
+  * Residual multi-hit risk narrowed to: SFENCE/fill race WITHIN one core
+    (SMT sibling flushing while sibling fills) or an overlap-test edge case.
+    mc_smode_shootdown (4 independent cores, shared page tables, PTE remap +
+    sfence.vma, 2 rounds) is the correct directed probe -- running next after
+    mc_smode_parallel in mc-smode-tlb-t1.
+
+Remote fleet (all ~2.3-2.5 cores CPU each, host oversubscribed):
+  pid3085213 cycprog13 3B witness  ~3h01m  (blind, no stdbuf)
+  pid3091090 bounded1m 2M witness  ~2h45m  (blind; verdict on exit)
+  pid3121198 mc_smode_parallel     ~55m    (blind; buffered)
+  + coverage-t1 (mc_multi_writer_line) + coverage-t2 (mc_branchy) sims
+
+=== 2026-11-22 zicclsm VALIDATED + mc_smode_shootdown PTW fault isolated ===
+
+ZICCLSM BOOT BLOCKER CLEARED (real firmware evidence):
+  hyp8-witness-zicclsmfix-bounded1m (+max-cycles=2M, fw_payload) reached
+  cyc>=750000 with harts retiring steadily — PAST the ~265k livelock wedge.
+  cycprog @750k: core0.h0 ret=6333 (parked pc 0x80012956), core0.h1 ret=117085
+  growing, cores1-3.h0 ret~81k growing, all SMT siblings (odd) ret=0 parked.
+  => g6lc_zicclsm split-unit cancel fix CONFIRMED on real OpenSBI/fw boot.
+  Run continues to 2M; main 3B witness (pid3085213, ~5h) still going.
+
+mc_smode_shootdown — REAL deterministic S-mode multi-level PTW fault (4315cyc):
+  * All 4 participating harts (thread0/core) do M-mode setup_pt: write shared
+    Sv39 tables root_pt[1]->pd1, pd1[0]->pt1, pt1[0..3]->buf_a leaf
+    (0x200018cf), satp=root_pt, sfence.vma, mret->S-mode.
+  * First S-mode ld VA_i=0x40000000+i*0x1000 -> PTW walk navigates CORRECTLY
+    (satp_ppn=0x80002=root_pt, pptr=0x80004000+i*8=pt1[i]) but leaf read returns
+    pte=0x1 (v=1,r=w=x=0) instead of 0x200018cf -> cause=13 load page fault.
+    tohost=59=(16+13)<<1|1, progExit=29. busErrors=0 walkErrors=3.
+  * ELF verified: pt1@0x80004000 in .data init=0; stores SHOULD write 0x200018cf.
+    Stores DID retire (st=9..22/hart). Value 0x1 is NOT the init 0 -> a store
+    wrote 1, OR PTW read-path returns wrong data.
+  * Single-hart hyp8_sv39_load uses only a 1-level root leaf (no pd1/pt1) —
+    does NOT exercise multi-level walk. mc_smode_shootdown is the first
+    multi-level (3-level) S-mode test -> bug is in multi-level PTW leaf read
+    OR multicore store->PTW visibility.
+  * DIAG added to test (uncommitted): post-fence/pre-satp M-mode physical
+    read-back of pt1[i]; on mismatch writes tohost=[31:28]idx|[27:0]low28(val).
+    Discriminates store-bug (M-mode ld also wrong) vs PTW-read-bug (M-mode ld
+    correct but PTW returns 0x1). Run mc-smode-diag-t1 launched (200k cyc).
+
+Fleet: 4 Verilator sims ~260-294% CPU each (bounded1m, cycprog13, cov-t1
+mc_l2_write_read 81min, cov-t2 zacas_amocas_d 29min). Host oversubscribed.
+
+=== mc_smode_shootdown NARROWED to single-core multi-level PTW bug ===
+
+NPART=1 run (mc-smode-npart1-t1): ONLY core0 thread0 participates (cores1-3
+park, SMT siblings park) -> STILL faults identically:
+  [ptw-err] t=3733 vaddr=0x40000000 lvl=2 pptr=0x80004000 pte=0x1 cause=13
+  M-mode read-back diagnostic did NOT fire (stores confirmed correct:
+  post-fence/pre-satp physical ld of pt1[0] returned 0x200018cf).
+=> NOT multicore/coherence. FUNDAMENTAL multi-level (3-level Sv39) PTW bug:
+   lvl0 (root_pt) + lvl1 (pd1) reads navigate correctly; lvl2 (pt1 leaf)
+   read returns pte=0x1 instead of 0x200018cf.
+Port map (load_store_unit.sv): PTW/MMU uses dcache port[0]; load_unit port[1],
+store_unit port[2]. data_size = PtLevels(=3) == extract_transfer_size(8B)=2b11
+=> request is a well-formed 8B read; bug is in port[0] response path or the
+PTW capture of lvl>=1 reads.
+BLAST RADIUS question: scalar r127m booted to shell @2.67G — either scalar PTW
+differs, Linux page-table shape avoided it, or bug is hyp8_mc-config-specific.
++ptw_rd_trace added to g6lc_ptw.sv (prints pptr+pte per level read); model
+hyp8-ptwtrace-aggregate-t1 building to capture lvl0/1/2 returned data.
+
+=== ptw_rd_trace CAPTURED the corruption — walk3 lvl2 returns raw=0x1 ===
+
+Model hyp8-ptwtrace-aggregate-t1 (closure-mc-zicclsmfix + g6lc_ptw +ptw_rd_trace).
+NOTE: +ptw_rd_trace needed (a) allowlist entry in verif/regress/remote/hyp8/
+hyp8_tb.cpp verilog_plusargs[] (unlisted plusarg -> HTIF rejects, run dies) and
+(b) results.json build.modelSha256 refresh after the hyp8_tb.o relink. Both
+done; incremental rebuild = recompile hyp8_tb.o + relink only (~6s, ccache).
+
+mc-ptwtrace3-t1 (mc_smode_shootdown NPART=1, +ptw_rd_trace +mmu_trace):
+  Sv39 has TWO mappings: vaddr 0x40000000 -> root_pt[1]->pd1->pt1 (shootdown,
+  3-level walk); vaddr 0x8000xxxx -> root_pt[2]=1GiB identity leaf (shared/buf/
+  page-table S-mode accesses, single lvl0 walk).
+  lvl2 leaf reads for vaddr=0x40000000:
+    walk1 preload  t=1667  pte=0x200018cf (leaf_a)  OK
+    walk2 round1   t=2654  pte=0x20001ccf (leaf_b)  OK
+    walk3 round2   t=3732  pte=0x00000001  raw=0x1  <-- CORRUPT
+  ptw-err t=3733 cause=13. pte==raw==0x1 -> NOT a PTW decode artifact; the
+  D-cache read for PA 0x80004000 (pt1[0]) genuinely returned 0x1.
+  Concurrent traffic: identity walks to shared[]/buf[] (vaddr 0x80005xxx/06xxx)
+  interleave; pt1[0]@0x80004000 and shared[0]@0x80005000 are BOTH D$ set-0
+  (addr[11:4]=0) differing only in tag (0x80004 vs 0x80005). 8 set-0 lines
+  (tohost,root_pt,pd1,pt1,shared,buf_a,buf_b) vs 8 ways -> at capacity.
+  Prime suspects: (a) DcacheHitExtra=2 +2 readout staging port-confusion under
+  set-0 multi-port pressure; (b) wbuffer forward alias; (c) L1->L2 refill wrong
+  line. wtag={tag,index[11:3]} DOES include PA bit12 -> pt1/shared distinguish,
+  so naive wbuffer alias is unlikely. Next: +smt_flow_trace run (mc-smemflow-t1)
+  dumps per-lookup port/PA/hit-ways/raw/forward/result for the pt1 line.
+
+## mc_smode_shootdown RESOLVED — TEST BUG, not an RTL/cache defect (supersedes cache-discrepancy hypothesis above)
+
+The "D-cache returns 0x1 for pt1[0]@0x80004000" was a phantom. +smt_flow_trace
+(mc-smemflow-t1) exposed the real writer: at cycle~3141 a store transaction
+`wt_tx id=0 pa=0x80004000 data=0x1 be=ff` -> `wt_word idx=00 off=0 ways=01
+data=0x1` -> `wt_ack data=0x1`. The RTL stored and later read 0x1 FAITHFULLY;
+pt1[0] genuinely contained 0x1. There is NO cache/PTW response bug.
+
+Root cause is a register-allocation bug in the TEST (mc_smode_shootdown.S
+coord_drive): the "precomputed" leaf PPNs were held in t1 (leaf_a) / t2
+(leaf_b), but t0-t6 are scratch clobbered inside round_loop:
+  - `ld t1,0(s4)`  (hart0 shootdown-VA check, ~line267) -> t1 = SEED
+  - `ld t1,0(t5)`  (RESULT wait loop, ~line292)    -> t1 = RESULT flag = 1
+  - `addi t2,t2,1` (timeout counters, lines 223/297)-> t2 = small counter
+For an EVEN round `mv s7,t1` picks up the clobbered t1 (=RESULT=1) -> `sd s7,pt1[i]`
+writes 0x1 into every pt1[] entry -> next PTW walk reads leaf=0x1 -> cause=13.
+Odd round1 uses t2 (still fresh=leaf_b) so it passed; even round2 is the first
+to hit the clobber -> deterministic fail. Matches ptw-rd exactly
+(round1 pte=0x20001ccf OK, round2 pte=0x1). ROUNDS=2 so round2 always runs.
+NOTE the source comment even said "(will reload per round)" — reload never
+implemented. M-mode read-back diagnostic passed because it ran PRE-rounds in
+setup_pt when pt1[] was still correct.
+
+FIX (verif/tests/custom/multicore/mc_smode_shootdown.S): hold leaf_a/leaf_b in
+s8/s9 (callee-saved, unused anywhere else in the file) instead of t1/t2; the two
+`mv s7` sources updated. worker_poll audited — uses only s4/s5/s6 persistent
+regs + t-scratch, no leaf registers -> clean.
+
+Verification: re-run mc-ptwtrace/ mc-shootfix-t1 with fixed .S (reassembled
+remotely via --data push; no model rebuild needed). Expect all ROUNDS walks to
+return leaf_a/leaf_b and progExit=0.
+
+### VALIDATED — mc_smode_shootdown now PASSES multicore
+- NPART=1 (core0/thread0): SUCCESS progExit=0 @4418cyc. ptw-rd round2 lvl2
+  pte=0x200018cf (leaf_a) — was 0x1 pre-fix. No ptw-err, no page fault.
+- NPART=4 (thread0 of cores 0-3, real SMP shootdown): SUCCESS tohost=0
+  @5237cyc, "all 4 core(s) retired", progExit=0. 12 lvl2 walks all return
+  correct leaf_a/leaf_b per round; harts observe new translation post-sfence.
+  Confirms: Sv39 3-level PTW, sfence.vma TLB shootdown, cross-core PTE-write
+  visibility (posted L2 + fences), SMT sibling parking — ALL correct.
+- CONCLUSION: no D-cache/PTW/coherence defect existed. The earlier
+  "port-0 read discrepancy" was the test writing 0x1 into pt1[] itself.
+  LESSON: on read-back mismatch, verify the STORE committed expected data
+  (wt_tx/wt_word data operand) before assuming a read-path bug; a post-rewrite
+  read-back verify in the test would have caught it in one run.
+
+
+---
+
+## mc_cas_lock_handoff wedge - D-cache read-port starvation (RCA in progress)
+
+### Symptom (mc-coverage-t1/t2 + dedicated mc-casdiag-t1, hyp8-smtquantfix-aggregate-t1)
+- Test wedges; [hang] watchdog fires (since_ack=5000). NOT budget-marginal - real stall.
+- [rob]/[lsqb] FROZEN across dumps; store-buffer + IQ fill with ~4 repeats of the
+  test CAS loop body (pc 0x3e..0x6a). OoO speculation keeps issuing loop
+  iterations while the COMMIT head is pinned -> looks like a hang, is a single
+  stuck memory op.
+
+### Anatomy (hang dump + smt_flow_trace)
+- SB head: slot=2, fu=LOAD(1), op=39, pc=0x80000062, tid=0, issued=1 valid=0.
+  pc=0x62 = the `lw t0,0(sp)` readback AFTER the AMOCAS (test does 8 iters of
+  {AMOCAS.D cmp-swap; lw verify} on [sp]=0x80007fe0).
+- Load unit FSM: tid=11 entered WAIT_GNT (st=...0010) at c=1370 and never left.
+- [ldport]: dreq=1 gnt=0 every cycle -> load holds data_req, D$ port never grants.
+
+### Root-cause chain (verified in RTL)
+1. wt_dcache_ctrl (DcacheHitExtra=2 arm, gen_fsm_hit2): IDLE grants only when
+   `rd_ack_i` fires. rd_ack_i = wt_dcache_mem arbiter gnt_o.
+2. wt_dcache_mem arbiter: `gnt_i = ~rd_port_busy`; `rd_port_busy = wr_cl_vld_i | inv_req_i`.
+   -> ALL read ports starve while EITHER is high.
+3. wr_cl_vld_i  <- wt_dcache_missunit `wr_cl_vld_o = load_ack | (|wr_cl_we_o)`;
+   wr_cl_we_o=1 on flush_en | cas_inv | inv_vld(_all) | cl_write_en (refill install).
+   cas_inv pulses 1 cyc in AMO_CAS_ST_WAIT (drops L1 line after uncached CAS store).
+4. inv_req_i    <- wt_dcache_wbuffer fixup FSM: asserts in FIXUP_RETIRE when retiring a
+   BYPASS (full-queue fallback) entry -> needs inv_ack (= !refill_line & inv_req).
+
+### Leading hypotheses (need runtime state to disambiguate)
+- H1: wbuffer fixup FSM stuck in FIXUP_RETIRE bypass-invalidation; inv_req_o held,
+  inv_ack blocked by a coincident refill_line -> rd_port_busy stuck. Same livelock
+  FAMILY as the documented r6-diag fixup wedge (worklog ~line 1157) but a different arm.
+- H2: missunit holds wr_cl_vld (cl_write_en/load_ack/inv_vld_all) stuck - e.g. a
+  coherence inv_vld_all or a refill install that never retires.
+- H3 (less likely): read arbiter priority/RR starvation - single active hart makes
+  this improbable; rd_port_busy is the designed blocker.
+
+### NOT a regression from this sessions fixes
+- Runs on hyp8-smtquantfix (SMT fixes only; NO zicclsm change). cas_inv/CAS path is
+  untouched by g6lc_zicclsm (AMOCAS.D 64b is 8B-aligned -> never splits anyway).
+- Pre-existing latent bug in the D$/wbuffer/missunit interaction, exposed by the
+  CAS store->fixup->readback sequence.
+
+### Diagnostic in flight
+- Added [dcache-stall] probe to wt_dcache_mem.sv (translate_off, +smt_flow_trace):
+  counts consecutive cycles with (|rd_req_i)&&!(|rd_ack_o)); at n>=200 dumps
+  req/ack/masked/prio/portbusy/wrclvld/invreq/refill/wrclwe/wrreq/wrack/wrdenied/invack.
+  Names the stuck side directly.
+- Synced probe into closure-mc-zicclsmfix (file was otherwise identical); manifest.json
+  regenerated (1 entry updated, 0 missing).
+- Building hyp8-casdiag-aggregate-t1 via casdiag-mc-remote-gate.sh (setsid-detached,
+  PGO off). ETA ~30-60min under load. Then run mc_cas_lock_handoff +smt_flow_trace.
+
+### Next
+- Read [dcache-stall] line -> identify wr_cl_vld_i vs inv_req_i stuck -> trace that
+  FSM exit condition -> minimal reproducer -> fix.
+- Re-run mc_cas_lock_handoff NPART coverage; watch for same signature in other tests.
+
+
+### Coverage cross-check + second lead (same session)
+- mc-coverage-t2 mc_cas_lock_handoff [rob] t=1558-1560 IDENTICAL to the dedicated
+  diagnostic wedge (h=2 tl=66 n=64) -> coverage run hits the SAME D$ starvation.
+- mc-coverage-t1 mc_l3_stride_scan still RUNNING (live [rob] dumps t->1560, ROB
+  h=25/nv=15 diverse = active exec, not yet classified). Watch for same signature.
+- mini_l2_hot_scan FAIL "core ran then stopped retiring" exit126: core0 ret=87132
+  ipc=0.087, mem census ALL-IDLE at end (dc_req=0 mshr=0 wbuf=0). Dependent
+  pointer-chase (LOCAL_NODES=1024 LOCAL_STEPS=8192) at 0x80100000. Ambiguous:
+  budget-marginal (uncached chase ~1-1.5M cyc) vs fetch/issue stall (mem idle).
+  -> launched mc-l2hot-bigbudget (HYP8_MAX_CYCLES=6000000, smtquantfix) to
+  discriminate: pass=>budget, still-stall=>real bug.
+- casdiag2 run script + casdiag-chain.sh watcher ARMED: auto-launches
+  run_casdiag2.sh (mc_cas_lock_handoff +smt_flow_trace, 120k cyc) the moment
+  hyp8-casdiag-aggregate-t1 build completes -> [dcache-stall] names blocker.
+- Coherence confirmed ON: g6lc64_hyp8_mc_config_pkg CohPolicy=COH_OOO,
+  CohInvalDepth=4. inv_vld/inv_vld_all <- mem_rtrn_i.inv (L2/coherence return).
+  Leading hypothesis: coherence invalidation or missunit cl_write_en/load_ack
+  holds wr_cl_vld -> rd_port_busy -> all reads starve. Probe will confirm.
+
+
+### Deeper RCA — coherent-deadlock theory refined (pre-probe)
+- inv_vld/inv_vld_all (missunit) <- mem_rtrn_i.inv <- wt_axi_adapter
+  dcache_rtrn_inv_q/type/vld (registered return pulses).
+- EVERY invalidate return sets inv_d.all=1 -> missunit inv_vld_all ->
+  wr_cl_we_o=1 -> wr_cl_vld_o=1 -> wr_cl_vld_i=1 -> refill_line=1 ->
+  rd_port_busy=1 -> ALL reads blocked for that cycle.
+- For a PERMANENT wedge, invalidations (or a refill install / cas_inv) must
+  hold wr_cl_vld ~continuously, OR the wbuffer fixup inv_req must hold while
+  its inv_ack is starved by refill_line. Both reduce to: the write/invalid
+  side never yields the read port.
+- WtDcacheFixupDepth=8, WbufDepth=8: the 8-iter CAS burst can overflow the
+  fixup FIFO -> bypass entries -> FIXUP_RETIRE invalidation arm (least-tested).
+- Prime suspect chain: AMOCAS uncached store -> coherence invalidate broadcast
+  -> continuous inv_vld_all (hub re-issue / snoop storm / parked-peer no-ack)
+  -> wr_cl_vld held -> rd_port_busy -> lw starves. casdiag [dcache-stall]
+  will show wrclwe=111.. + refill=1 continuously if so.
+- mini_l2_hot_scan exit126: coverage per-test scan shows ONLY mc_hart1_trap(18,
+  oracle) + mini_l2_hot_scan(126) non-clean; exit125 counts were rollup noise.
+
+## mc_cas_lock_handoff — D-cache starvation deadlock, refined mechanism (pre-probe)
+
+Traced the full grant-blocker chain end-to-end. The wedge is a **read-port
+starvation deadlock** with a *primary* and a *secondary* blocker:
+
+PRIMARY — `wr_cl_vld_i` (missunit line write) held ~100%:
+- `wt_dcache_mem.rd_port_busy = wr_cl_vld_i | inv_req_i` → arbiter `gnt_i=~rd_port_busy`.
+- `wr_cl_vld_o = load_ack | (|wr_cl_we_o)`; `wr_cl_we_o` nonzero on
+  `flush_en|cas_inv|inv_vld_all|inv_vld|cl_write_en`.
+- `inv_vld/inv_vld_all` are SINGLE-CYCLE pulses gated by `mem_rtrn_vld_i &&
+  rtype==DCACHE_INV_REQ` (missunit p_rtrn_logic). So `wr_cl_vld_o` stays high
+  ONLY if the AXI adapter returns a DCACHE_INV_REQ **every cycle** — a
+  continuous coherence-invalidation stream.
+- Prime source: multicore AMOCAS.D storm on the shared stack line → each CAS
+  store broadcasts L1 invalidations to peer cores → `mem_rtrn_i.inv` stream.
+  OR a self-inval loop in wt_axi_adapter (`self_inval_pend_q`/`rtrn_self`).
+
+SECONDARY — `inv_req_i` (wbuffer fixup) wedges *because of* the primary:
+- `wt_dcache_mem.inv_ack_o = !refill_line & inv_req_i`; `refill_line =
+  wr_cl_vld_i & |wr_cl_we_i`. While `wr_cl_vld_i` is stuck, `refill_line` is
+  stuck → `inv_ack_o` never returns → fixup FSM parked in FIXUP_RETIRE
+  (bypass-inval arm, `inv_req_o` registered high) → `inv_req_i` also high.
+- So `invreq=1` in the probe is the *consequence*, not the cause. The probe
+  `[dcache-stall]` dump (wrclvld/refill/invreq/invack) will confirm: expect
+  `wrclvld=1 refill=1 invreq=1 invack=0` continuously.
+
+Fix locus (pending probe confirmation): upstream of the missunit — the
+coherence invalidation return path (`wt_axi_adapter` rtrn_self/ext/inv →
+dcache_rtrn_o.inv → missunit mem_rtrn_i.inv). Either (a) a genuine invalidate
+flood that needs rate-limiting/backpressure, or (b) a return-valid/ack
+handshake that holds `mem_rtrn_vld_i`/`dcache_rtrn_vld_q` high indefinitely.
+
+## mc_cas_lock_handoff — CORRECTED root cause (existing [hang] dump, no new probe needed)
+
+The earlier "D-cache read-port starvation" theory is WRONG. The existing
+mc-casdiag-t1 hang dump shows the D-cache is IDLE:
+  rd_req=0 rd_ack=0 wr_cl_vld=0 miss_req=0  |  missunit st=0(IDLE)
+  mshr_vld=1 mshr_paddr=00000080007fe0   <-- STUCK, constant across cyc 6347/7347/8347
+
+REAL blocker (LU req dump):
+  valid_i=1 tid=11 vaddr=paddr=0x80007fe0 dtlb_hit=1 treq=1
+  data_req=1 gnt=0  tag_valid=0  kill=0 rvalid=0
+The load translated+issued a tag lookup -> MISS -> found mshr_vld=1 for the
+line -> waits for the in-flight refill (miss_rtrn). The refills
+
+
+## mc_cas_lock_handoff - CORRECTED root cause (existing [hang] dump, no new probe needed)
+
+The earlier "D-cache read-port starvation" theory is WRONG. The existing
+mc-casdiag-t1 hang dump shows the D-cache is IDLE:
+  rd_req=0 rd_ack=0 wr_cl_vld=0 miss_req=0  |  missunit st=0(IDLE)
+  mshr_vld=1 mshr_paddr=00000080007fe0   <-- STUCK, constant across cyc 6347/7347/8347
+
+REAL blocker (LU req dump):
+  valid_i=1 tid=11 vaddr=paddr=0x80007fe0 dtlb_hit=1 treq=1
+  data_req=1 gnt=0  tag_valid=0  kill=0 rvalid=0
+The load translated+issued a tag lookup -> MISS -> found mshr_vld=1 for the
+line -> waits for the in-flight refill (miss_rtrn). The refill DCACHE_LOAD_ACK
+return NEVER arrives -> mshr_vld_q stuck -> every load to 0x80007fe0 (the CAS
+word, hit by ~4 speculative lw/ld per loop iter) queues behind it -> LSU bypass
+cnt=4, commit head pinned, ~58k speculative loads pile up "inflight".
+
+Why the refill return is lost - prime suspect is the CAS self-invalidation
+colliding on the single dcache return channel:
+  mc_cache: l2_selfinv=7 l3_selfinv=7  (AMOCAS uncached stores self-invalidate
+  L2+L3). wt_axi_adapter.axi_rd_rdy = ~invalidate && !self_inval_pend_q && ...
+  -> a pending self-inval BLOCKS AXI reads. If self_inval_pend_q/rtrn_self and
+  the load LOAD_ACK refill return collide on dcache_rtrn_vld_o, one is dropped.
+  Single-entry return register (dcache_rtrn_vld_q) + single MSHR = no queue to
+  absorb the collision -> orphaned mshr_vld.
+
+NOTE: the casdiag build carries a [dcache-stall] probe aimed at rd_req starvation
+(rd_req=0 here -> it will NOT fire). Harmless; the real signal is mshr_vld_q stuck.
+NEXT: instrument missunit mem_rtrn rtype for paddr 0x80007fe0 + axi_adapter
+self_inval_pend/rtrn_self/rtrn_inv to catch the dropped LOAD_ACK. Or inspect the
+return-mux priority between self-inval and load-ack.
+
+
+## mc_cas_lock_handoff - RCA narrowed to L2 fill-kill dropping the pending read
+
+Correction to the prior note: the dcache return channel is NOT the bug.
+wt_axi_adapter rtrn_self/ext/inv/rd/b are MUTUALLY EXCLUSIVE by construction
+(rtrn_b masked by !rq_rd etc), so no return is ever overwritten/dropped there.
+
+Decisive evidence from the existing +smt_flow_trace wt_rtrn records:
+  - wt_rtrn fires every CAS iteration (rtype=0/3/2-lack=1 ...) through ~cycle 1304.
+  - After ~1304 there are ZERO wt_rtrn records for the remaining ~5000 cycles.
+  - Final state: missunit st=IDLE, mshr_vld=1 mshr_paddr=0x80007fe0 (stuck),
+    load tid=11 tag MISS waits on the refill; rd_req=0 wr_cl_vld=0 (D$ idle).
+=> The L1 refill READ was issued to L2 but its R-beat response NEVER came back.
+   The loss is upstream of the core: in the L2/coherence path.
+
+Prime mechanism (g6lc_l2_top.sv):
+  - AMOCAS uncached stores -> write-through self-invalidation (wr_self_inval /
+    wr_inval_pend_q) -> kill_match -> fill_kill_d[e]=1 for any in-flight fill on
+    the same line -> install_discard skips the stale install.
+  - mc_cache counters: l2_selfinv=7 l3_selfinv=7 (self-invals flowing to L2+L3).
+  - The dependent lw to 0x80007fe0 misses L1 -> L2 fill. A concurrent CAS
+    self-inval on the SAME line kills that fill. If the killed fill does not
+    re-drive/complete the pending AR read, the core-side MSHR (mshr_vld_q) is
+    orphaned -> permanent stall. merge_block_i(fill_kill_q) only blocks NEW
+    waiters; the already-committed primary AR needs an explicit retry/serve.
+
+NEXT DIAGNOSTIC: probe g6lc_l2_top fill_kill vs the pending slave AR (does a
+killed fill leave slv_resp_o.r_valid unasserted while ar was accepted?). Add
+[smt_flow] prints on fill_kill_d set + on serve of a kill-skipped entry.
+Suspect the F_DONE->F_READY kill-skip path frees/serves without re-driving the
+captive AR, or the serve returns on the wrong id.
+
+
+## mc_cas_lock_handoff - RCA corrected to xbar demux AR backpressure (xbarprobe)
+
+Prior theories (D-cache rd_port_busy starvation; L2 fill_kill orphan; server
+prefetcher PF_ID collision) are all REFUTED by the mc-casfast-t1 final dumps:
+
+- D-cache/missunit idle; coherence inv[] all v=0 enq=0 deq=0 ifh=0 (no inval).
+- ServerPrefetchEn=0 in g6lc64_hyp8_mc_config_pkg -> i_server_pf is pure
+  passthrough (gen_off), CANNOT wedge. (A latent inherit-ar-attrs bug was still
+  fixed in corev_apu/l3_cache/g6lc_server_prefetcher.sv for when PF is enabled.)
+- DECISIVE: L3 (i_l3_as_l2) mst_req_o.ar_valid=1 (mar=1) but
+  mst_resp_i.ar_ready=0 (marr=0) for 10k+ cycles -> the request reaches the
+  memory xbar and is NEVER accepted. L2 mshr[0] st=1 line=0x80007fe0 holds the
+  orphaned fill; coherence ar[0] core=0 oid=1 line=0x800007fe outstanding.
+
+Locus = testharness AXI xbar demux (axi_demux.sv / axi_demux_id_counters.sv):
+- Per-slave-port outstanding-AR tracker keyed on id[0+:AxiLookBits];
+  AxiLookBits=AxiIdUsedSlvPorts=IdWidth=4 -> tracks low-4 ID bits only.
+- full_o=|cnt_full is GLOBAL: any ID slot at 7 outstanding (CounterWidth=
+  clog2(MaxTrans=8)=3 -> &in_flight==7) blocks ALL ARs -> marr=0 wedge.
+- ar_select_occupied blocks an AR whose low-4 ID is owned by a DIFFERENT
+  master port (cluster vs AI-DMA/debug/APU) until that transaction completes.
+- ATOP path: atop_inject pushes aw_chan.id[0+:4] into AR counter (+1); atomic
+  R pops by r_chan.id[0+:4]. AMOCAS/CAS is the only ATOP producer -> explains
+  why THIS test wedges while other multicore tests pass.
+- FILL_ID all-ones (id=15) -> low4=15; L3 8-beat fills (L3LineWidth=512b,
+  64B line / 8B beat = 8 beats, len=7) all share slot 15 -> saturation
+  candidate if R pops leak.
+
+Probe added (axi_demux.sv, translate_off): [xbar-ar-stall] fires at 500/2000/
+8000 cycles of slv_req_i.ar_valid && !slv_resp_o.ar_ready, dumping
+ar_id_cnt_full / ar_select_occupied / lookup_ar_select / ar_select /
+ar_chan.id / lookid / slv_ar_valid / slv_ar_ready / ar_valid / ar_ready /
+lock_ar_valid_q -> discriminates full-saturation vs foreign-select vs
+downstream-not-ready. Injected into closure-mc-zicclsmfix + manifest updated;
+build hyp8-xbarprobe-aggregate-t1 launched; chain auto-runs
+mc_cas_lock_handoff (16000cyc) on model-ready.
+
+Next: read [xbar-ar-stall] -> fix the named blocker (R-pop leak / ID collision
+/ downstream ready), re-run CAS + L2/L3/coherence coverage, then OpenWrt boot.
+
+## xbar wedge — refined analysis (pre-probe)
+
+Full [l2-stall]/[coh-stall] decode at cyc=13986:
+- L3-as-L2: st=S_IDLE(0), addr=0x80007fc0 id=15(FILL_ID), mar=1 marr=0,
+  mrv=0 mrr=0, ALL slave-side handshakes 0. mshr[0] st=0=F_QUEUED.
+- L2: st=IDLE, all handshakes 0, mshr[0] st=1=F_FILLING line=0x80007fe0.
+- coh: ar[0] core=0 oid=1 line=0x800007fe xr=0 rh=0 owed=0 invw=0 (one
+  outstanding core read, R never returned); all inv[] clear, ifh=0 sigp=0.
+
+Interpretation: xbar ar_ready=0 is the boundary symptom. Three causes the
+[xbar-ar-stall] probe separates: full / selocc / downstream ar_ready=0.
+
+ATOP encoding (axi_pkg.sv): atop[5]=ATOP_R_RESP ("has read response").
+  ATOP_NONE=00, ATOMICSTORE=01([5]=0 no R), ATOMICLOAD=10([5]=1),
+  ATOMICSWAP=110000([5]=1), ATOMICCMP/AMOCAS=110001([5]=1).
+=> atop_inject=aw_chan.atop[5] fires ONLY for R-producing atomics
+   (LOAD/SWAP/CMP) -- correctly gated; STORE-ATOPs do not inject. So the
+   naive "store ATOP leaks" theory is REFUTED.
+
+axi_riscv_amos R path: for atop_valid LOAD|STORE the adapter captures the
+memory R (WAIT_DATA_R, mst_r_id_i==id_q) then re-injects a SINGLE-beat
+slv_r (slv_r_last_o=1, slv_r_id_o=id_q). id_q=slv_aw_id_i preserved.
+
+Refined leak candidates for full=1:
+ (a) AMOCAS/ATOP R-pop id mismatch: inject pushes aw_chan.id[0+:4]; pop uses
+     slv_r_chan.id[0+:4]. If the ATOP R returns a different low-4 id than the
+     AW carried (amos adapter id remap, or DRAM slave id rewrite), the
+     injected slot never pops -> cumulative leak -> 8 AMOCAS iters saturate
+     the 7-deep counter -> ar_id_cnt_full -> global AR wedge.
+ (b) AMOCAS issues BOTH mst_ar (read) and mst_aw (atop): ar_push + atop_inject
+     = 2 counter entries but possibly only 1 R pop -> +1 leak per CAS.
+ (c) fill FILL_ID=15 shares slot15; L3 MSHR_DEPTH=16 >> LiteDRAM NrArSlots=8
+     -> if R-pop accounting leaks on fills, slot15 saturates.
+
+If probe shows ar=0 (full=0 selocc=0): downstream LiteDRAM ar_ready=0 ->
+NrArSlots=8 read slots full because R not draining -> upstream r_ready=0
+somewhere in cluster(L3 mrr=0 in S_IDLE is correct w/o F_FILLING; the real
+refuser is further down: L2/hub/core fill-accept). Then probe response path.
+
+Build hyp8-xbarprobe-aggregate-t1 still COMPILING (221 objs at last check).
+
+## 2026-11-22 — remote runs stopped, tracedb re-analysis, two root causes
+
+Stopped (SIGTERM -> `final` blocks ran): mc-coverage-t1/t2 runners + sims,
+mc-casdiag2-t1, both zicclsmfix witnesses (bounded1m, cycprog13). Ingested with
+tq.sh --ingest (ingest.py extended, below) and analysed from the database.
+
+### Corrections to earlier entries in this log
+- "bounded1m witness past the 265k wedge" was WRONG. It was judged on the
+  cycle count. tracedb `thread`/`progress.cycprog`: boot hart (core0 hart0)
+  retired=6333 last_pc=0x80012956 (fdt_offset_ptr+0xde) at 250k and unchanged
+  through 2.05M cycles in both witnesses; every other running hart sits in
+  `_wait_for_boot_hart` (0x800002e8..0x80000302). The boot never progressed.
+  The per-core +hang_dump watchdog is blind to it: hart 1 keeps core 0
+  committing (max gap 309).
+- "coverage clean" was overstated. 9 tests are `killed(wall)` (runner 7200 s
+  wall-clock SIGKILL, no `final`, log = first ~1560 cycles): t1
+  mc_shared_line_resident, mc_l2_write_read, mc_l3_stride_scan,
+  mc_two_inval_backpressure; t2 mc_chase, mc_branchy, zacas_amocas_d,
+  mc_cas_lock_handoff, mc_csr_prologue; plus mc-l2hot-bigbudget. Undetermined,
+  not passes. Host was at load ~24 on 12 cores (~50-190 cyc/s); idle it runs
+  ~700-800 cyc/s, so these need a re-run, not a diagnosis.
+- xbar demux id-counter theory REFUTED by the probe: `[xbar-ar-stall] full=0
+  selocc=0 av=1 ar=0 lockq=1 arid=f arsel=0` -> the demux forwards the AR; the
+  slave side of xbar master port DRAM refuses it.
+
+### Root cause 1 — g6lc_axi_lrsc read counter (mc_cas_lock_handoff, zacas_amocas_d)
+`+soc_trace` at the cluster port: 8 single-beat R-last with NO AR
+(t=615 id=1, then id=0 at 706/853/944/1037/1128/1221/1312), next fill AR at
+t=1372 refused forever. g6lc_axi_lrsc (address-keyed monitor, selected when
+NR_HARTS>1) counts `nar` +1 on AR handshake, -1 on R-last. The AMO adapter
+below it answers every R-producing atomic (AWATOP[5]: swap/load/compare) with
+an injected R and no AR, so each one popped an entry never pushed: 4-bit nar
+0 -> 15 -> ... -> 8 == MaxOut after eight atomics, `ar_room` low with nothing
+outstanding, every DRAM read of the SoC refused. Not AMOCAS-specific: any 8th
+R-producing AMO that is followed by a read before a 9th.
+Fix (corev_apu/src/g6lc_axi_lrsc.sv, both trees): count the read at the AW
+handshake (`atop_r_hs`), require a read slot for such an AW (as axi_demux
+does), nar one bit wider, `ar_room = nar < MaxOut`, assertion
+g6lc_axi_lrsc_r_owed. Leaf: verif/tb/uncore/tb_g6lc_axi_lrsc_atop.sv +
+run-axi-lrsc-atop.sh (real axi_riscv_amos in the loop): 25 swaps each followed
+by a line read PASS, nar==0 idle; G6LC_MUT_LRSC_ATOP_R_UNCOUNTED -> r_owed
+assertion, and LRSC_ATOP_S1_AR_REFUSED with assertions off.
+
+### Root cause 2 — g6lc_thread_select I4bg deferral (the mc OpenWrt boot hang)
+Reproduced in 60k cycles on the idle host (hyp8-bootprobe-xbar-t1): no
+[xbar-ar-stall], hub/L2/L3 idle, `[smt-drain] req=1 switches=1`. hart 0 runs
+its first quantum (4096 fetch_fire) to cycle 31879, the core switches to
+hart 1 (`_wait_for_boot_hart`: li t0,2; auipc; addi; ld; div x3; bne) and
+never switches back. `+smt_quant_probe` (hyp8-bootprobe-quant-t1): hart 1's
+quantum expires at cyc 226743 and from then on every fetch_fire shows
+`POL ... q=4096 ff=1 fp=1 g1=0 rq1=0 t0x=1`: the I4bg gate (t0_extra_q)
+suppresses the quantum switch. smt_t0_imm fires on each `li t0` issue and
+re-arms t0_extra_q before the iteration's single fetch_fire, the only cycle
+the SMT_RR quantum predicate is evaluated -> suppressed forever.
+Fix (core/smt/g6lc_thread_select.sv, both trees): t0_defer_q grants the
+deferral once per resident; cleared on do_switch/hold. Leaf:
+verif/tb/core/tb_g6lc_thread_select_t0.sv +
+verif/regress/remote/hyp8/run_tsel_t0_leaf.sh: 7 switches, 65 fetches per
+resident (quantum 64 + one deferral); G6LC_MUT_SMT_T0_DEFER_UNBOUNDED ->
+switches=0, only hart 0 ever resident.
+Open (measured, not changed): the quantum counts fetch_fire, so the div spin
+loop (0.02 fetch/cycle) holds core 0 ~195k cycles per quantum against ~32k
+for the boot hart: the boot hart gets ~14% of core 0 until the secondaries
+leave the wait loop. A cycle-bounded quantum is the follow-up.
+
+### tracedb tooling
+ingest.py: discovers a stopped/in-progress suite through
+mc-directed-results.json and in-flight tests through elf/<test>.elf; new
+`stall` class ([l2-stall]/[coh-stall]/[xbar-a?-stall]/[dcache-stall]);
+verdicts `stopped` (SIGTERM), `killed(wall)`, `no-verdict`. Remote
+/opt/testharness/tracedb/autoingest.sh has never ingested anything: its
+`ls a b c || continue` guard fails whenever any one of the three result files
+is absent (autoingest.log is the start line only).
+
+### Builds / validation in flight
+hyp8-lrscfix-aggregate-t1 (lrsc fix only) and hyp8-smtt0fix-aggregate-t1 (both
+fixes); fixval-chain.sh runs the CAS/AMO/LRSC, SMT and the nine killed(wall)
+tests on model-ready and ingests them.
+
+### Root cause 3 — AMOCAS.D local path spuriously acks a pending port miss (zacas_amocas_d)
+tracedb: zacas_amocas_d is `killed(wall)` on smtquantfix (mc-coverage-t2, run 115)
+and `no-verdict` at 10635 on lrscfix (mc-lrscfix-cas-t1, run 136): pre-existing,
+not an LRSC-fix regression. Hang dump (core 0): commit head `ld t2,0(sp)`
+@0x800000ae right after the first AMOCAS.D; LU `data_req=1 gnt=0`, D$ port 1
+`rd_req=0`, missunit IDLE, `mshr_vld=0`. A ctrl that never offers rd_req while
+the LU requests is out of IDLE; with no MSHR, it is parked in MISS_WAIT.
+wt_dcache_missunit p_ack masks `miss_ack_o` only for `amo_sel`; the Zacas
+local load/store (AMO_CAS_LD / AMO_CAS_ST, `cas_amo_sel`) drives
+`mem_req_valid_c` with the AMO tid, so its `mem_data_ack_i` acked the
+arbitrated miss port. A load that missed during the CAS got miss_ack with no
+MSHR allocated -> MISS_WAIT forever. In AMO_CAS_ST a pending write-buffer miss
+would equally be acked and retired unsent (silent store loss).
+mini_amocas_d passes only because its readback load does not reach MISS_REQ
+during the CAS window (different stack and line layout).
+Fix (both trees): `if (!amo_sel && !cas_amo_sel)`. One extra AND input on a
+registered-state decode; no timing concern. Model hyp8-casack-aggregate-t1
+(closure-mc-zicclsmfix + lrsc + tsel + this, manifest 8a83849139c5baf5);
+fixval mc-casack-{cas,amo,l2hot}-t1.
+
+### Corrections
+- `TSEL_T0_S1_PEER_STARVED switches=0` is the expected output of the
+  G6LC_MUT_SMT_T0_DEFER_UNBOUNDED mutation that run_tsel_t0_leaf.sh greps for,
+  not a failure of the bounded fix. Leaf re-run PASS (positive, oracle negative,
+  mutation caught).
+- mc_cas_lock_handoff `pass` (mc-lrscfix-caslock-t1, 2263 cycles) ran with
+  held_mask=1110 retired_mask=0001: core 0 only (its SMT pair), not a
+  cross-core handoff.
+- mini_l2_hot_scan (mc-coverage-t2, 1M cycles): all 4 cores retired, hart 0
+  87132 retired at IPC 0.087, budget reached, no hang_dump plusarg -> not
+  classifiable as a wedge. Re-run with +hang_dump and cycprog at 3M cycles.
+- autoingest.sh guard fixed (any-of the three result files) and redeployed;
+  the database grew 46 -> 55 MB on the first pass.
+
+### Remote runs deferred (stopped on request, ingested as `stopped`)
+- hyp8-casack-aggregate-t1: lint scalar+smt2 0 %Error, C++ compile ~70/2600
+  objects when stopped. Relaunch: `bash build-platform/workspace/build/casack-mc-remote-gate.sh`
+  then `.devin-tmp/launch_casack.sh` (fixval mc-casack-{cas,amo,l2hot}-t1).
+- mc-lrscfix-amo-t1/mc_za64rs_independence, mc-smtt0fix-{smt,wall}-t*: stopped
+  mid-test (mc_smt2_boot_release, mc_shared_line_resident, mc_store_load_new_line).
+- hyp8-bootprobe-smtt0fix-t1: stopped at cycle 70k; hart 0 frozen at 6333
+  from ~cycle 35k as expected while hart 1 holds core 0 for its quantum. The
+  t0 fix is only discriminated past cycle ~226k (the quantum expiry measured on
+  bootprobe-quant-t1): inconclusive, rerun to >= 320k.
+
+### L3 review: L2 fixes vs L3, hits, coherence
+g6lc_l3_top is a parameter wrapper over g6lc_l2_top (i_l3_as_l2), the same
+module in both trees. Every L2 engine fix applies to the L3 as is: mst_r_ot_q
+bypass-R drain, FILL_ID bfid settle, the fill collector ignoring an AMOS r_last
+on FILL_ID, wr_inval_pend, the R1/R5 holds and merge_order_block. The ID plan
+holds: hub mem-side ids are slot indexes (CohMaxOutstanding <= 14), so 14=WR_ID
+and 15=FILL_ID stay reserved below the hub. All L2 fills reach the L3 on id 15,
+so an L3 hit waits behind any outstanding L3 miss (`|mshr_id_match`). That is
+correct AXI same-id ordering; the cost is MLP only, and the L2 MSHR is 2.
+Coverage gap: l3_hit <= 1 in every ingested mc run. mc_l3_stride_scan (the only
+L3-hit test) never completed a run, and tb_g6lc_l2's CHAIN_L3 fixture uses an L3
+smaller than its L2.
+New leaf: verif/tb/l2/tb_g6lc_l2l3_stack.sv + run-l2l3-stack.sh. It chains L2
+4 KiB/4-way/MSHR2 and L3 32 KiB/8-way/MSHR4 with the hyp8 knobs (RR, TS, WU, PW)
+over a serial AXI memory with AtomicSwap and a DMA backdoor. Phases:
+l3_hit_service (8 hits), write_l3_only, write_both, atop_both, nc_write_alias,
+dma_backinval, and a 4000-op random phase.
+Verilator 5.008: 12/12 positive runs (arms hyp8/wu0/pw0/ts0 x seeds 1-3, l3_hit
+493-833), 8/8 negatives caught (oracle_negative, and mut_skip_l3_inval at
+dma_backinval). The non-hyp tree gives bit-identical totals. No L2/L3 RTL
+defect was found.
+Under Verilator 5.020 the random phase fails with a stale line after back-inval
+in every arm and both trees. The net disagrees with a TB recompute of the same
+assign, and the result is flag-sensitive, so this is treated as a simulator
+miscompile. Not reduced yet; see AGENTS-todo.
+
+### Toolchain + gated validation (casack2)
+Toolchain: /opt/testharness/toolchains/verilator-v5.008-g6lc-350e57f2-wtd36acfe7-pgo
+(fork HEAD 350e57f24 + working-tree patch sha d36acfe7..., compiler PGO with 132
+.gcda, gnu++17 via VLT_PGO_OPT, verilator_bin f8380457..., runtime
+verilated_funcs.h 1248bcd5...). Fork tests: t_dfg_{pack_predicates,fuse_transpose,
+empty_mask} transforms fire (stats file_grep pass) but their `clk` input is never
+toggled under --binary -> execute timeout (bench bug); t_dfg_peephole sim passes,
+file_grep fails on zero-count peephole stats (open, review).
+Model hyp8-casack2-aggregate-t1: closure /home/etcim/closures/closure-mc-casack2
+(fresh build_closure.py --mc: latest harness + tuning tools + missunit/lrsc/tsel
+fixes); lint 0 %Error; native tuning=packed-tiled (594 TUs, 3,448 rows, 16,994
+cols), march=native, sim PGO, vthreads 2, --dumpi-sentinel 1 (470 snapshots,
+1.35 GB). Throughput is not qualified by this campaign.
+Gate: verif/regress/remote/hyp8/hyp8_fixval_gate.py (job-state/run/after/status,
+nonce-scoped records under build-platform/workspace/build/fixval-status/, O_EXCL
+launch claim) replaces fixval-chain.sh + launch-4b.sh for gated campaigns; tests
+verif/regress/remote/test_hyp8_fixval_gate.py (11). Harness: HYP8_BUILD_SENTINEL=0|1
+(default 0) carries --dumpi-sentinel outside BUILD_VLT_ARGS so auto tuning still
+applies. Record casack2-4a-3895fea6b8a2.json; 4b (boot/l3/l2hot) armed via `after`.
+
+### cycq2 results (hyp8-cycq2-aggregate-t1, SHA 72f78cecd476, packed-tiled 987 TUs / 6818 rows / 13622 cols, march=native, PGO=1, sentinel=0)
+- `cycq2-4a` PASSED 16/16 across all 3 suites and ingested (rc=0):
+  - `mc-cycq2-cas-t1`: 6/6 PASS (`mini_amocas_d` 1105, `zacas_amocas_d` 1120 [confirms missunit `!cas_amo_sel`], `mc_amo_ld_order` 22710, `zacas_amocas_w` 899, `mc_cas_lock_handoff` 2263 [confirms lrsc fix], `mc_spo_cas_stream` 3465).
+  - `mc-cycq2-amo-t1`: 4/4 PASS (`mc_lrsc_set_zombie` 2340, `mini_lrsc_d` 1482, `mini_amoadd_w_spin` 912, `mc_za64rs_independence` 2965 with `held=1100 ret=0011` — both core 0 and core 1 retired).
+  - `mc-cycq2-smt-t1`: 6/6 PASS (`mc_hart1_alive` 16629, `mc_smt2_boot_release` 33097, `mc_all_harts_present` 17276, `mc_smt_sibling_yield` 2371, `mc_smt_sibling_both_present` 401957 [DELAY=40000, ipc=0.199], `mc_smt_sibling_ilp` 218005).
+- `mc_l3_stride_scan` PASSED at 781,762 cycles (previously wedged at 148,808 / 35,477 ret on ALU2 dual-issue drop): `l2_hit=27 l2_miss=16389 l3_hit=8193 l3_miss=8196` — 100% L3 hit rate on Pass 2, system-level L3 hits + coherence verified.
+- `mini_l2_hot_scan` unwedged past old 379,426 / 87,132 ret hang (950k+ cycles, 187,743 ret, 0 core-0 hangs, still running).
+- `hyp8-bootprobe-cycq2-t1` (auto-launched once by `hyp8_fixval_gate.py after`): `SmtCycleQuantum=16384` verified — clean alternating 16k-cycle windows on core 0, reaching 35,662 boot-hart retired by cyc 230k (vs 6,333 frozen until ~225k before, ~5.6x boot-hart progress).
+
+### Systematic multi-issue silent-drop + FP audit (3 new hyp8 fixes applied locally)
+Auditing the same bug class that caused the ALU2 dual-issue drop uncovered three more latent defects in `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/`:
+1. `issue_read_operands.sv`: `gen_fu_busy` checked only port `i-1` (2-issue legacy) instead of `0..i-1`, and `g6lc_flu_reserve` only separates WB-cycle collisions. Under 4/8 issue ports, non-adjacent ports could simultaneously ack two `one_cycle_select` ops (ALU0/BR/CSR/AES with distinct WB offsets — violating `$onehot0(one_cycle_select)` and dropping one in `ex_stage`), two `FPU` ops (no `g6lc_flu_reserve` entry), or two `MULT` ops. Replaced the ALU2-only guard with unified single-pipe mutual exclusion across `0..NrIssuePorts-1` for `one_cycle`, `alu2`, `mult`, and `fpu` (plus `fpu_early_valid_i` pause on new ALU2 acks), placed before the `!OoOEn` prefix kill so both OoO and in-order superscalar stay consistent.
+2. `ex_stage.sv` + `fpu_wrap.sv`: `ex_stage` muxes `alu2_lane_v` onto the shared `fpu_valid_o` port (`fpu_valid` previously won unconditionally and silently dropped `alu2_lane_v` on any same-cycle collision, e.g. variable-latency FDIV/FSQRT or held IRO). Added `fpu_out_ready_i` to `fpu_wrap.sv` (wired to `!(SuperscalarEn && NrALUs>=2 && alu2_lane_v)`), gated `fpu_valid_o` and `fpu_out_ready` (which already gates `i_fpnew_bulk.out_ready_i`, `i_zfa.ready_i`, and `owner_live_q` release), widened `fpu_early_valid_o = fpu_out_valid | fpnew_early` to prevent ALU2 starvation of a stalled FPU result, and added translate-off `$onehot0` / collision asserts in `ex_stage.sv`.
+3. `fpu_wrap.sv:596`: fixed self-assignment typo `fpu_dstfmt_q <= fpu_dstfmt_q;` -> `fpu_dstfmt_q <= fpu_dstfmt_d;` (any held FP64/FP16 op in STALL state was silently executing with `dst_fmt = FP32`).
+
+### Tracedb audit & ingest.py reporting fixes (deployed + re-ingested)
+Audited `/opt/testharness/tracedb/hyp8-trace.sqlite` across all runs on disk
+(including 5 previously skipped `build_fail` runs) and fixed 5 reporting bugs
+in `verif/regress/remote/hyp8/tracedb/ingest.py` (deployed to
+`/opt/testharness/tracedb/ingest.py`, md5 `4dca09f68e6ca7dce96aad4ff814f125`,
+80 MC/bootprobe tags force-re-ingested):
+1. `last_cycle` was overwritten backward by later `[stall-census]`/`[cycprog]`
+   lines from clock-held/boot-delayed cores 1-3 (reporting 0 or `cyc-200000`).
+   Now tracks `run.max_cycle` across all timestamped lines.
+2. `hang_close()` classified clock-held/parked cores (`halt=1, sb_empty=1`) as
+   real `hang.fu3.op0`/`hang.fu6.op34` events (216 false positives across 24
+   runs, also falsely flagging `wedged`), compounded by `FE: ... | iq_rdy=0
+   halt=0` clobbering `d[top][halt]`. Now parses `top` directly from
+   `lines[0]` and emits `idle.halted` (excluded from `wedged`).
+3. `[stall-census]` hart lines lack `at=gen_core[N]` (only the trailing `mem:`
+   line carries it), so cores 0-3 collided on `(None, hart)` in `thread` and
+   core 3 overwrote core 0 with 0. Now back-fills core id on `mem:` lines.
+4. `oracle_ok`/`oracle_bad` from `mc-directed-results.json` now overrides
+   `fail(progExit=N)` (`mc_hart1_trap` -> `oracle_ok`, 3 oracle_ok rows).
+5. `discover()` now ingests `state=build_fail` entries from `<test>.gcc.log`
+   (5 previously invisible runs now recorded as `build_fail`).
+Also confirmed `mini_l2_hot_scan` PASS @ 1,164,882 cycles (`l2_hit=5953,
+l3_hit=1025`, all 4 cores retired) and `hyp8-bootprobe-cycq2-t1` complete at
+400,000 cycles (`req=24 switches=24 aborts=0`, core 0 `h0=64359, h1=32596`).

@@ -382,32 +382,54 @@ assign mem_req_o            = core_req_i[0];
                                  (ar_starve_q[c] >= AXI_STARVE_LIMIT[ST_W-1:0]);
     end
 
-    always_comb begin
-      aw_winner       = pick_rr(aw_req, aw_rr_q);
-      ar_winner       = pick_rr(ar_req, ar_rr_q);
-      aw_starve_force = 1'b0;
-      ar_starve_force = 1'b0;
-      if (|aw_starved_req) begin
-        aw_winner       = pick_rr(aw_starved_req, aw_rr_q);
-        aw_starve_force = 1'b1;
-      end
-      if (|ar_starved_req) begin
-        ar_winner       = pick_rr(ar_starved_req, ar_rr_q);
-        ar_starve_force = 1'b1;
-      end
-      if (aw_hold_q) begin
-        aw_winner = aw_hold_owner_q;
-        aw_starve_force = 1'b0;
-      end
-      if (ar_hold_q) begin
-        ar_winner = ar_hold_owner_q;
-        ar_starve_force = 1'b0;
-      end
-      if (OOO_SF && sig_pending_q) begin
-        aw_winner = sig_owner_q;
-        aw_starve_force = 1'b0;
+    // Single flat genvar round-robin pick per channel (A136 slot-order split +
+    // direct prefix-OR + bit-column OR encode) — avoids procedural loop carry.
+    logic [NC-1:0] aw_arb_reqs, ar_arb_reqs;
+    logic [NC-1:0] aw_ge, ar_ge;
+    logic [NC-1:0] aw_hi, aw_lo, aw_hi_oh, aw_lo_oh, aw_pick_oh;
+    logic [NC-1:0] ar_hi, ar_lo, ar_hi_oh, ar_lo_oh, ar_pick_oh;
+    logic [CID_W-1:0] aw_sel_enc, ar_sel_enc, aw_rr_pick, ar_rr_pick;
+    assign aw_arb_reqs = (|aw_starved_req) ? aw_starved_req : aw_req;
+    assign ar_arb_reqs = (|ar_starved_req) ? ar_starved_req : ar_req;
+    for (genvar c = 0; c < NC; c++) begin : gen_rr_pick
+      assign aw_ge[c] = (c >= int'(aw_rr_q));
+      assign ar_ge[c] = (c >= int'(ar_rr_q));
+      assign aw_hi[c] = aw_arb_reqs[c] &  aw_ge[c];
+      assign aw_lo[c] = aw_arb_reqs[c] & ~aw_ge[c];
+      assign ar_hi[c] = ar_arb_reqs[c] &  ar_ge[c];
+      assign ar_lo[c] = ar_arb_reqs[c] & ~ar_ge[c];
+      if (c == 0) begin : gen_c0
+        assign aw_hi_oh[0] = aw_hi[0];
+        assign aw_lo_oh[0] = aw_lo[0];
+        assign ar_hi_oh[0] = ar_hi[0];
+        assign ar_lo_oh[0] = ar_lo[0];
+      end else begin : gen_cn
+        assign aw_hi_oh[c] = aw_hi[c] & ~(|aw_hi[c-1:0]);
+        assign aw_lo_oh[c] = aw_lo[c] & ~(|aw_lo[c-1:0]);
+        assign ar_hi_oh[c] = ar_hi[c] & ~(|ar_hi[c-1:0]);
+        assign ar_lo_oh[c] = ar_lo[c] & ~(|ar_lo[c-1:0]);
       end
     end
+    assign aw_pick_oh = (|aw_hi) ? aw_hi_oh : aw_lo_oh;
+    assign ar_pick_oh = (|ar_hi) ? ar_hi_oh : ar_lo_oh;
+    for (genvar b = 0; b < CID_W; b++) begin : gen_rr_enc
+      logic [NC-1:0] aw_bm, ar_bm;
+      for (genvar c = 0; c < NC; c++) begin : gen_bm
+        assign aw_bm[c] = ((c >> b) & 1) ? aw_pick_oh[c] : 1'b0;
+        assign ar_bm[c] = ((c >> b) & 1) ? ar_pick_oh[c] : 1'b0;
+      end
+      assign aw_sel_enc[b] = |aw_bm;
+      assign ar_sel_enc[b] = |ar_bm;
+    end
+    assign aw_rr_pick = (|aw_arb_reqs) ? aw_sel_enc : aw_rr_q;
+    assign ar_rr_pick = (|ar_arb_reqs) ? ar_sel_enc : ar_rr_q;
+
+    assign aw_winner = (OOO_SF && sig_pending_q) ? sig_owner_q :
+                       aw_hold_q                 ? aw_hold_owner_q :
+                                                   aw_rr_pick;
+    assign ar_winner = ar_hold_q ? ar_hold_owner_q : ar_rr_pick;
+    assign aw_starve_force = (|aw_starved_req) && !aw_hold_q && !(OOO_SF && sig_pending_q);
+    assign ar_starve_force = (|ar_starved_req) && !ar_hold_q;
 
     assign coh_arb_starve_o = aw_starve_force | ar_starve_force;
 
@@ -582,42 +604,55 @@ assign mem_req_o            = core_req_i[0];
       assign inv_bus_ready[c]    = inv_core_ready_i[c] && !inv_fill_hold[c];
     end
 
-    always_comb begin
-      ar_have_free = 1'b0;
-      aw_have_free = 1'b0;
-      ar_free_slot = '0;
-      aw_free_slot = '0;
-      for (int unsigned s = 0; s < OT_MAX; s++) begin
-        if (!slot_used[s] && !ar_have_free) begin
-          ar_have_free = 1'b1;
-          ar_free_slot = OT_W'(s);
-        end
-        if (!slot_used[s] && !aw_have_free) begin
-          aw_have_free = 1'b1;
-          aw_free_slot = OT_W'(s);
-        end
+    // A106 dual-end free-slot pick from one snapshot via flat genvar assigns
+    // (AR takes lowest free slot, AW takes highest free slot in parallel).
+    logic [OT_MAX-1:0] free_slot_vec, ar_free_oh, aw_free_oh;
+    logic [OT_W-1:0]   ar_free_enc, aw_free_enc;
+    logic              any_free_slot, two_free_slots, ar_competing;
+    assign free_slot_vec = ~slot_used;
+    assign any_free_slot = |free_slot_vec;
+    for (genvar s = 0; s < OT_MAX; s++) begin : gen_dual_free_oh
+      if (s == 0) begin : gen_s0
+        assign ar_free_oh[0] = free_slot_vec[0];
+      end else begin : gen_sn
+        assign ar_free_oh[s] = free_slot_vec[s] & ~(|free_slot_vec[s-1:0]);
       end
-      // Prefer distinct free slots when a new AR actually competes
-      // (combinational tie-break: AW takes next free after AR's choice)
-      if (ar_have_free && aw_have_free && |ar_req && !ar_hold_q && !coh_block_ar &&
-          (ar_free_slot == aw_free_slot)) begin
-        aw_have_free = 1'b0;
-        for (int unsigned s = 0; s < OT_MAX; s++) begin
-          if (!slot_used[s] && OT_W'(s) != ar_free_slot && !aw_have_free) begin
-            aw_have_free = 1'b1;
-            aw_free_slot = OT_W'(s);
-          end
-        end
-      end
-      if (ar_hold_q) begin
-        ar_have_free = 1'b1;
-        ar_free_slot = ar_hold_slot_q;
-      end
-      if (aw_hold_q) begin
-        aw_have_free = 1'b1;
-        aw_free_slot = aw_hold_slot_q;
+      if (s == OT_MAX - 1) begin : gen_shi_top
+        assign aw_free_oh[OT_MAX-1] = free_slot_vec[OT_MAX-1];
+      end else begin : gen_shi_n
+        assign aw_free_oh[s] = free_slot_vec[s] & ~(|free_slot_vec[OT_MAX-1:s+1]);
       end
     end
+    for (genvar b = 0; b < OT_W; b++) begin : gen_dual_free_enc
+      logic [OT_MAX-1:0] ar_bm, aw_bm;
+      for (genvar s = 0; s < OT_MAX; s++) begin : gen_sbm
+        assign ar_bm[s] = ((s >> b) & 1) ? ar_free_oh[s] : 1'b0;
+        assign aw_bm[s] = ((s >> b) & 1) ? aw_free_oh[s] : 1'b0;
+      end
+      assign ar_free_enc[b] = |ar_bm;
+      assign aw_free_enc[b] = |aw_bm;
+    end
+    // A118: compute two_free_slots directly from pairwise ANDs of free_slot_vec
+    // (zero dependency on ar_free_oh), and use raw core ar_valid when reserving
+    // the single remaining OT slot for AR.
+    logic [NC-1:0] ar_raw_valid;
+    for (genvar c = 0; c < NC; c++) begin : gen_ar_raw_v
+      assign ar_raw_valid[c] = core_req_i[c].ar_valid;
+    end
+    logic [OT_MAX-1:0] two_free_row;
+    for (genvar s = 0; s < OT_MAX; s++) begin : gen_two_free
+      if (s == 0) begin : gen_tf0
+        assign two_free_row[0] = 1'b0;
+      end else begin : gen_tfn
+        assign two_free_row[s] = free_slot_vec[s] & (|free_slot_vec[s-1:0]);
+      end
+    end
+    assign two_free_slots = |two_free_row;
+    assign ar_competing   = (|ar_raw_valid) && !ar_hold_q && !coh_block_ar;
+    assign ar_have_free   = ar_hold_q ? 1'b1 : any_free_slot;
+    assign ar_free_slot   = ar_hold_q ? ar_hold_slot_q : ar_free_enc;
+    assign aw_have_free   = aw_hold_q ? 1'b1 : (two_free_slots || (any_free_slot && !ar_competing));
+    assign aw_free_slot   = aw_hold_q ? aw_hold_slot_q : aw_free_enc;
 
     // Write data owner follows last accepted AW (AXI W has no id)
     logic [CID_W-1:0] w_owner_q, w_owner_d;
@@ -840,8 +875,6 @@ assign mem_req_o            = core_req_i[0];
         aw_ot_d[s] = aw_ot_q[s];
       end
       for (int unsigned c = 0; c < NC; c++) begin
-        aw_starve_d[c] = aw_starve_q[c];
-        ar_starve_d[c] = ar_starve_q[c];
         b_offer_slot[c] = '0;
         core_resp_o[c] = '0;
         core_resp_o[c].aw_ready = 1'b0;
@@ -1079,21 +1112,27 @@ assign mem_req_o            = core_req_i[0];
           mem_req_o.r_ready = 1'b1;
         end
       end
+    end
 
-      // Starve counters
-      for (int unsigned c = 0; c < NC; c++) begin
-        if (aw_fire && aw_winner == c[CID_W-1:0]) aw_starve_d[c] = '0;
-        else if (aw_req[c] && AXI_STARVE_LIMIT != 0 &&
-                 aw_starve_q[c] < AXI_STARVE_LIMIT[ST_W-1:0])
-          aw_starve_d[c] = aw_starve_q[c] + 1'b1;
-        else if (!aw_req[c]) aw_starve_d[c] = '0;
-
-        if (ar_fire && ar_winner == c[CID_W-1:0]) ar_starve_d[c] = '0;
-        else if (ar_req[c] && AXI_STARVE_LIMIT != 0 &&
-                 ar_starve_q[c] < AXI_STARVE_LIMIT[ST_W-1:0])
-          ar_starve_d[c] = ar_starve_q[c] + 1'b1;
-        else if (!ar_req[c]) ar_starve_d[c] = '0;
-      end
+    // Starve counters (A38 output-family split + A122 OneHotEncodeDecode):
+    // standalone per-core continuous assigns using the already one-hot
+    // aw_pick_oh / ar_pick_oh instead of re-decoding aw_winner/ar_winner inside
+    // the monolithic main always_comb.
+    for (genvar c = 0; c < NC; c++) begin : gen_starve_cnt
+      logic            aw_win_c, ar_win_c;
+      logic [ST_W-1:0] aw_next_inc, ar_next_inc;
+      assign aw_win_c = (OOO_SF && sig_pending_q) ? (sig_owner_q == CID_W'(c)) :
+                        aw_hold_q                 ? (aw_hold_owner_q == CID_W'(c)) :
+                                                    aw_pick_oh[c];
+      assign ar_win_c = ar_hold_q ? (ar_hold_owner_q == CID_W'(c)) : ar_pick_oh[c];
+      assign aw_next_inc = (AXI_STARVE_LIMIT != 0 &&
+                            aw_starve_q[c] < AXI_STARVE_LIMIT[ST_W-1:0])
+                           ? (aw_starve_q[c] + 1'b1) : aw_starve_q[c];
+      assign ar_next_inc = (AXI_STARVE_LIMIT != 0 &&
+                            ar_starve_q[c] < AXI_STARVE_LIMIT[ST_W-1:0])
+                           ? (ar_starve_q[c] + 1'b1) : ar_starve_q[c];
+      assign aw_starve_d[c] = ((aw_fire && aw_win_c) || !aw_req[c]) ? '0 : aw_next_inc;
+      assign ar_starve_d[c] = ((ar_fire && ar_win_c) || !ar_req[c]) ? '0 : ar_next_inc;
     end
 
     logic [OT_MAX-1:0] b_hit_t;
@@ -1429,58 +1468,54 @@ assign mem_req_o            = core_req_i[0];
     assign sf_hit  = aw_fire && aw_may_invalidate && (inv_wr_target != inv_others);
     assign sf_over = aw_fire && aw_may_invalidate && (inv_wr_target == inv_others);
 
-    // Retention of an accepted write's invalidation obligation.
-    // Previously the request was presented combinationally in the same cycle the
-    // AW handshook and simply evaporated if the bus was not ready, so a write
-    // could complete with no invalidation ever delivered (HUB_INV_LOSS). The
-    // obligation is now held until the bus takes it. AW admission consults only
-    // the REGISTERED occupancy, never inv_ready or aw_fire, so no combinational
-    // loop is created -- which is why gating AW on inv_ready directly was
-    // rejected. A retained entry is presented in preference to a fresh one, and a
-    // fresh request that the bus accepts immediately still costs no extra cycle.
+    // Retention of an accepted write's invalidation obligation (A106 decouple):
+    // every invalidating AW / LR-kill captures into inv_pend_q (guaranteed
+    // free because AW admission gates on !(aw_may_invalidate && inv_pend_valid_q)),
+    // and i_inval consumes solely from inv_pend_q one cycle later. This breaks
+    // the 62.2-FO4 P10-locked aw_fire -> inv_target -> coh_inv_fire_o ->
+    // do_stamp -> inv_ot_d chain while exercising the exact same inv_owed /
+    // inv_pend_q state machine already used under backpressure.
+    // A118: when !inv_pend_valid_q the retention payload flops are empty/unused,
+    // so load inv_pend_d/inv_pend_tgt_d/inv_pend_slot_d gated ONLY on the 1-bit
+    // flop !inv_pend_valid_q (detaching wide line_addr/slot capture from aw_fire
+    // and inv_cap_en); only 1-bit inv_pend_valid_d depends on aw_fire.
+    // Note: lr_kill_v is driven by i_lrsc(.store_valid_i(aw_fire && aw_may_invalidate)),
+    // so whenever inv_cap_en fires, aw_inv_evt is guaranteed 1.
+    logic aw_inv_evt;
+    assign aw_inv_evt = aw_fire && aw_may_invalidate;
+    logic [NC-1:0] inv_tgt_cand;
+    assign inv_tgt_cand     = inv_wr_cand | ({NC{lr_kill_v}} & lr_kill_cores);
+    assign inv_pend_valid_d = inv_pend_valid_q
+        ? !inv_ready
+        : (aw_inv_evt && (|inv_wr_cand || (lr_kill_v && (|lr_kill_cores))));
+    assign inv_pend_tgt_d   = inv_pend_valid_q ? inv_pend_tgt_q  : inv_tgt_cand;
+    assign inv_pend_slot_d  = inv_pend_valid_q ? inv_pend_slot_q : aw_free_slot;
     always_comb begin
-      inv_pend_d       = inv_pend_q;
-      inv_pend_tgt_d   = inv_pend_tgt_q;
-      inv_pend_valid_d = inv_pend_valid_q;
-      inv_pend_slot_d  = inv_pend_slot_q;
-      if (inv_pend_valid_q) begin
-        if (inv_ready) inv_pend_valid_d = 1'b0;
-      end else if (inv_new.valid && |inv_new_target && !inv_ready) begin
-        inv_pend_valid_d = 1'b1;
-        inv_pend_d       = inv_new;
-        inv_pend_tgt_d   = inv_new_target;
-        // A write-owned capture remembers its AW slot; a pure LR-kill leaves a
-        // meaningless index that the inv_owed guard at stamp time rejects.
-        inv_pend_slot_d  = aw_free_slot;
+      inv_pend_d = inv_pend_q;
+      if (!inv_pend_valid_q) begin
+        inv_pend_d.valid     = 1'b1;
+        inv_pend_d.dcache    = 1'b1;
+        inv_pend_d.icache    = 1'b0;
+        inv_pend_d.all_ways  = 1'b0;
+        inv_pend_d.line_addr = lr_kill_v
+            ? lr_kill_line
+            : coh_line_tag(core_req_i[aw_winner].aw.addr, LINE_BYTES);
       end
     end
 
-    always_comb begin
-      if (inv_pend_valid_q) begin
-        inv_req    = inv_pend_q;
-        inv_target = inv_pend_tgt_q;
-      end else begin
-        inv_req    = inv_new;
-        inv_target = inv_new_target;
-      end
-    end
+    assign inv_req    = inv_pend_valid_q ? inv_pend_q     : '0;
+    assign inv_target = inv_pend_valid_q ? inv_pend_tgt_q : '0;
 
-    assign coh_inv_fire_o = inv_req.valid & inv_ready & |inv_target;
+    assign coh_inv_fire_o = inv_pend_valid_q && inv_ready && (|inv_pend_tgt_q);
 
     // ---- Invalidation delivery bookkeeping (AW slots) ----
     // A wait bit falls the cycle after the bus's deq sequence reaches the
     // stamped enqueue sequence -- the pop edge E is visible at E+1 through
     // deq_seq_q. Once all targets are delivered, the settle counter runs up to
-    // its cap; stamping below resets both fields for a fresh obligation. This
-    // block reads the combinational accept path (inv_ready, coh_inv_fire_o,
-    // inv_target, inv_enq_seq), which depends on aw_fire, so it must not share
-    // a process with the grant logic that produces aw_fire; it writes only
-    // inv_ot_d, which reaches the slots through inv_ot_q.
+    // its cap. Because i_inval fires strictly from inv_pend_q (registered),
+    // aw_fire only sets inv_owed without depending on inv_ready, and stamping
+    // reads only inv_pend_slot_q / inv_pend_tgt_q (disjoint from aw_free_slot).
     always_comb begin
-      logic [OT_W-1:0] ss;
-      logic            do_stamp;
-      do_stamp = 1'b0;
-      ss       = '0;
       for (int unsigned s = 0; s < OT_MAX; s++) begin
         inv_ot_d[s] = inv_ot_q[s];
         for (int unsigned c = 0; c < NC; c++) begin
@@ -1493,35 +1528,21 @@ assign mem_req_o            = core_req_i[0];
              inv_ot_q[s].inv_settle + 2'd1) : 2'd0;
       end
       // Freshly accepted write: clean bookkeeping; inv_owed marks a
-      // write-owned obligation the bus could not take this cycle (it is
-      // captured by inv_pend and stamped into this slot on acceptance).
+      // write-owned obligation captured into inv_pend_q for next-cycle fire.
       if (aw_fire) begin
         inv_ot_d[aw_free_slot].inv_wait   = '0;
         inv_ot_d[aw_free_slot].inv_need   = '0;
         inv_ot_d[aw_free_slot].inv_settle = '0;
-        inv_ot_d[aw_free_slot].inv_owed   = |inv_wr_target && !inv_ready;
+        inv_ot_d[aw_free_slot].inv_owed   = |inv_wr_target;
       end
-      // The slot records its delivery obligation the moment the bus accepts
-      // it. A fresh obligation belongs to the write firing this cycle; a
-      // retained one is claimed by the slot in inv_pend_slot_q (the inv_owed
-      // guard ignores a stale slot index left by a pure LR-kill retention).
-      if (coh_inv_fire_o) begin
-        if (!inv_pend_valid_q) begin
-          if (aw_fire && |inv_wr_target) begin
-            do_stamp = 1'b1;
-            ss       = aw_free_slot;
-          end
-        end else if (inv_ot_q[inv_pend_slot_q].inv_owed) begin
-          do_stamp = 1'b1;
-          ss       = inv_pend_slot_q;
-        end
-        if (do_stamp) begin
-          inv_ot_d[ss].inv_wait   = inv_target;
-          inv_ot_d[ss].inv_settle = '0;
-          inv_ot_d[ss].inv_owed   = 1'b0;
-          for (int unsigned c = 0; c < NC; c++)
-            inv_ot_d[ss].inv_need[c] = inv_enq_seq[c];
-        end
+      // Retained obligation accepted by the invalidation bus: stamp delivery
+      // sequence into its AW slot (inv_owed guard ignores pure LR-kills).
+      if (coh_inv_fire_o && inv_ot_q[inv_pend_slot_q].inv_owed) begin
+        inv_ot_d[inv_pend_slot_q].inv_wait   = inv_pend_tgt_q;
+        inv_ot_d[inv_pend_slot_q].inv_settle = '0;
+        inv_ot_d[inv_pend_slot_q].inv_owed   = 1'b0;
+        for (int unsigned c = 0; c < NC; c++)
+          inv_ot_d[inv_pend_slot_q].inv_need[c] = inv_enq_seq[c];
       end
     end
 

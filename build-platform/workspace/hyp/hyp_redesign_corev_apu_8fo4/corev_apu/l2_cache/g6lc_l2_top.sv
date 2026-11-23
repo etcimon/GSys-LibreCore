@@ -1206,16 +1206,24 @@ assign mst_req_o  = slv_req_i;
                          !(id_q==FILL_ID && fill_out) && !fill_ar_hold_q;
   assign fill_ar_offer=fill_ar_hold_q || (issue_vld &&
                        (state_q!=S_BYPASS_AR || (|mshr_id_match)));
-  // Oldest fill-done entry awaiting install (lowest MSHR index wins).
-  always_comb begin
-    inst_vld = 1'b0;
-    inst_idx = '0;
-    for (int unsigned e = 0; e < MSHR_DEPTH; e++) begin
-      if (!inst_vld && fill_act_q[e] && (fill_state_q[e] == F_DONE)) begin
-        inst_vld = 1'b1;
-        inst_idx = MSHR_W'(e);
-      end
+  // Oldest fill-done entry awaiting install (lowest MSHR index wins) —
+  // A140 flat genvar prefix-OR replaces serial MSHR_DEPTH scan (20.2 -> ~6 FO4).
+  logic [MSHR_DEPTH-1:0] inst_done_e, inst_oh;
+  for (genvar e = 0; e < MSHR_DEPTH; e++) begin : gen_inst_pick
+    assign inst_done_e[e] = fill_act_q[e] && (fill_state_q[e] == F_DONE);
+    if (e == 0) begin : gen_ie0
+      assign inst_oh[0] = inst_done_e[0];
+    end else begin : gen_ien
+      assign inst_oh[e] = inst_done_e[e] && !(|inst_done_e[e-1:0]);
     end
+  end
+  assign inst_vld = |inst_done_e;
+  for (genvar b = 0; b < MSHR_W; b++) begin : gen_inst_enc
+    logic [MSHR_DEPTH-1:0] ie_bm;
+    for (genvar e = 0; e < MSHR_DEPTH; e++) begin : gen_ie_bm
+      assign ie_bm[e] = ((e >> b) & 1) ? inst_oh[e] : 1'b0;
+    end
+    assign inst_idx[b] = |ie_bm;
   end
 
   logic [BEAT_IDX_W-1:0] beat_base;
@@ -1236,53 +1244,74 @@ assign mst_req_o  = slv_req_i;
   logic [23:0] wu_span;
   logic [LINE_WIDTH/8-1:0] wu_be;
 
-  logic [SET_ASSOC-1:0] pend_way;
-  logic found_inv, way_ok;
-  logic [WAY_W-1:0] victim_way;
-  always_comb begin
-    pend_way = '0;
-    for (int unsigned e = 0; e < MSHR_DEPTH; e++) begin
-      if (fill_act_q[e] && (fill_state_q[e] != F_READY) &&
-          (idx_of(fill_addr_q[e]) == idx_of(addr_q)))
-        pend_way[fill_way_q[e]] = 1'b1;
+  // A122/A140 flat genvar victim_way + way_ok (replaces two cascaded serial
+  // SET_ASSOC loops + dynamic pend_way[fill_way_q[e]] write; exact priority:
+  // first invalid way else RR/0, falling back to first non-pending way if
+  // primary pick is pending).
+  logic [SET_ASSOC-1:0] pend_way, inv_way_vec, inv_way_oh, nonpend_vec, nonpend_oh;
+  logic [WAY_W-1:0]     inv_way_enc, nonpend_enc, victim_primary;
+  logic                 found_inv, primary_ok, way_ok;
+  logic [WAY_W-1:0]     victim_way;
+  for (genvar w = 0; w < int'(SET_ASSOC); w++) begin : gen_vic_way
+    logic [MSHR_DEPTH-1:0] pw_e;
+    for (genvar e = 0; e < MSHR_DEPTH; e++) begin : gen_pwe
+      assign pw_e[e] = fill_act_q[e] && (fill_state_q[e] != F_READY) &&
+                       (idx_of(fill_addr_q[e]) == idx_of(addr_q)) &&
+                       (fill_way_q[e] == WAY_W'(w));
     end
-    found_inv = 1'b0;
-    victim_way = (RR_EN && (&tag_way_valid)) ? rr_victim_way : '0;
-    for (int w = 0; w < int'(SET_ASSOC); w++) begin
-      if (!found_inv && !tag_way_valid[w]) begin
-        victim_way = WAY_W'(w);
-        found_inv = 1'b1;
-      end
-    end
-    way_ok = !pend_way[victim_way];
-    for (int w = 0; w < int'(SET_ASSOC); w++) begin
-      if (!way_ok && !pend_way[w]) begin
-        victim_way = WAY_W'(w);
-        way_ok = 1'b1;
-      end
+    assign pend_way[w]    = |pw_e;
+    assign inv_way_vec[w] = !tag_way_valid[w];
+    assign nonpend_vec[w] = !pend_way[w];
+    if (w == 0) begin : gen_vw0
+      assign inv_way_oh[0] = inv_way_vec[0];
+      assign nonpend_oh[0] = nonpend_vec[0];
+    end else begin : gen_vwn
+      assign inv_way_oh[w] = inv_way_vec[w] && !(|inv_way_vec[w-1:0]);
+      assign nonpend_oh[w] = nonpend_vec[w] && !(|nonpend_vec[w-1:0]);
     end
   end
-  assign tag_probe_way = victim_way;
+  for (genvar b = 0; b < WAY_W; b++) begin : gen_vic_enc
+    logic [SET_ASSOC-1:0] iv_bm, np_bm;
+    for (genvar w = 0; w < int'(SET_ASSOC); w++) begin : gen_vbm
+      assign iv_bm[w] = ((w >> b) & 1) ? inv_way_oh[w] : 1'b0;
+      assign np_bm[w] = ((w >> b) & 1) ? nonpend_oh[w] : 1'b0;
+    end
+    assign inv_way_enc[b] = |iv_bm;
+    assign nonpend_enc[b] = |np_bm;
+  end
+  assign found_inv      = |inv_way_vec;
+  assign victim_primary = found_inv ? inv_way_enc : (RR_EN ? rr_victim_way : '0);
+  assign primary_ok     = !pend_way[victim_primary];
+  assign way_ok         = |nonpend_vec;
+  assign victim_way     = primary_ok ? victim_primary : (way_ok ? nonpend_enc : victim_primary);
+  assign tag_probe_way  = victim_way;
 
-  // PF way pick: an invalid way in the candidate's set not already claimed
-  // by an in-flight fill — a prefetch never evicts, so an all-valid or all-
-  // pending set drops the candidate instead. tag_way_valid reflects
-  // index_i, which the probe fire muxes to the candidate's set.
-  always_comb begin
-    pf_pend_way = '0;
-    for (int unsigned e = 0; e < MSHR_DEPTH; e++) begin
-      if (fill_act_q[e] && (fill_state_q[e] != F_READY) &&
-          (idx_of(fill_addr_q[e]) == idx_of(pf_addr_q)))
-        pf_pend_way[fill_way_q[e]] = 1'b1;
+  // PF way pick (A122 flat one-hot + prefix-OR): an invalid way in the
+  // candidate's set not already claimed by an in-flight fill — removes the
+  // 20.9-FO4 serial SET_ASSOC scan and dynamic pf_pend_way[fill_way_q[e]] write.
+  logic [SET_ASSOC-1:0] pf_avail_way, pf_way_oh;
+  for (genvar w = 0; w < int'(SET_ASSOC); w++) begin : gen_pf_way
+    logic [MSHR_DEPTH-1:0] pf_pw_e;
+    for (genvar e = 0; e < MSHR_DEPTH; e++) begin : gen_pf_pwe
+      assign pf_pw_e[e] = fill_act_q[e] && (fill_state_q[e] != F_READY) &&
+                          (idx_of(fill_addr_q[e]) == idx_of(pf_addr_q)) &&
+                          (fill_way_q[e] == WAY_W'(w));
     end
-    pf_way    = '0;
-    pf_way_ok = 1'b0;
-    for (int w = 0; w < int'(SET_ASSOC); w++) begin
-      if (!tag_way_valid[w] && !pf_pend_way[w] && !pf_way_ok) begin
-        pf_way    = WAY_W'(w);
-        pf_way_ok = 1'b1;
-      end
+    assign pf_pend_way[w]  = |pf_pw_e;
+    assign pf_avail_way[w] = !tag_way_valid[w] && !pf_pend_way[w];
+    if (w == 0) begin : gen_pfw0
+      assign pf_way_oh[0] = pf_avail_way[0];
+    end else begin : gen_pfwn
+      assign pf_way_oh[w] = pf_avail_way[w] && !(|pf_avail_way[w-1:0]);
     end
+  end
+  assign pf_way_ok = |pf_avail_way;
+  for (genvar b = 0; b < WAY_W; b++) begin : gen_pf_way_enc
+    logic [SET_ASSOC-1:0] pfw_bm;
+    for (genvar w = 0; w < int'(SET_ASSOC); w++) begin : gen_pfw_bm
+      assign pfw_bm[w] = ((w >> b) & 1) ? pf_way_oh[w] : 1'b0;
+    end
+    assign pf_way[b] = |pfw_bm;
   end
 
   if (PF_EN) begin : gen_pf
@@ -1679,13 +1708,9 @@ assign mst_req_o  = slv_req_i;
           // older fill installs afterwards, with no evict notification for it.
           begin
             way_d = victim_way;
-            // Inclusive path: report replace of a valid victim line. The offer
-            // re-asserts on every cycle spent in S_TAG, so withholding
-            // l2_evict_ready_i simply extends the offer; the miss commit (MSHR
-            // alloc + victim selection capture) waits for the accept edge,
-            // which is also the edge the back-inval engine registers the
-            // victim. A same-line merge needs no victim at all.
-            if (!mshr_lookup_hit && tag_way_valid[way_d]) begin
+            // A118: read victim_way directly instead of way_d to break the
+            // blocking-assignment RAW chain (way_d -> if guard -> serve_idx_d).
+            if (!mshr_lookup_hit && tag_way_valid[victim_way]) begin
               l2_evict_valid_o = 1'b1;
               l2_evict_addr_o  = {
                 tag_probe_tag,
@@ -1693,16 +1718,9 @@ assign mst_req_o  = slv_req_i;
                 {OFF_BITS{1'b0}}
               };
             end
-            // A same-line merge needs no victim way and no evict — only a
-            // fresh alloc is gated on way_ok and the evict handshake. R1
-            // (M1b): a miss whose line carries a write-tracker entry must
-            // not commit either — a posted write's B has not landed, so a
-            // fill AR now could return pre-write memory (AXI does not order
-            // an AR against an earlier AW to the same address). Hits are
-            // served (merged data); the hold retries when the entry pops.
             if (mshr_ready && !wtrk_line0_match &&
                 (mshr_lookup_hit ||
-                 (way_ok && (!tag_way_valid[way_d] || l2_evict_ready_i)))) begin
+                 (way_ok && (!tag_way_valid[victim_way] || l2_evict_ready_i)))) begin
               mshr_alloc = 1'b1;
               // A demand merging onto an in-flight PF fill is a useful
               // prefetch — it saves exactly the fill latency it waited for.
@@ -1719,7 +1737,7 @@ assign mst_req_o  = slv_req_i;
                 fill_state_d[mshr_alloc_idx] = F_QUEUED;
                 fill_kill_d[mshr_alloc_idx]  = 1'b0;
                 fill_addr_d[mshr_alloc_idx]  = addr_q;
-                fill_way_d[mshr_alloc_idx]   = way_d;
+                fill_way_d[mshr_alloc_idx]   = victim_way;
                 fill_len_d[mshr_alloc_idx]   = len_q;
                 fill_bcnt_d[mshr_alloc_idx]  = '0;
                 fill_ferr_d[mshr_alloc_idx]  = axi_pkg::RESP_OKAY;

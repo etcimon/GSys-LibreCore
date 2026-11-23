@@ -24,6 +24,11 @@ module g6lc_ai_dram_backend
   import g6lc_ai_island_cfg_pkg::*;
 #(
     parameter int unsigned DramClass      = AI_DRAM_SIM_AXI,
+    // Storamic LiteDRAM-replacement seam (hyp8 port; checkpointing deferred).
+    parameter bit          StoramicEn           = 1'b0,
+    parameter bit          StoramicCheckpointEn = 1'b0,
+    parameter int unsigned StoramicRamRspDelay  = 0,
+    parameter logic [63:0] StoramicModelBase    = 64'h8000_0000,
     parameter int unsigned AXI_ID_WIDTH   = 4,
     parameter int unsigned AXI_ADDR_WIDTH = 64,
     parameter int unsigned AXI_DATA_WIDTH = 64,
@@ -41,13 +46,77 @@ module g6lc_ai_dram_backend
     input  logic rst_sram_ni,
     input  logic testmode_i,
     AXI_BUS.Slave slave,
-    output logic init_done_o,
+    input  g6lc_storamic_pkg::axil_req_t  storamic_ctrl_req_i,
+    output g6lc_storamic_pkg::axil_resp_t storamic_ctrl_resp_o,
+    output logic                          storamic_irq_o,
+    output logic                          init_done_o,
+    output logic                          service_ready_o,
+    input  logic                          storamic_power_cut_i,
+    input  logic                          storamic_save_i,
+    input  logic                          storamic_restore_i,
+    output logic                          storamic_save_busy_o,
+    output logic                          storamic_restore_done_o,
     // SoC-side occupancy (S5). Island CAP stays aggregate GEMM.
     output logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] ch_r_beats_o,
     output logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] ch_w_beats_o
 );
 
-  if (DramClass == AI_DRAM_SIM_AXI && NrChannels == 1) begin : gen_sim_axi
+  // Checkpointing is deferred for later hyp8 implementation.
+  // pragma translate_off
+  if (StoramicCheckpointEn) begin : gen_ckpt_deferred
+    initial $fatal(1, "HYP8_STORAMIC_CHECKPOINT_DEFERRED");
+  end
+  // pragma translate_on
+
+  if (!StoramicEn) begin : gen_legacy_service_ready
+    assign service_ready_o         = init_done_o;
+    assign storamic_ctrl_resp_o    = '0;
+    assign storamic_irq_o          = 1'b0;
+    assign storamic_save_busy_o    = 1'b0;
+    assign storamic_restore_done_o = 1'b0;
+    // pragma translate_off
+    always @(posedge clk_i) begin
+      if (rst_ni)
+        assert (!(storamic_ctrl_req_i.aw_valid ||
+                  storamic_ctrl_req_i.w_valid ||
+                  storamic_ctrl_req_i.ar_valid))
+          else $fatal(1, "STORAMIC_CTRL_REQ_WHILE_OFF");
+    end
+    // pragma translate_on
+  end
+
+  if (StoramicEn) begin : gen_storamic
+    assign ch_r_beats_o = '0;
+    assign ch_w_beats_o = '0;
+    g6lc_storamic_attach #(
+      .Enable              (StoramicEn),
+      .CheckpointRequested (1'b0),
+      .NativeBound         (1'b0),
+      .DramClass           (DramClass),
+      .NrChannels          (NrChannels),
+      .IdWidth             (AXI_ID_WIDTH),
+      .AddrWidth           (AXI_ADDR_WIDTH),
+      .DataWidth           (AXI_DATA_WIDTH),
+      .UserWidth           (AXI_USER_WIDTH),
+      .ModelBase           (StoramicModelBase),
+      .ModelWords          (NUM_WORDS),
+      .RamRspDelay         (StoramicRamRspDelay)
+    ) i_storamic (
+      .clk_i, .rst_ni, .testmode_i, .slave,
+      .ctrl_req_i     (storamic_ctrl_req_i),
+      .ctrl_resp_o    (storamic_ctrl_resp_o),
+      .irq_o          (storamic_irq_o),
+      .init_done_o,
+      .service_ready_o,
+      .power_cut_i    (storamic_power_cut_i),
+      .save_i         (storamic_save_i),
+      .restore_i      (storamic_restore_i),
+      .save_busy_o    (storamic_save_busy_o),
+      .restore_done_o (storamic_restore_done_o),
+      .ckpt_plat_in_i ('0),
+      .ckpt_plat_out_o()
+    );
+  end else if (DramClass == AI_DRAM_SIM_AXI && NrChannels == 1) begin : gen_sim_axi
     assign init_done_o = 1'b1;
 
     logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] ch_r_q, ch_w_q;

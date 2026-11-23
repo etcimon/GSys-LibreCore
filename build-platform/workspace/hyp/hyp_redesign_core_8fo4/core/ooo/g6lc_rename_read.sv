@@ -425,18 +425,29 @@ module g6lc_rename_read
     end
     assign sb_cnt[gp] = SB_CNT_W'($countones(sbm[gp]));
     logic [SUM_W-1:0] ck_sum;
+    logic [LVL_W-1:0] ck_slot_val;
+    logic             ck_ok;
     assign ck_sum = SUM_W'(ckpt_head_q_i[hart_i[gp]]) +
                     SUM_W'(ckpt_cnt_q_i[hart_i[gp]]) + SUM_W'(sb_cnt[gp]);
-    always_comb begin : p_ckpt
-      lane_o[gp].do_ckpt   = 1'b0;
-      lane_o[gp].ckpt_slot = '0;
-      if (valid_i[gp] && is_branch_i[gp] &&
-          (SUM_W'(ckpt_cnt_q_i[hart_i[gp]]) + SUM_W'(sb_cnt[gp])
-             < SUM_W'(CKPT_PER_HART))) begin
-        lane_o[gp].do_ckpt   = 1'b1;
-        lane_o[gp].ckpt_slot = 8'(ckpt_slot_n(int'(hart_i[gp]), ck_sum));
-      end
+    // A140: CKPT_PER_HART is power-of-two across all hyp8/mc configs (asserted
+    // below), so modulo is a bit-slice and hart*CKPT_PER_HART is a constant
+    // shift — removes the 20-FO4 unpruned non-pow2 fallback function body.
+    if (NH <= 1) begin : gen_ck_h1
+      assign ck_slot_val = LVL_W'(ck_sum[CPH_W-1:0]);
+    end else begin : gen_ck_hn
+      assign ck_slot_val = (LVL_W'(hart_i[gp]) << CPH_W) | LVL_W'(ck_sum[CPH_W-1:0]);
     end
+    assign ck_ok = valid_i[gp] && is_branch_i[gp] &&
+                   ((SUM_W'(ckpt_cnt_q_i[hart_i[gp]]) + SUM_W'(sb_cnt[gp])) < SUM_W'(CKPT_PER_HART));
+    always_comb begin : p_ckpt
+      lane_o[gp].do_ckpt   = ck_ok;
+      lane_o[gp].ckpt_slot = ck_ok ? 8'(ck_slot_val) : 8'd0;
+    end
+//pragma translate_off
+    initial begin
+      if (!CPH_POW2) $fatal(1, "g6lc_rename_read: CKPT_PER_HART=%0d must be power of 2", CKPT_PER_HART);
+    end
+//pragma translate_on
 //pragma translate_off
     always_comb begin : p_ckpt_eq
       if (lane_o[gp].do_ckpt &&

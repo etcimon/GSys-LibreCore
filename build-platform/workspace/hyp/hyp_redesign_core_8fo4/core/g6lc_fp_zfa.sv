@@ -18,22 +18,25 @@ module g6lc_fp_zfa_round #(
     output logic                       nv_o,
     output logic                       nx_o
 );
-  localparam int unsigned WIDTH = EXP_BITS + MAN_BITS + 1;
-  localparam int unsigned BIAS = (1 << (EXP_BITS - 1)) - 1;
-  localparam logic [EXP_BITS-1:0] EXP_INF = {EXP_BITS{1'b1}};
-  localparam logic [EXP_BITS-1:0] EXP_ONE = EXP_BITS'(BIAS);
+  localparam int unsigned WIDTH   = EXP_BITS + MAN_BITS + 1;
+  localparam int unsigned BIAS    = (1 << (EXP_BITS - 1)) - 1;
+  localparam int unsigned SH_W    = $clog2(MAN_BITS + 1);
+  localparam logic [EXP_BITS-1:0] EXP_INF  = {EXP_BITS{1'b1}};
+  localparam logic [EXP_BITS-1:0] EXP_ONE  = EXP_BITS'(BIAS);
   localparam logic [EXP_BITS-1:0] EXP_HALF = EXP_BITS'(BIAS - 1);
+  localparam logic [EXP_BITS-1:0] EXP_INT  = EXP_BITS'(BIAS + MAN_BITS);
 
   logic                    sign;
   logic [EXP_BITS-1:0]     exp_f;
   logic [MAN_BITS-1:0]     man;
   logic                    is_inf, is_nan, is_snan, is_zero;
-  int                      uexp;
+  logic                    lt_one, ge_int;
+  logic [SH_W-1:0]         frac_len;
   logic                    is_half, mag_gt_half, round_up;
   logic [MAN_BITS:0]       sig;
   logic [MAN_BITS+1:0]     acc;
-  logic [MAN_BITS+1:0]     frac_mask;
-  int unsigned             frac_len;
+  logic [MAN_BITS:0]       sticky_mask, keep_mask;
+  logic [MAN_BITS+1:0]     inc_mask;
   logic                    guard, sticky, lsb;
 
   assign sign    = op_i[WIDTH-1];
@@ -43,71 +46,75 @@ module g6lc_fp_zfa_round #(
   assign is_nan  = (exp_f == EXP_INF) && (man != '0);
   assign is_snan = is_nan && !man[MAN_BITS-1];
   assign is_zero = (exp_f == '0) && (man == '0);
-  // Subnormals have |x| < 1; normals use unbiased exp.
-  assign uexp    = (exp_f == '0) ? -1 : (int'(exp_f) - int'(BIAS));
+  // A10 narrow biased exponent compares (no 32-bit int subtraction).
+  assign lt_one   = (exp_f < EXP_ONE);
+  assign ge_int   = (exp_f >= EXP_INT);
+  assign frac_len = SH_W'(EXP_INT - exp_f);
+  assign sig      = {1'b1, man};
 
-  always_comb begin
-    res_o       = op_i;
-    nv_o        = 1'b0;
-    nx_o        = 1'b0;
-    sig         = {1'b1, man};
-    acc         = '0;
-    frac_mask   = '0;
-    frac_len    = 0;
-    guard       = 1'b0;
-    sticky      = 1'b0;
-    lsb         = 1'b0;
-    is_half     = 1'b0;
-    mag_gt_half = 1'b0;
-    round_up    = 1'b0;
-
-    if (is_nan) begin
-      res_o = {1'b0, EXP_INF, 1'b1, {MAN_BITS - 1{1'b0}}};
-      nv_o  = is_snan;
-    end else if (is_inf || is_zero) begin
-      res_o = op_i;
-    end else if (uexp < 0) begin
-      is_half     = (exp_f == EXP_HALF) && (man == '0);
-      mag_gt_half = (exp_f == EXP_HALF) && (man != '0);
-      unique case (rm_i)
-        3'b000:  round_up = mag_gt_half;
-        3'b001:  round_up = 1'b0;
-        3'b010:  round_up = sign;
-        3'b011:  round_up = ~sign;
-        3'b100:  round_up = is_half | mag_gt_half;
-        default: round_up = mag_gt_half;
-      endcase
-      if (round_up) res_o = {sign, EXP_ONE, {MAN_BITS{1'b0}}};
-      else res_o = {sign, {EXP_BITS{1'b0}}, {MAN_BITS{1'b0}}};
-      nx_o = set_nx_i;
-    end else if (uexp >= int'(MAN_BITS)) begin
-      res_o = op_i;
-    end else begin
-      frac_len  = MAN_BITS - unsigned'(uexp);
-      guard     = sig[frac_len-1];
-      lsb       = sig[frac_len];
-      frac_mask = ((MAN_BITS + 2)'(1) << (frac_len - 1)) - 1;
-      sticky    = |(sig & frac_mask[MAN_BITS:0]);
-      unique case (rm_i)
-        3'b000:  round_up = guard && (sticky || lsb);
-        3'b001:  round_up = 1'b0;
-        3'b010:  round_up = sign && (guard || sticky);
-        3'b011:  round_up = ~sign && (guard || sticky);
-        3'b100:  round_up = guard;
-        default: round_up = guard && (sticky || lsb);
-      endcase
-      acc = {1'b0, sig};
-      acc = acc & ~(((MAN_BITS + 2)'(1) << frac_len) - 1);
-      if (round_up) acc = acc + ((MAN_BITS + 2)'(1) << frac_len);
-      if (acc[MAN_BITS+1]) begin
-        if (exp_f == (EXP_INF - 1'b1)) res_o = {sign, EXP_INF, {MAN_BITS{1'b0}}};
-        else res_o = {sign, exp_f + 1'b1, {MAN_BITS{1'b0}}};
-      end else begin
-        res_o = {sign, exp_f, acc[MAN_BITS-1:0]};
-      end
-      nx_o = set_nx_i && (guard || sticky);
-    end
+  // Thermometer masks via flat genvar assigns (zero procedural loop carry).
+  for (genvar k = 0; k <= MAN_BITS; k++) begin : gen_round_masks
+    assign sticky_mask[k] = ({1'b0, SH_W'(k)} + (SH_W+1)'(1)) < {1'b0, frac_len};
+    assign keep_mask[k]   = SH_W'(k) >= frac_len;
+    assign inc_mask[k]    = (SH_W'(k) == frac_len);
   end
+  assign inc_mask[MAN_BITS+1] = 1'b0;
+
+  // Unconditional mid-range rounding datapath (A118: hoisted outside if-chain).
+  logic [SH_W-1:0]         guard_idx;
+  logic                    mid_guard, mid_lsb, mid_sticky, mid_rup;
+  logic [MAN_BITS+1:0]     mid_acc_trunc, mid_acc_inc, mid_acc;
+  logic [WIDTH-1:0]        mid_res, lt1_res;
+  logic                    lt1_rup;
+  assign guard_idx  = frac_len - SH_W'(1);
+  assign mid_guard  = sig[guard_idx];
+  assign mid_lsb    = sig[frac_len];
+  assign mid_sticky = |(sig & sticky_mask);
+  assign is_half     = (exp_f == EXP_HALF) && (man == '0);
+  assign mag_gt_half = (exp_f == EXP_HALF) && (man != '0);
+  always_comb begin
+    unique case (rm_i)
+      3'b000:  begin lt1_rup = mag_gt_half;          mid_rup = mid_guard && (mid_sticky || mid_lsb); end
+      3'b001:  begin lt1_rup = 1'b0;                 mid_rup = 1'b0; end
+      3'b010:  begin lt1_rup = sign;                 mid_rup = sign && (mid_guard || mid_sticky); end
+      3'b011:  begin lt1_rup = ~sign;                mid_rup = ~sign && (mid_guard || mid_sticky); end
+      3'b100:  begin lt1_rup = is_half | mag_gt_half; mid_rup = mid_guard; end
+      default: begin lt1_rup = mag_gt_half;          mid_rup = mid_guard && (mid_sticky || mid_lsb); end
+    endcase
+  end
+  assign mid_acc_trunc = {1'b0, sig & keep_mask};
+  assign mid_acc_inc   = mid_acc_trunc + inc_mask;
+  // A146 per-chunk select replication on wide FP mantissa/result muxes.
+  localparam int unsigned ACC_W = MAN_BITS + 2;
+  for (genvar b = 0; b < ACC_W; b = b + 8) begin : gen_acc_lane
+    localparam int unsigned LW = ((b + 8) <= ACC_W) ? 8 : (ACC_W - b);
+    logic rup_b;
+    assign rup_b = mid_rup;
+    assign mid_acc[b +: LW] = rup_b ? mid_acc_inc[b +: LW] : mid_acc_trunc[b +: LW];
+  end
+  logic [WIDTH-1:0] qnan_val, mid_ovf_val, mid_norm_val;
+  assign qnan_val     = {1'b0, EXP_INF, 1'b1, {MAN_BITS - 1{1'b0}}};
+  assign mid_ovf_val  = (exp_f == (EXP_INF - 1'b1)) ? {sign, EXP_INF, {MAN_BITS{1'b0}}}
+                                                    : {sign, exp_f + 1'b1, {MAN_BITS{1'b0}}};
+  assign mid_norm_val = {sign, exp_f, mid_acc[MAN_BITS-1:0]};
+  assign lt1_res      = lt1_rup ? {sign, EXP_ONE, {MAN_BITS{1'b0}}}
+                                : {sign, {EXP_BITS{1'b0}}, {MAN_BITS{1'b0}}};
+  for (genvar b = 0; b < WIDTH; b = b + 8) begin : gen_res_lane
+    localparam int unsigned LW = ((b + 8) <= WIDTH) ? 8 : (WIDTH - b);
+    logic s_nan, s_pass, s_lt1, s_ovf;
+    assign s_nan  = is_nan;
+    assign s_pass = !is_nan && (is_inf || is_zero || (!lt_one && ge_int));
+    assign s_lt1  = !is_nan && !is_inf && !is_zero && lt_one;
+    assign s_ovf  = mid_acc[MAN_BITS+1];
+    assign mid_res[b +: LW] = s_ovf ? mid_ovf_val[b +: LW] : mid_norm_val[b +: LW];
+    assign res_o[b +: LW]   = s_nan  ? qnan_val[b +: LW] :
+                              s_pass ? op_i[b +: LW] :
+                              s_lt1  ? lt1_res[b +: LW] :
+                                       mid_res[b +: LW];
+  end
+  assign nv_o  = is_nan && is_snan;
+  assign nx_o  = !is_nan && !is_inf && !is_zero && set_nx_i &&
+                 (lt_one || (!ge_int && (mid_guard || mid_sticky)));
 endmodule
 
 module g6lc_fp_zfa
@@ -336,109 +343,139 @@ module g6lc_fp_zfa
     assign round_h_nx  = 1'b0;
   end
 
-  logic [G6LCCfg.FLen-1:0] result_d;
-  logic [             4:0] status_d;
-  logic                    nv_d, nx_d;
   logic [             4:0] fli_idx;
-  logic [            31:0] mag32, i32_res;
   logic                    d_nan, d_inf, d_zero, d_sign;
   logic [            10:0] d_exp;
   logic [            51:0] d_man;
   logic [            52:0] d_sig;
   logic [            52:0] d_frac_mask;
-  int                      d_uexp;
-  int unsigned             d_shift;
+  // A10 narrow biased exponent predicates + 5/6-bit shift amounts (replaces
+  // two cascaded 32-bit int subtracts and a 53-bit x 32-bit dynamic shift).
+  logic                    d_lt_one, d_le_52, d_ge_84;
+  logic [             5:0] d_rsh;
+  logic [             4:0] d_lsh;
+  logic [            31:0] fcvt_rsh_mag, fcvt_lsh_mag, fcvt_mag_s1;
+  logic                    fcvt_nv_s1, fcvt_nx_s1, fcvt_zero_s1;
 
-  assign fli_idx = operand_i[4:0];
-  assign d_sign  = op_d[63];
-  assign d_exp   = op_d[62:52];
-  assign d_man   = op_d[51:0];
-  assign d_nan   = (d_exp == 11'h7FF) && (d_man != '0);
-  assign d_inf   = (d_exp == 11'h7FF) && (d_man == '0);
-  assign d_zero  = (d_exp == '0) && (d_man == '0);
-  assign d_sig   = (d_exp == '0) ? {1'b0, d_man} : {1'b1, d_man};
-  assign d_uexp  = (d_exp == '0) ? -1 : (int'(d_exp) - 1023);
+  assign fli_idx  = operand_i[4:0];
+  assign d_sign   = op_d[63];
+  assign d_exp    = op_d[62:52];
+  assign d_man    = op_d[51:0];
+  assign d_nan    = (d_exp == 11'h7FF) && (d_man != '0);
+  assign d_inf    = (d_exp == 11'h7FF) && (d_man == '0);
+  assign d_zero   = (d_exp == '0) && (d_man == '0);
+  assign d_sig    = (d_exp == '0) ? {1'b0, d_man} : {1'b1, d_man};
+  assign d_lt_one = (d_exp < 11'd1023);
+  assign d_le_52  = (d_exp <= 11'd1075);
+  assign d_ge_84  = (d_exp >= 11'd1107);
+  assign d_rsh    = 6'(11'd1075 - d_exp);
+  assign d_lsh    = 5'(d_exp - 11'd1075);
 
+  // Thermometer sticky mask for right-shifted FCVTMOD (zero 53b shift+sub).
+  for (genvar k = 0; k < 53; k++) begin : gen_fcvt_mask
+    assign d_frac_mask[k] = (6'(k) < d_rsh);
+  end
+  assign fcvt_rsh_mag = 32'(d_sig >> d_rsh);
+  assign fcvt_lsh_mag = d_ge_84 ? 32'b0 : (d_sig[31:0] << d_lsh);
+  assign fcvt_zero_s1 = d_nan || d_inf || d_zero || d_lt_one;
+  assign fcvt_nv_s1   = d_nan || d_inf;
+  assign fcvt_nx_s1   = !d_nan && !d_inf && !d_zero &&
+                        (d_lt_one || (d_le_52 && (|(d_sig & d_frac_mask))));
+  assign fcvt_mag_s1  = fcvt_zero_s1 ? 32'b0 : (d_le_52 ? fcvt_rsh_mag : fcvt_lsh_mag);
+
+  // Stage-1 comb: FLI + FROUND result assembly and FCVTMOD shift/flags.
+  logic [G6LCCfg.FLen-1:0] s1_nonfcvt_res_d;
+  logic                    s1_nonfcvt_nv_d, s1_nonfcvt_nx_d;
   always_comb begin
-    result_d    = '0;
-    nv_d        = 1'b0;
-    nx_d        = 1'b0;
-    mag32       = '0;
-    i32_res     = '0;
-    d_shift     = 0;
-    d_frac_mask = '0;
-
+    s1_nonfcvt_res_d = '0;
+    s1_nonfcvt_nv_d  = 1'b0;
+    s1_nonfcvt_nx_d  = 1'b0;
     unique case (op_i)
       FLI: begin
         unique case (fmt_i)
-          2'b01:   result_d = (G6LCCfg.FLen >= 64) ? G6LCCfg.FLen'(fli_d(fli_idx)) : box32(32'h7FC00000);
-          2'b10:   result_d = box16(fli_h(fli_idx));
-          default: result_d = box32(fli_s(fli_idx));
+          2'b01:   s1_nonfcvt_res_d = (G6LCCfg.FLen >= 64) ? G6LCCfg.FLen'(fli_d(fli_idx)) : box32(32'h7FC00000);
+          2'b10:   s1_nonfcvt_res_d = box16(fli_h(fli_idx));
+          default: s1_nonfcvt_res_d = box32(fli_s(fli_idx));
         endcase
       end
       FROUND, FROUNDNX: begin
         unique case (fmt_i)
           2'b01: begin
-            result_d = (G6LCCfg.FLen >= 64) ? G6LCCfg.FLen'(round_d_res) : box32(32'h7FC00000);
-            nv_d     = round_d_nv;
-            nx_d     = round_d_nx;
+            s1_nonfcvt_res_d = (G6LCCfg.FLen >= 64) ? G6LCCfg.FLen'(round_d_res) : box32(32'h7FC00000);
+            s1_nonfcvt_nv_d  = round_d_nv;
+            s1_nonfcvt_nx_d  = round_d_nx;
           end
           2'b10: begin
-            result_d = box16(round_h_res);
-            nv_d     = round_h_nv;
-            nx_d     = round_h_nx;
+            s1_nonfcvt_res_d = box16(round_h_res);
+            s1_nonfcvt_nv_d  = round_h_nv;
+            s1_nonfcvt_nx_d  = round_h_nx;
           end
           default: begin
-            result_d = box32(round_s_res);
-            nv_d     = round_s_nv;
-            nx_d     = round_s_nx;
+            s1_nonfcvt_res_d = box32(round_s_res);
+            s1_nonfcvt_nv_d  = round_s_nv;
+            s1_nonfcvt_nx_d  = round_s_nx;
           end
         endcase
       end
-      FCVTMOD: begin
-        if (d_nan || d_inf) begin
-          result_d = '0;
-          nv_d     = 1'b1;
-        end else if (d_zero) begin
-          result_d = '0;
-        end else if (d_uexp < 0) begin
-          result_d = '0;
-          nx_d     = 1'b1;
-        end else if (d_uexp <= 52) begin
-          d_shift     = 52 - unsigned'(d_uexp);
-          mag32       = 32'(d_sig >> d_shift);
-          d_frac_mask = (d_shift == 0) ? '0 : ((53'(1) << d_shift) - 1);
-          nx_d        = |(d_sig & d_frac_mask);
-          i32_res     = d_sign ? (32'(0) - mag32) : mag32;
-          result_d    = sext32(i32_res);
-        end else begin
-          d_shift  = unsigned'(d_uexp) - 52;
-          nx_d     = 1'b0;
-          mag32    = (d_shift >= 32) ? 32'b0 : 32'(d_sig << d_shift);
-          i32_res  = d_sign ? (32'(0) - mag32) : mag32;
-          result_d = sext32(i32_res);
-        end
-      end
-      default: result_d = '0;
+      default: ;
     endcase
-    status_d = {nv_d, 3'b000, nx_d};
   end
 
-  assign ready_o = !valid_o || ready_i;
+  // A40/A123 internal 2-stage decoupled pipeline behind the existing
+  // valid_i/ready_o/valid_o/ready_i handshake (zero caller contract changes):
+  // Stage 1 captures shifts/flags/FLI/FROUND; Stage 2 finishes FCVTMOD negate
+  // and sign-extension into the output registers.
+  logic                    s1_v_q, s1_is_fcvt_q, s1_sign_q;
+  logic                    s1_nv_q, s1_nx_q;
+  logic [            31:0] s1_mag32_q;
+  logic [G6LCCfg.FLen-1:0] s1_res_q;
+  logic [    TagWidth-1:0] s1_tag_q;
+  logic                    s2_ready, s1_ready;
+  logic [            31:0] s2_i32_res;
+  logic [G6LCCfg.FLen-1:0] s2_result_d;
+  logic [             4:0] s2_status_d;
+
+  assign s2_ready    = !valid_o || ready_i;
+  assign s1_ready    = !s1_v_q || s2_ready;
+  assign ready_o     = s1_ready;
+  assign s2_i32_res  = s1_sign_q ? (32'(0) - s1_mag32_q) : s1_mag32_q;
+  assign s2_result_d = s1_is_fcvt_q ? sext32(s2_i32_res) : s1_res_q;
+  assign s2_status_d = {s1_nv_q, 3'b000, s1_nx_q};
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      valid_o  <= 1'b0;
-      result_o <= '0;
-      status_o <= '0;
-      tag_o    <= '0;
+      s1_v_q       <= 1'b0;
+      s1_is_fcvt_q <= 1'b0;
+      s1_sign_q    <= 1'b0;
+      s1_nv_q      <= 1'b0;
+      s1_nx_q      <= 1'b0;
+      s1_mag32_q   <= '0;
+      s1_res_q     <= '0;
+      s1_tag_q     <= '0;
+      valid_o      <= 1'b0;
+      result_o     <= '0;
+      status_o     <= '0;
+      tag_o        <= '0;
     end else if (flush_i) begin
+      s1_v_q  <= 1'b0;
       valid_o <= 1'b0;
-    end else if (ready_o) begin
-      valid_o  <= valid_i;
-      result_o <= result_d;
-      status_o <= status_d;
-      tag_o    <= tag_i;
+    end else begin
+      if (s1_ready) begin
+        s1_v_q       <= valid_i;
+        s1_is_fcvt_q <= (op_i == FCVTMOD);
+        s1_sign_q    <= d_sign;
+        s1_nv_q      <= (op_i == FCVTMOD) ? fcvt_nv_s1 : s1_nonfcvt_nv_d;
+        s1_nx_q      <= (op_i == FCVTMOD) ? fcvt_nx_s1 : s1_nonfcvt_nx_d;
+        s1_mag32_q   <= fcvt_mag_s1;
+        s1_res_q     <= s1_nonfcvt_res_d;
+        s1_tag_q     <= tag_i;
+      end
+      if (s2_ready) begin
+        valid_o  <= s1_v_q;
+        result_o <= s2_result_d;
+        status_o <= s2_status_d;
+        tag_o    <= s1_tag_q;
+      end
     end
   end
 endmodule

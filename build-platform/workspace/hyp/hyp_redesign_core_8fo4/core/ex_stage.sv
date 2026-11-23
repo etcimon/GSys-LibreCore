@@ -1116,7 +1116,8 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
           .result_o(fpu_result),
           .fpu_valid_o(fpu_valid),
           .fpu_exception_o,
-          .fpu_early_valid_o
+          .fpu_early_valid_o,
+          .fpu_out_ready_i(!(G6LCCfg.SuperscalarEn && G6LCCfg.NrALUs >= 2 && alu2_lane_v))
       );
     end else begin : no_fpu_gen
       assign fpu_ready_o       = '0;
@@ -1172,9 +1173,9 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
 
   if (G6LCCfg.SuperscalarEn && G6LCCfg.NrALUs >= 2) begin
     if (G6LCCfg.FpPresent) begin
-      assign fpu_valid_o    = fpu_valid || alu2_lane_v;
-      assign fpu_result_o   = fpu_valid ? fpu_result   : alu2_lane_res;
-      assign fpu_trans_id_o = fpu_valid ? fpu_trans_id : alu2_lane_tid;
+      assign fpu_valid_o    = alu2_lane_v || fpu_valid;
+      assign fpu_result_o   = alu2_lane_v ? alu2_lane_res : fpu_result;
+      assign fpu_trans_id_o = alu2_lane_v ? alu2_lane_tid : fpu_trans_id;
     end else begin
       assign fpu_valid_o    = alu2_lane_v;
       assign fpu_result_o   = alu2_lane_res;
@@ -1191,6 +1192,23 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
       assign fpu_trans_id_o = '0;
     end
   end
+
+//pragma translate_off
+  always_ff @(negedge clk_i) begin
+    if (rst_ni && !flush_i) begin
+      assert ($onehot0(alu2_valid_i))
+        else $error("ex_stage: alu2_valid_i not one-hot %b", alu2_valid_i);
+      assert ($onehot0(fpu_valid_i))
+        else $error("ex_stage: fpu_valid_i not one-hot %b", fpu_valid_i);
+      assert ($onehot0(mult_valid_i))
+        else $error("ex_stage: mult_valid_i not one-hot %b", mult_valid_i);
+      assert ($onehot0(lsu_valid_i))
+        else $error("ex_stage: lsu_valid_i not one-hot %b", lsu_valid_i);
+      assert (!(alu2_lane_v && fpu_valid))
+        else $error("ex_stage: FPU/ALU2 WB publication collision");
+    end
+  end
+//pragma translate_on
 
   // ----------------
   // Load-Store Unit

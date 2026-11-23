@@ -164,42 +164,64 @@ always_comb begin
   assign waiter_id_o    = mem_q[complete_idx_i].waiters[0];
   assign waiter_meta_o  = mem_q[complete_idx_i].wmeta[0];
 
+  // A105 count-as-delta + A135 row-local constant-index per-entry updates:
+  // breaks the free_found -> free_idx -> mem_d[free_idx] -> mem_d[complete_idx]
+  // -> count_d serial dynamic-index chain while staying 100% cycle-exact.
+  logic alloc_merge_fire, alloc_new_fire;
+  logic [NW_W-1:0] comp_nwait_after;
+  logic comp_will_free;
+  assign alloc_merge_fire = alloc_i && merge_found && merge_can_attach;
+  assign alloc_new_fire   = alloc_i && free_found && !merge_found;
+  assign comp_nwait_after = (waiter_pop_i && mem_q[complete_idx_i].valid &&
+                             (mem_q[complete_idx_i].nwait != '0))
+      ? (mem_q[complete_idx_i].nwait - 1'b1)
+      : mem_q[complete_idx_i].nwait;
+  assign comp_will_free = complete_i && mem_q[complete_idx_i].valid &&
+                          (comp_nwait_after == '0) &&
+                          !(alloc_merge_fire && (merge_idx == complete_idx_i));
+  assign count_d = flush_i ? '0 :
+      (count_q + (IDX_W+1)'(alloc_new_fire) - (IDX_W+1)'(comp_will_free));
+
   always_comb begin
-    mem_d   = mem_q;
-    count_d = count_q;
-    if (flush_i) begin
-      for (int unsigned i = 0; i < DEPTH; i++) begin
+    logic is_comp, is_mrg, is_free, do_pop;
+    logic [NW_W-1:0] nw_after_pop;
+    is_comp      = 1'b0;
+    is_mrg       = 1'b0;
+    is_free      = 1'b0;
+    do_pop       = 1'b0;
+    nw_after_pop = '0;
+    mem_d = mem_q;
+    for (int unsigned i = 0; i < DEPTH; i++) begin
+      if (flush_i) begin
         mem_d[i].valid = 1'b0;
         mem_d[i].nwait = '0;
-      end
-      count_d = '0;
-    end else begin
-      // Pop one waiter (shift queue)
-      if (waiter_pop_i && mem_q[complete_idx_i].valid && mem_q[complete_idx_i].nwait != '0) begin
-        for (int unsigned w = 0; w < NW - 1; w++) begin
-          mem_d[complete_idx_i].waiters[w] = mem_q[complete_idx_i].waiters[w+1];
-          mem_d[complete_idx_i].wmeta[w]   = mem_q[complete_idx_i].wmeta[w+1];
+      end else begin
+        is_comp = (IDX_W'(i) == complete_idx_i);
+        is_mrg  = alloc_merge_fire && (IDX_W'(i) == merge_idx);
+        is_free = alloc_new_fire   && (IDX_W'(i) == free_idx);
+        do_pop  = is_comp && waiter_pop_i && mem_q[i].valid && (mem_q[i].nwait != '0);
+        nw_after_pop = do_pop ? (mem_q[i].nwait - 1'b1) : mem_q[i].nwait;
+
+        if (do_pop) begin
+          for (int unsigned w = 0; w < NW - 1; w++) begin
+            mem_d[i].waiters[w] = mem_q[i].waiters[w+1];
+            mem_d[i].wmeta[w]   = mem_q[i].wmeta[w+1];
+          end
+          mem_d[i].nwait = nw_after_pop;
         end
-        mem_d[complete_idx_i].nwait = mem_q[complete_idx_i].nwait - 1'b1;
-      end
-      // Alloc new or attach waiter
-      if (alloc_i && merge_found && merge_can_attach) begin
-        mem_d[merge_idx].waiters[mem_d[merge_idx].nwait] = alloc_id_i;
-        mem_d[merge_idx].wmeta[mem_d[merge_idx].nwait]   = alloc_meta_i;
-        mem_d[merge_idx].nwait = mem_d[merge_idx].nwait + 1'b1;
-      end else if (alloc_i && free_found && !merge_found) begin
-        mem_d[free_idx].valid     = 1'b1;
-        mem_d[free_idx].line_addr = alloc_line_addr_i;
-        mem_d[free_idx].id        = alloc_id_i;
-        mem_d[free_idx].is_write  = alloc_is_write_i;
-        mem_d[free_idx].nwait     = '0;
-        count_d = count_d + (IDX_W+1)'(1);
-      end
-      // Complete frees entry only when no waiters left
-      if (complete_i && mem_q[complete_idx_i].valid) begin
-        if (mem_d[complete_idx_i].nwait == '0) begin
-          mem_d[complete_idx_i].valid = 1'b0;
-          count_d = count_d - (IDX_W+1)'(1);
+        if (is_mrg) begin
+          mem_d[i].waiters[nw_after_pop] = alloc_id_i;
+          mem_d[i].wmeta[nw_after_pop]   = alloc_meta_i;
+          mem_d[i].nwait                 = nw_after_pop + 1'b1;
+        end else if (is_free) begin
+          mem_d[i].valid     = 1'b1;
+          mem_d[i].line_addr = alloc_line_addr_i;
+          mem_d[i].id        = alloc_id_i;
+          mem_d[i].is_write  = alloc_is_write_i;
+          mem_d[i].nwait     = '0;
+        end
+        if (is_comp && comp_will_free) begin
+          mem_d[i].valid = 1'b0;
         end
       end
     end

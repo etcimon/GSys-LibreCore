@@ -1110,6 +1110,21 @@ module g6lc_ptw
   end
   //pragma translate_on
 
+  //pragma translate_off
+  // +ptw_rd_trace: dump EVERY page-table read's returned PTE (all levels) so a
+  // multi-level walk shows which level first returns corrupt data. Simulation
+  // only; gated by plusarg, zero cost when off.
+  logic ptw_rd_trace_on;
+  initial ptw_rd_trace_on = $test$plusargs("ptw_rd_trace");
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && ptw_rd_trace_on && req_port_i.data_rvalid) begin
+      $display("[ptw-rd] t=%0t lvl=%0d pptr=%h pte=%h raw=%h vaddr=%h hart=%0d st=%0d",
+               $time, ptw_lvl_q[0], ptw_pptr_q, endian_data,
+               req_port_i.data_rdata, vaddr_q, req_hart_i, state_q);
+    end
+  end
+  //pragma translate_on
+
   // sequential process
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (~rst_ni) begin

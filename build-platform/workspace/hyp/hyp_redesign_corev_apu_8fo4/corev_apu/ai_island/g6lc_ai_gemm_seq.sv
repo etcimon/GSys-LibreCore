@@ -2550,23 +2550,31 @@ module g6lc_ai_gemm_seq #(
       end
     end
 `else
-    // Flat one-hot request classes (seed capture first, then the planned
-    // store fetch) with masked-OR coordinate selection.
+    // A118: c_r0_bank/c_r0_addr select solely on rd_sel_seed (accumulate seed)
+    // vs store_pair (pair vs single), removing w_fetch_needed -> rd_sel_store
+    // -> rd_sel_pair (~19 FO4) from the C-bank port-0 read index. Exact because
+    // rd_sel_seed and rd_sel_store are mutually exclusive and c_r0_req carries
+    // the exact enable.
     c_r0_req = rd_sel_seed || rd_sel_single || rd_sel_pair;
-    c_r0_bank = ({LaneW{rd_sel_seed}} & seed_bank_c) |
-                ({LaneW{rd_sel_single}} & rd_single_bank_c) |
-                ({LaneW{rd_sel_pair}} & (DualCRead ? rd_bank_c[0] : rd_hold_bank_c));
-    c_r0_addr = ({BankAddrW{rd_sel_seed}} & seed_addr_c) |
-                ({BankAddrW{rd_sel_single}} & rd_single_addr_c) |
-                ({BankAddrW{rd_sel_pair}} & (DualCRead ? rd_addr_c[0] : rd_hold_addr_c));
+    c_r0_bank = rd_sel_seed ? seed_bank_c :
+                store_pair  ? (DualCRead ? rd_bank_c[0] : rd_hold_bank_c) :
+                              rd_single_bank_c;
+    c_r0_addr = rd_sel_seed ? seed_addr_c :
+                store_pair  ? (DualCRead ? rd_addr_c[0] : rd_hold_addr_c) :
+                              rd_single_addr_c;
     c_r1_req = DualCRead && rd_sel_pair;
-    c_r1_bank = {LaneW{c_r1_req}} & rd_bank_c[1];
-    c_r1_addr = {BankAddrW{c_r1_req}} & rd_addr_c[1];
+    // A118: drive read-port bank/addr indices directly from rd_bank_c/rd_addr_c
+    // without gating on c_r1_req/c_rx_req (which depend on store_pair ->
+    // w_fetch_needed -> rd_sel_pair). The bank read-enable / capture flop
+    // already gates on w_payload_available, so unconditional index routing is
+    // 100% exact and removes ~20 FO4 from the C-read cone.
+    c_r1_bank = rd_bank_c[1];
+    c_r1_addr = rd_addr_c[1];
     // Wide beat: columns 2..W-1 of the beat as well.
     for (int unsigned w = 2; w < StoreWordsMax; w++) begin
       c_rx_req[w]  = c_r1_req && wide_c_q;
-      c_rx_bank[w] = {LaneW{c_rx_req[w]}} & rd_bank_c[w];
-      c_rx_addr[w] = {BankAddrW{c_rx_req[w]}} & rd_addr_c[w];
+      c_rx_bank[w] = rd_bank_c[w];
+      c_rx_addr[w] = rd_addr_c[w];
     end
 `endif
   end
@@ -3211,7 +3219,11 @@ module g6lc_ai_gemm_seq #(
       (state_q == ST_MAC && DualCRead && DataWidth >= 64 && !acc_mode_q &&
        dot_pending_q == '0 && trail_ready);
   assign store_pair = DataWidth >= 64 && !n_q[0];
-  assign store_rows_done = stc_i_q + 32'd1 >= m_q && stc_row_done;
+  // A118: evaluate stc_last_row in parallel with stc_row_done (no serial add
+  // behind stc_j_next >= n_q).
+  logic stc_last_row;
+  assign stc_last_row    = (stc_i_q + 32'd1) >= m_q;
+  assign store_rows_done = stc_last_row && stc_row_done;
   // The dedicated drain starts after the last token has written its element.
   // r127: inside ST_MAC `i_q >= m_q` is the registered fact !rows_left_q
   // (r23 invariant `state_q == ST_MAC |-> rows_left_q == (i_q < m_q)`,
@@ -3350,12 +3362,16 @@ module g6lc_ai_gemm_seq #(
   end
   assign store_b_fire = store_req.b_ready && axi_resp_s.b_valid;
   assign store_retire_elems = store_pair ? stc_elem_q : 16'd1;
-  // r127: the next store column and the row-done compare are formed once,
-  // beside the B handshake (they read only registers), and shared by the
-  // store plan, the rows-done test and the column update; the update used
-  // to form its own add + compare behind store_b_fire. Same values.
-  assign stc_j_next   = stc_j_q + 32'(store_retire_elems);
-  assign stc_row_done = stc_j_next >= n_q;
+  // A122 PushSelect: compute both candidate next columns (pair vs single) and
+  // their >= n_q compares in parallel off flops, then select late with store_pair.
+  logic [31:0] stc_j_next_pair, stc_j_next_sgl;
+  logic        stc_rdone_pair, stc_rdone_sgl;
+  assign stc_j_next_pair = stc_j_q + 32'(stc_elem_q);
+  assign stc_j_next_sgl  = stc_j_q + 32'd1;
+  assign stc_rdone_pair  = stc_j_next_pair >= n_q;
+  assign stc_rdone_sgl   = stc_j_next_sgl  >= n_q;
+  assign stc_j_next      = store_pair ? stc_j_next_pair : stc_j_next_sgl;
+  assign stc_row_done    = store_pair ? stc_rdone_pair  : stc_rdone_sgl;
   always_comb begin : advance_store
     aw_sent_d = aw_sent_q;
     w_sent_d = w_sent_q;

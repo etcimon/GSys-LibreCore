@@ -1,0 +1,403 @@
+{
+  "entries": [
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\vendor/pulp-platform/axi/src\\axi_pkg__svt.sv",
+      "emit_rel": "vendor/pulp-platform/axi/src/axi_pkg__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/vendor/pulp-platform/axi/src/axi_pkg.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\vendor/pulp-platform/axi/src\\axi_intf__svt.sv",
+      "emit_rel": "vendor/pulp-platform/axi/src/axi_intf__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/vendor/pulp-platform/axi/src/axi_intf.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\corev_apu/riscv-dbg/src\\dm_pkg__svt.sv",
+      "emit_rel": "corev_apu/riscv-dbg/src/dm_pkg__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/corev_apu/riscv-dbg/src/dm_pkg.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/include\\g6lc_storamic_cfg_pkg__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/include/g6lc_storamic_cfg_pkg__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/include/g6lc_storamic_cfg_pkg.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/include\\g6lc_storamic_pkg__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/include/g6lc_storamic_pkg__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/include/g6lc_storamic_pkg.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/include\\g6lc_storamic_checkpoint_pkg__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/include/g6lc_storamic_checkpoint_pkg__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/include/g6lc_storamic_checkpoint_pkg.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/include\\g6lc_storamic_pad_pkg__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/include/g6lc_storamic_pad_pkg__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/include/g6lc_storamic_pad_pkg.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/fabric\\g6lc_storamic_region_pkg__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/fabric/g6lc_storamic_region_pkg__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/fabric/g6lc_storamic_region_pkg.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/discovery\\g6lc_storamic_discovery_pkg__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/discovery/g6lc_storamic_discovery_pkg__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/discovery/g6lc_storamic_discovery_pkg.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/fabric\\g6lc_storamic_checkpoint_ctrl__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_ctrl__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_ctrl.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/fabric\\g6lc_storamic_checkpoint_io__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_io__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_io.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/fabric\\g6lc_storamic_checkpoint_media__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_media__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_media.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/fabric\\g6lc_storamic_store_guard__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/fabric/g6lc_storamic_store_guard__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/fabric/g6lc_storamic_store_guard.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/fabric\\g6lc_storamic_checkpoint_service__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_service__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_service.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/fabric\\g6lc_storamic_checkpoint_policy__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_policy__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_policy.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/frontend\\g6lc_storamic_axi_refuse__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/frontend/g6lc_storamic_axi_refuse__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/frontend/g6lc_storamic_axi_refuse.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/frontend\\g6lc_storamic_axi_memory__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/frontend/g6lc_storamic_axi_memory__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/frontend/g6lc_storamic_axi_memory.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/fabric\\g6lc_storamic_slot_mux__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/fabric/g6lc_storamic_slot_mux__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/fabric/g6lc_storamic_slot_mux.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/discovery\\g6lc_storamic_sync__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/discovery/g6lc_storamic_sync__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/discovery/g6lc_storamic_sync.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/discovery\\g6lc_storamic_discovery__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/discovery/g6lc_storamic_discovery__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/discovery/g6lc_storamic_discovery.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/discovery\\g6lc_storamic_discovery_set__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/discovery/g6lc_storamic_discovery_set__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/discovery/g6lc_storamic_discovery_set.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/frontend\\g6lc_storamic_regs__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/frontend/g6lc_storamic_regs__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/frontend/g6lc_storamic_regs.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/host/virtio\\g6lc_storamic_virtio_mmio__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_mmio__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_mmio.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/host/virtio\\g6lc_storamic_virtio_ring__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_ring__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_ring.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/host/virtio\\g6lc_storamic_virtio_blk__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_blk__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_blk.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl/host/virtio\\g6lc_storamic_virtio_dev__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_dev__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_dev.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\g6lc_storamic/rtl\\g6lc_storamic_top__svt.sv",
+      "emit_rel": "g6lc_storamic/rtl/g6lc_storamic_top__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/g6lc_storamic/rtl/g6lc_storamic_top.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\corev_apu/include\\g6lc_storamic_soc_cfg_pkg__svt.sv",
+      "emit_rel": "corev_apu/include/g6lc_storamic_soc_cfg_pkg__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/corev_apu/include/g6lc_storamic_soc_cfg_pkg.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\corev_apu/storamic\\g6lc_storamic_attach__svt.sv",
+      "emit_rel": "corev_apu/storamic/g6lc_storamic_attach__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/corev_apu/storamic/g6lc_storamic_attach.sv"
+    },
+    {
+      "edit_count": 17,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\corev_apu/storamic\\g6lc_storamic_ctrl_bridge__svt.sv",
+      "emit_rel": "corev_apu/storamic/g6lc_storamic_ctrl_bridge__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/corev_apu/storamic/g6lc_storamic_ctrl_bridge.sv"
+    },
+    {
+      "edit_count": 14,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\corev_apu/storamic\\g6lc_storamic_axi_gate__svt.sv",
+      "emit_rel": "corev_apu/storamic/g6lc_storamic_axi_gate__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/corev_apu/storamic/g6lc_storamic_axi_gate.sv"
+    },
+    {
+      "edit_count": 2,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\corev_apu/storamic\\g6lc_storamic_cpu_pause__svt.sv",
+      "emit_rel": "corev_apu/storamic/g6lc_storamic_cpu_pause__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/corev_apu/storamic/g6lc_storamic_cpu_pause.sv"
+    },
+    {
+      "edit_count": 19,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\corev_apu/storamic\\g6lc_storamic_dma_axi__svt.sv",
+      "emit_rel": "corev_apu/storamic/g6lc_storamic_dma_axi__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/corev_apu/storamic/g6lc_storamic_dma_axi.sv"
+    },
+    {
+      "edit_count": 3,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\corev_apu/storamic\\g6lc_storamic_durable_store__svt.sv",
+      "emit_rel": "corev_apu/storamic/g6lc_storamic_durable_store__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/corev_apu/storamic/g6lc_storamic_durable_store.sv"
+    },
+    {
+      "edit_count": 1,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\corev_apu/storamic\\g6lc_storamic_model_store__svt.sv",
+      "emit_rel": "corev_apu/storamic/g6lc_storamic_model_store__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/corev_apu/storamic/g6lc_storamic_model_store.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\corev_apu/storamic\\g6lc_storamic_model_stick__svt.sv",
+      "emit_rel": "corev_apu/storamic/g6lc_storamic_model_stick__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/corev_apu/storamic/g6lc_storamic_model_stick.sv"
+    },
+    {
+      "edit_count": 2,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\corev_apu/storamic\\g6lc_storamic_sim_mem__svt.sv",
+      "emit_rel": "corev_apu/storamic/g6lc_storamic_sim_mem__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/corev_apu/storamic/g6lc_storamic_sim_mem.sv"
+    },
+    {
+      "edit_count": 5,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\corev_apu/storamic\\g6lc_storamic_checkpoint_model__svt.sv",
+      "emit_rel": "corev_apu/storamic/g6lc_storamic_checkpoint_model__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/corev_apu/storamic/g6lc_storamic_checkpoint_model.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\corev_apu/storamic\\g6lc_storamic_checkpoint_endpoint__svt.sv",
+      "emit_rel": "corev_apu/storamic/g6lc_storamic_checkpoint_endpoint__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/corev_apu/storamic/g6lc_storamic_checkpoint_endpoint.sv"
+    },
+    {
+      "edit_count": 2,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\corev_apu/storamic\\g6lc_storamic_boot_recovery__svt.sv",
+      "emit_rel": "corev_apu/storamic/g6lc_storamic_boot_recovery__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/corev_apu/storamic/g6lc_storamic_boot_recovery.sv"
+    },
+    {
+      "edit_count": 0,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\corev_apu/storamic\\g6lc_storamic_native_ckpt__svt.sv",
+      "emit_rel": "corev_apu/storamic/g6lc_storamic_native_ckpt__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/corev_apu/storamic/g6lc_storamic_native_ckpt.sv"
+    },
+    {
+      "edit_count": 8,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\corev_apu/storamic\\g6lc_storamic_native_providers__svt.sv",
+      "emit_rel": "corev_apu/storamic/g6lc_storamic_native_providers__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/corev_apu/storamic/g6lc_storamic_native_providers.sv"
+    },
+    {
+      "edit_count": 3,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\corev_apu/storamic\\g6lc_storamic_dmi_sberror__svt.sv",
+      "emit_rel": "corev_apu/storamic/g6lc_storamic_dmi_sberror__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/corev_apu/storamic/g6lc_storamic_dmi_sberror.sv"
+    },
+    {
+      "edit_count": 3,
+      "emit_path": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\corev_apu/storamic\\g6lc_storamic_checkpoint_route__svt.sv",
+      "emit_rel": "corev_apu/storamic/g6lc_storamic_checkpoint_route__svt.sv",
+      "is_new": false,
+      "modules": [],
+      "role": "module",
+      "source": "E:/cva6/corev_apu/storamic/g6lc_storamic_checkpoint_route.sv"
+    }
+  ],
+  "filelist": "E:\\cva6\\storamic\\corev_apu-storamic-fo4\\svt_corrected.f",
+  "out_dir": "E:\\cva6\\storamic\\corev_apu-storamic-fo4",
+  "schema_version": "0"
+}

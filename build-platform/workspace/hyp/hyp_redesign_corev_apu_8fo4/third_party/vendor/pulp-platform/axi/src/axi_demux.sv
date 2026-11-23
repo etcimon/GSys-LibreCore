@@ -412,6 +412,57 @@ module axi_demux #(
     // this ff is needed so that ar does not get de-asserted if an atop gets injected
     `FFLARN(lock_ar_valid_q, lock_ar_valid_d, load_ar_lock, '0, clk_i, rst_ni)
 
+// pragma translate_off
+    // mc_cas_lock_handoff wedge probe: an AR offered to the xbar demux that is
+    // never accepted leaves the upstream master (cluster -> L3 fill) holding
+    // ar_valid with ar_ready=0 forever. Dump which of the three blockers holds:
+    //   ar_id_cnt_full   - a low-AxiLookBits ID slot saturated (lost R pop)
+    //   ar_select_occupied - that ID slot owned by a different master port
+    //   ar_ready=0       - downstream slave not ready (locked transaction)
+    bit [15:0] xbar_ar_stall;
+    initial xbar_ar_stall = 0;
+    always @(posedge clk_i) begin
+      if (!rst_ni) xbar_ar_stall <= 0;
+      else if (slv_req_i.ar_valid && !slv_resp_o.ar_ready) begin
+        xbar_ar_stall <= xbar_ar_stall + 16'd1;
+        if (xbar_ar_stall == 16'd500 || xbar_ar_stall == 16'd2000 ||
+            xbar_ar_stall == 16'd8000) begin
+          $display("[xbar-ar-stall] %m n=%0d full=%0d selocc=%0d lkupsel=%0d arsel=%0d arid=%h lookid=%h sav=%0d sar=%0d av=%0d ar=%0d lockq=%0d",
+                   xbar_ar_stall, ar_id_cnt_full, ar_select_occupied,
+                   lookup_ar_select, slv_ar_chan_select.ar_select,
+                   slv_ar_chan_select.ar_chan.id,
+                   slv_ar_chan_select.ar_chan.id[0+:AxiLookBits],
+                   slv_ar_valid, slv_ar_ready, ar_valid, ar_ready,
+                   lock_ar_valid_q);
+        end
+      end else xbar_ar_stall <= 0;
+    end
+
+    // AW-channel twin of the AR stall probe above: a write/atomic AW held
+    // not-ready names aw_id_cnt_full / aw_select_occupied / w_fifo_full /
+    // downstream aw_ready. mini_l2_hot_scan wedges store-side (st_sb full,
+    // memory idle) and ar_id_cnt_full also gates AW issue, so both channels
+    // are instrumented.
+    bit [15:0] xbar_aw_stall;
+    initial xbar_aw_stall = 0;
+    always @(posedge clk_i) begin
+      if (!rst_ni) xbar_aw_stall <= 0;
+      else if (slv_req_i.aw_valid && !slv_resp_o.aw_ready) begin
+        xbar_aw_stall <= xbar_aw_stall + 16'd1;
+        if (xbar_aw_stall == 16'd500 || xbar_aw_stall == 16'd2000 ||
+            xbar_aw_stall == 16'd8000) begin
+          $display("[xbar-aw-stall] %m n=%0d full=%0d selocc=%0d lkupsel=%0d awsel=%0d awid=%h lookid=%h sav=%0d saw=%0d av=%0d aw=%0d wfifo=%0d lockq=%0d",
+                   xbar_aw_stall, aw_id_cnt_full, aw_select_occupied,
+                   lookup_aw_select, slv_aw_chan_select.aw_select,
+                   slv_aw_chan_select.aw_chan.id,
+                   slv_aw_chan_select.aw_chan.id[0+:AxiLookBits],
+                   slv_aw_valid, slv_aw_ready, aw_valid, aw_ready,
+                   w_fifo_full, lock_aw_valid_q);
+        end
+      end else xbar_aw_stall <= 0;
+    end
+// pragma translate_on
+
     if (UniqueIds) begin : gen_unique_ids_ar
       // If the `UniqueIds` parameter is set, each read transaction has an ID that is unique among
       // all in-flight read transactions, or all read transactions with a given ID target the same
@@ -693,6 +744,32 @@ module axi_demux_id_counters #(
 `endif
 // pragma translate_on
   end
+
+// pragma translate_off
+  // mc_cas_lock_handoff / mini_l2_hot_scan wedge probe: when this ID-counter
+  // bank reports full_o for a sustained window, dump every slot that is full or
+  // occupied so the saturated low-ID slot and its owning master select are
+  // named directly (distinguishes a lost R-pop leak from a foreign-master
+  // select collision and from downstream not-ready backpressure).
+  bit [15:0] xbar_cnt_stall;
+  initial xbar_cnt_stall = 0;
+  always @(posedge clk_i) begin
+    if (!rst_ni) xbar_cnt_stall <= 0;
+    else if (full_o) begin
+      xbar_cnt_stall <= xbar_cnt_stall + 16'd1;
+      if (xbar_cnt_stall == 16'd500 || xbar_cnt_stall == 16'd4000) begin
+        $display("[xbar-cnt-full] %m n=%0d cnt_full=%b occ=%b",
+                 xbar_cnt_stall, cnt_full, occupied);
+        for (int i = 0; i < NoCounters; i++) begin
+          if (cnt_full[i] || occupied[i]) begin
+            $display("[xbar-cnt-slot] %m slot=%0d full=%0d sel=%0d",
+                     i, cnt_full[i], mst_select_q[i]);
+          end
+        end
+      end
+    end else xbar_cnt_stall <= 0;
+  end
+// pragma translate_on
 endmodule
 
 // interface wrapper
