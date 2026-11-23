@@ -12354,6 +12354,21 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # across batches through the real shader path
         is_dixmesh = 'drawindxmesh' in gfx
         is_drawind = 'drawind' in gfx and not is_drawindx
+        # drawindmd<N>: multi-draw-indirect — N stride-stepped identical
+        # VkDrawIndirectCommand structs issue N work items over the one
+        # shared triangle footprint (identical draws union to a single
+        # coverage).  Indexed multi-draw is a follow-up (its u16 index
+        # list shares ib2 and would collide with the command block).
+        _mdraw = 1
+        if is_drawind and 'drawindmd' in gfx:
+            _s = gfx.split('drawindmd', 1)[1]
+            _n = ''
+            for _c in _s:
+                if _c.isdigit():
+                    _n += _c
+                else:
+                    break
+            _mdraw = int(_n) if _n else 1
         # statvp: pipeline carries a static pViewportState and the
         # command buffer emits NO SetViewport/SetScissor — coverage must
         # come from the ObjPay-baked viewport/scissor (the CTS
@@ -15953,8 +15968,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     else:
                         break
                 _icount = int(_n) if _n else 240
+            # drawindmd<N> packs N identical 16-byte commands back-to-back
+            # (stride == command size); drawindx keeps the single 20-byte
+            # struct plus its trailing index-list words below
             vmem_words += [0] * (0x301 - len(vmem_words)) + \
-                [_icount, 1, 0, 0] + ([0] if is_drawindx else [])
+                ([_icount, 1, 0, 0] * _mdraw if is_drawind
+                 else [_icount, 1, 0, 0] + [0])
             if is_drawindx:
                 if is_dixmesh:
                     _ix = [j % 3 for j in range(_icount)]
@@ -16196,7 +16215,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         ]) + [
             ([('vkCmdDrawIndirect', dict(
                 commandBuffer=cbdraw, buffer=X['ib2'], offset=4,
-                drawCount=1, stride=16))] if is_drawind else
+                drawCount=_mdraw, stride=16))] if is_drawind else
              [('vkCmdDrawIndexedIndirect', dict(
                  commandBuffer=cbdraw, buffer=X['ib2'], offset=4,
                  drawCount=1, stride=20))] if is_drawindx else
