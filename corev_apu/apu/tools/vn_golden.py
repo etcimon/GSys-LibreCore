@@ -12456,6 +12456,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # makeGraphicsPipeline shape: populated viewports vector, no
         # VK_DYNAMIC_STATE_* entries)
         is_statvp = 'statvp' in gfx
+        # withcnt: emit vkCmdSet{Viewport,Scissor}WithCount(count=1)
+        # instead of the base commands — identical VP/SC values so the
+        # coverage oracle is unchanged; exercises the *2 payload path
+        is_wc = 'withcnt' in gfx
         # ptsrg8: dEQP-VK.memory.pipeline_barrier.*_vertex_buffer_stride_2
         # shape — RG8_UNORM position at stride 2, POINT_LIST, the CTS
         # shaders verbatim (gl_PointSize = 1, no varyings, constant-white
@@ -16294,18 +16298,32 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 pOffsets=[0] * 5 if is_wide else [0])),
         ] + ([] if is_statvp else [
             # statvp emits no SetViewport/SetScissor — coverage must
-            # come from the pipeline-baked state
-            ('vkCmdSetViewport', dict(
+            # come from the pipeline-baked state.  withcnt swaps both
+            # for the count=1 *WithCount forms (same VP/SC values).
+            (('vkCmdSetViewportWithCount', dict(
+                commandBuffer=cbdraw, viewportCount=1,
+                pViewports=[st('VkViewport', x=f32b(0.0), y=f32b(0.0),
+                               width=f32b(64.0), height=f32b(64.0),
+                               minDepth=f32b(0.0), maxDepth=f32b(1.0))]))
+             if is_wc else
+             ('vkCmdSetViewport', dict(
                 commandBuffer=cbdraw, firstViewport=0, viewportCount=1,
                 pViewports=[st('VkViewport', x=f32b(0.0), y=f32b(0.0),
                                width=f32b(64.0), height=f32b(64.0),
-                               minDepth=f32b(0.0), maxDepth=f32b(1.0))])),
-            ('vkCmdSetScissor', dict(
+                               minDepth=f32b(0.0), maxDepth=f32b(1.0))]))),
+            (('vkCmdSetScissorWithCount', dict(
+                commandBuffer=cbdraw, scissorCount=1,
+                pScissors=[st('VkRect2D',
+                    offset=st('VkOffset2D', x=SC[0], y=SC[1]),
+                    extent=st('VkExtent2D',
+                              width=SC[2], height=SC[3]))]))
+             if is_wc else
+             ('vkCmdSetScissor', dict(
                 commandBuffer=cbdraw, firstScissor=0, scissorCount=1,
                 pScissors=[st('VkRect2D',
                     offset=st('VkOffset2D', x=SC[0], y=SC[1]),
                     extent=st('VkExtent2D',
-                              width=SC[2], height=SC[3]))])),
+                              width=SC[2], height=SC[3]))]))),
         ]) + ([] if not is_drawindx else [
             # drawindx binds the u16 {0,1,2} list inside ib2 before
             # the indexed indirect record
