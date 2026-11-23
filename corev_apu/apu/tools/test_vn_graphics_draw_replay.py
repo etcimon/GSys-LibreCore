@@ -2027,6 +2027,92 @@ class DrawReplayTests(unittest.TestCase):
         # indices [0,1,2] + vertexOffset 1 -> vertex records 1,2,3
         self.check_fb_coverage(self.indirect_coverage(clip, [1, 2, 3]))
 
+    def test_draw_indirect_multi_draw_runs_each_command(self):
+        # vkCmdDrawIndirect drawCount=2 stride=16: two stride-stepped
+        # DrawIndirectCommand records each issue an independent draw.
+        # cmd0 {vertexCount=3,firstVertex=0} covers the quad's lower-left
+        # half, cmd1 {vertexCount=3,firstVertex=1} the upper-right — only
+        # executing BOTH commands reproduces the full-quad coverage.
+        col = (0.25, 0.5, 0.75, 1.0)
+        pos = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
+        self.upload([(p, col) for p in pos])
+        self.upload_indirect(3, 1, 0, 0, 3, 1, 1, 0)  # two 16B commands
+        self.pipeline()
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdDrawIndirect', commandBuffer=self.f.CB,
+                       buffer=self.XB, offset=0, drawCount=2, stride=16)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        clip = [(x, y, 0.5, 1.0) for x, y in pos]
+        cov = (self.indirect_coverage(clip, [0, 1, 2]) |
+               self.indirect_coverage(clip, [1, 2, 3]))
+        self.check_fb_coverage(cov)
+
+    def test_draw_indirect_multi_draw_honours_stride(self):
+        # stride=24 > command size 16 leaves an 8-byte gap; the second
+        # command must be fetched at offset+stride, not packed after the
+        # first.  Same two-triangle full-quad oracle as the packed case.
+        col = (0.25, 0.5, 0.75, 1.0)
+        pos = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
+        self.upload([(p, col) for p in pos])
+        # cmd0 words0-3, 8B pad words4-5, cmd1 words6-9 -> stride 24
+        self.upload_indirect(3, 1, 0, 0, 0, 0, 3, 1, 1, 0)
+        self.pipeline()
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdDrawIndirect', commandBuffer=self.f.CB,
+                       buffer=self.XB, offset=0, drawCount=2, stride=24)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        clip = [(x, y, 0.5, 1.0) for x, y in pos]
+        cov = (self.indirect_coverage(clip, [0, 1, 2]) |
+               self.indirect_coverage(clip, [1, 2, 3]))
+        self.check_fb_coverage(cov)
+
+    def test_draw_indexed_indirect_multi_draw(self):
+        # vkCmdDrawIndexedIndirect drawCount=2 stride=20: two
+        # DrawIndexedIndirectCommand records {indexCount,instanceCount,
+        # firstIndex,vertexOffset,firstInstance}.  Index buffer
+        # [0,1,2,1,2,3]: cmd0 firstIndex=0 reads [0,1,2] -> verts 0,1,2;
+        # cmd1 firstIndex=3 reads [1,2,3] -> verts 1,2,3.  Union = quad.
+        col = (0.25, 0.5, 0.75, 1.0)
+        pos = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
+        self.upload([(p, col) for p in pos])
+        self.upload_indices([0, 1, 2, 1, 2, 3], 0)
+        self.upload_indirect(3, 1, 0, 0, 0, 3, 1, 3, 0, 0)  # two 20B cmds
+        self.pipeline(topology=3)
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdBindIndexBuffer', commandBuffer=self.f.CB,
+                       buffer=self.IB, offset=0, indexType=0)
+        self.f.command('vkCmdDrawIndexedIndirect', commandBuffer=self.f.CB,
+                       buffer=self.XB, offset=0, drawCount=2, stride=20)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        clip = [(x, y, 0.5, 1.0) for x, y in pos]
+        cov = (self.indirect_coverage(clip, [0, 1, 2]) |
+               self.indirect_coverage(clip, [1, 2, 3]))
+        self.check_fb_coverage(cov)
+
     def test_draw_indexed_primitive_restart_splits_triangles(self):
         # primitiveRestartEnable + uint16 indices [0,1,2,0xFFFF,3,4,5]:
         # the sentinel breaks the stream into two independent triangles.

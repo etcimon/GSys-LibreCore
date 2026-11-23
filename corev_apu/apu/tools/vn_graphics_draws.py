@@ -149,11 +149,16 @@ class GraphicsDraws:
         size = 20 if 'Indexed' in name else 16
         draw_count, stride = record['imm'][0], record['imm'][1]
         if draw_count == 0:
-            return (), None
+            return (), ()
         offset = record['imm'][2] | record['imm'][3] << 32
-        if (draw_count != 1 or stride != size or offset > 0xFFFFFFFF or
+        if (stride < size or stride % 4 or offset > 0xFFFFFFFF or
                 offset % 4 or record['payload_words']):
-            raise ValueError('graphics indirect draw exceeds single-record profile')
+            raise ValueError('graphics indirect draw exceeds profile')
+        # each command becomes one draw plan/op, so the count is bounded
+        # by the executor's per-job operation budget (a larger request
+        # could never be admitted and must not spin the plan loop).
+        if draw_count > self.engine.transfers.max_operations:
+            raise ValueError('graphics indirect draw count exceeds profile')
         buffer_raw = next((handle for handle, kind in zip(record['handle'], record['kind'])
                            if kind == self.kinds['VkBuffer'] and handle), None)
         if buffer_raw is None:
@@ -177,13 +182,16 @@ class GraphicsDraws:
             raise KeyError('graphics indirect buffer memory is stale')
         usage = entry.get('native_usage', 0)
         if (not usage & 0x100 or offset >= entry['size'] or
-                entry.get('bind_off', 0) + entry['size'] > memory['size']):
+                entry.get('bind_off', 0) + entry['size'] > memory['size'] or
+                offset + (draw_count - 1) * stride + size > entry['size']):
             raise ValueError('graphics indirect usage/range exceeds logical buffer')
-        source = BufferSource(self.context, self.device, entry['gen'] << 16 | slot,
-                              memory_handle, entry.get('bind_off', 0), entry['size'],
-                              usage, offset, 0)
-        return (draw_count, stride, offset), buffer_span(
-            self.engine, self.context_id, source, size)
+        spans = []
+        for i in range(draw_count):
+            source = BufferSource(self.context, self.device, entry['gen'] << 16 | slot,
+                                  memory_handle, entry.get('bind_off', 0), entry['size'],
+                                  usage, offset + i * stride, 0)
+            spans.append(buffer_span(self.engine, self.context_id, source, size))
+        return (draw_count, stride, offset), tuple(spans)
 
     def _draw(self, name, record):
         if 'Indirect' in name and record['imm'][0] == 0:
@@ -218,13 +226,14 @@ class GraphicsDraws:
             indices = buffer_span(self.engine, self.context_id, self.index_source)
             references.extend(indices.references)
             guards.append(indices.validate)
-        values, args = (), None
+        values, indirect_ops = (), ()
         if indirect:
-            values, args = self._indirect(name, record)
-            if args is None:
+            values, indirect_ops = self._indirect(name, record)
+            if not indirect_ops:
                 return
-            references.extend(args.references)
-            guards.append(args.validate)
+            for op in indirect_ops:
+                references.extend(op.references)
+                guards.append(op.validate)
         elif indexed:
             values = tuple(record['imm'][:5])
         else:
@@ -245,8 +254,15 @@ class GraphicsDraws:
                 guard()
 
         validate()
-        self.plans.append(DrawPlan(recording.context, recording.device,
-            recording.command_buffer, recording.recording, len(self.plans), name,
-            values, args, snapshot, operands, self.pass_state, self.subpass,
-            framebuffer.attachments, framebuffer, self.viewport, self.scissor,
-            tuple(vertices), indices, tuple(dict.fromkeys(references)), validate))
+        references = tuple(dict.fromkeys(references))
+        vertices = tuple(vertices)
+        # one plan per executed draw: a multi-draw-indirect record expands
+        # to one stride-offset operand apiece so each fetch resolves its own
+        # command arguments at execution time; direct/single draws yield one.
+        for indirect_op in (indirect_ops if indirect else (None,)):
+            self.plans.append(DrawPlan(recording.context, recording.device,
+                recording.command_buffer, recording.recording, len(self.plans),
+                name, values, indirect_op, snapshot, operands, self.pass_state,
+                self.subpass, framebuffer.attachments, framebuffer,
+                self.viewport, self.scissor, vertices, indices, references,
+                validate))

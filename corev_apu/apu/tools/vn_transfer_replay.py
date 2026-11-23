@@ -137,8 +137,10 @@ class TransferReplay:
                 name = engine.names[record['ctype']]
                 plans = len(draws.plans)
                 handled = draws.replay(name, record)
-                if len(draws.plans) > plans:
-                    op = draw_operation(engine, context_id, draws.plans[-1],
+                # a multi-draw-indirect record expands to one plan per
+                # stride-offset command; convert every plan the record added
+                for plan in draws.plans[plans:]:
+                    op = draw_operation(engine, context_id, plan,
                                         remember, guards)
                     if op is not None:
                         append(op)
