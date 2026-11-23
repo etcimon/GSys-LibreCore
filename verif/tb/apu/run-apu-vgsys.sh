@@ -96,7 +96,7 @@ ue_cpos_dispind_1 ue_cpos_dispbase_1 ue_cpos_exec2nd_1 \
 ue_cpos_events_1 ue_gpos_drawind_1 ue_gpos_drawindx_1 \
 ue_gpos_drawindmd3_1 ue_gpos_drawindxmd3_1 ue_gpos_drawindxcnt_1 \
 ue_gpos_dindcnt_1 ue_gpos_dindcntz_1 ue_gpos_dindcntx_1 \
-ue_gpos_drawindxib2_1 ue_gpos_triwithcnt_1 \
+ue_gpos_drawindxib2_1 ue_gpos_triwithcnt_1 ue_gpos_trivb2_1 \
 ue_cpos_recmany_1 ue_cpos_allocmany_1 ue_cpos_cbpoolreset_1 \
 ue_cpos_xstreams_1 ue_cpos_submit101_1"
 # G3b-i: the *full* negatives also run on a small-geometry build of

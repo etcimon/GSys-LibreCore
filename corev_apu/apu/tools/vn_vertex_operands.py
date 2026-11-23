@@ -16,6 +16,7 @@ class BufferSource:
     offset: int
     index_bytes: int
     size: int = 0
+    stride: int = 0
 
 
 @dataclass(frozen=True)
@@ -25,8 +26,8 @@ class BufferBindings:
 
 
 def capture(engine, current, name, record):
-    if name not in ('vkCmdBindVertexBuffers', 'vkCmdBindIndexBuffer',
-                    'vkCmdBindIndexBuffer2'):
+    if name not in ('vkCmdBindVertexBuffers', 'vkCmdBindVertexBuffers2',
+                    'vkCmdBindIndexBuffer', 'vkCmdBindIndexBuffer2'):
         return None
     front, kinds = current.frontend, engine.golden.KIND
     context = engine.contexts[front.ctx]
@@ -51,18 +52,35 @@ def capture(engine, current, name, record):
     device, _ = resolve(device_entry['gen'] << 16 | parent, 'VkDevice')
     if record['chain']:
         raise ValueError('vertex/index chain exceeds profile')
-    vertex = name == 'vkCmdBindVertexBuffers'
+    vertex = name in ('vkCmdBindVertexBuffers', 'vkCmdBindVertexBuffers2')
     if vertex:
         first, count = record['imm'][:2]
+        vb2 = name == 'vkCmdBindVertexBuffers2'
+        want = 8 * count if vb2 else 4 * count
         if (not 0 <= first < 16 or not 0 < count <= 16 - first or
-                len(record['pay']) != 4 * count or
-                record['blob'][0][1] != 2 * count or record['blob'][1][1] != 2 * count):
+                len(record['pay']) != want or
+                record['blob'][0][1] != 2 * count or
+                record['blob'][1][1] != 2 * count):
             raise ValueError('vertex binding count/payload exceeds profile')
         data = record['pay']
-        values = [(data[2 * i] | data[2 * i + 1] << 32,
-                   data[2 * count + 2 * i] | data[2 * count + 2 * i + 1] << 32,
-                   0, 0)
-                  for i in range(count)]
+        if vb2:
+            # [buffers u64][offsets u64][sizes u64][strides u64] — four
+            # bindingCount-wide arrays back to back
+            values = [(data[2 * i] | data[2 * i + 1] << 32,
+                       data[2 * count + 2 * i] |
+                       data[2 * count + 2 * i + 1] << 32,
+                       0,
+                       data[4 * count + 2 * i] |
+                       data[4 * count + 2 * i + 1] << 32,
+                       data[6 * count + 2 * i] |
+                       data[6 * count + 2 * i + 1] << 32)
+                      for i in range(count)]
+        else:
+            values = [(data[2 * i] | data[2 * i + 1] << 32,
+                       data[2 * count + 2 * i] |
+                       data[2 * count + 2 * i + 1] << 32,
+                       0, 0, 0)
+                      for i in range(count)]
     else:
         first, index_type = 0, record['imm'][0]
         is2 = name == 'vkCmdBindIndexBuffer2'
@@ -73,9 +91,9 @@ def capture(engine, current, name, record):
                       if record['qv'] >> i & 1 and record['kind'][i] == kinds['VkBuffer'])
         offset = record['pay'][0] | record['pay'][1] << 32
         bsize = record['pay'][2] | record['pay'][3] << 32 if is2 else 0
-        values = [(buffer, offset, 2 << index_type, bsize)]
+        values = [(buffer, offset, 2 << index_type, bsize, 0)]
     sources = []
-    for raw, offset, index_bytes, bsize in values:
+    for raw, offset, index_bytes, bsize, bstride in values:
         buffer, entry = resolve(raw, 'VkBuffer')
         slot = entry.get('bind_mem', -1)
         if not 0 <= slot < front.SLOTS:
@@ -86,10 +104,12 @@ def capture(engine, current, name, record):
                 not usage & (0x40 if index_bytes else 0x80) or offset >= capacity or
                 binding + capacity > me['size'] or
                 index_bytes and (offset % index_bytes or binding % index_bytes) or
-                bsize and offset + bsize > capacity):
+                bsize and offset + bsize > capacity or
+                bstride > 0xFFFFFFFF):
             raise ValueError('vertex/index usage/device/alignment/range exceeds logical buffer')
         sources.append(BufferSource(context, device, buffer, memory, binding,
-                                    capacity, usage, offset, index_bytes, bsize))
+                                    capacity, usage, offset, index_bytes,
+                                    bsize, bstride))
     return BufferBindings(first, tuple(sources))
 
 

@@ -199,6 +199,12 @@ python3 $G --graphics-session ue_gpos_drawindxib2_1 1
 # identical VP/SC values to ue_gpos_tri_1 so coverage is unchanged; first
 # RTL-level exercise of the *2 payload path (golden pwords whitelist fix)
 python3 $G --graphics-session ue_gpos_triwithcnt_1 1
+# trivb2: vkCmdBindVertexBuffers2 — standard triangle whose single
+# vertex buffer binds through the *2 operand (per-binding size+stride
+# arrays appended after buffers/offsets); static-stride fetch unchanged
+# so coverage is byte-identical to ue_gpos_tri_1 (only arena pointers
+# shift by the larger payload)
+python3 $G --graphics-session ue_gpos_trivb2_1 1
 python3 $G --graphics-session ue_gpos_blend_1    1
 # BGRA colour-write-mask pair: B8G8R8A8_UNORM attachment (vkfmt 44)
 # stores bytes [B,G,R,A]; cwmr keeps logical R only (mask 0x1), cwmb

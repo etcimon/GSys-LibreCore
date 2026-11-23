@@ -187,6 +187,16 @@ class DrawReplayTests(unittest.TestCase):
         self.f.command('vkCmdBindVertexBuffers', commandBuffer=self.f.CB,
             firstBinding=0, bindingCount=1, pBuffers=[self.VB], pOffsets=[0])
 
+    def bind2(self, sizes=(512,), strides=(24,)):
+        # vkCmdBindVertexBuffers2: same binding plus per-binding byte
+        # size + stride operands (the *2 arena appends them after the
+        # offsets; the static-stride pipeline fetch is unchanged).
+        self.f.command('vkCmdBindPipeline', commandBuffer=self.f.CB,
+                       pipelineBindPoint=0, pipeline=self.PIPE2)
+        self.f.command('vkCmdBindVertexBuffers2', commandBuffer=self.f.CB,
+            firstBinding=0, bindingCount=1, pBuffers=[self.VB], pOffsets=[0],
+            pSizes=list(sizes), pStrides=list(strides))
+
     def draw(self, **kwargs):
         args = dict(vertexCount=3, instanceCount=1, firstVertex=0,
                     firstInstance=0)
@@ -225,6 +235,16 @@ class DrawReplayTests(unittest.TestCase):
         self.viewport()
         self.scissor()
         self.bind()
+        self.draw(**draw_kw)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
+    def prepared2(self, sizes=(512,), strides=(24,), **draw_kw):
+        self.pipeline()
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind2(sizes=sizes, strides=strides)
         self.draw(**draw_kw)
         self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
         self.f.end()
@@ -874,6 +894,58 @@ class DrawReplayTests(unittest.TestCase):
         # far corner is outside the triangle: keeps the pass clear value
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())
         self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_draw_vertex_buffers2_matches_base_coverage(self):
+        # vkCmdBindVertexBuffers2 binds the same vertex buffer with
+        # explicit size+stride operands; on the static-stride pipeline
+        # the fetch is identical, so coverage/texels must match base.
+        self.upload(self.ndc_triangle())
+        self.prepared2()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        stats = job.drawexec_stats[job.operation - 1]
+        self.assertEqual(stats['triangles'], 1)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.fc_texel(x, y))
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_draw_vertex_buffers2_size_bounds_fetch(self):
+        # pSizes clamps the fetchable span: 24 B admits only vertex 0 of
+        # the 24 B-stride triangle, so vertices 1-2 robust-access to zero
+        # and the triangle degenerates (no fragments, robust accesses).
+        self.upload(self.ndc_triangle())
+        self.prepared2(sizes=(24,))
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        stats = job.drawexec_stats[job.operation - 1]
+        # vertices 1-2 robust-access to zero -> degenerate triangle ->
+        # no fragments and no colour writes (attachment stays cleared)
+        self.assertEqual(stats['fragments'], 0)
+        self.assertEqual(stats['color'], 0)
+        self.assertEqual(self.read_texel(1, 1), self.clear_texel())
+
+    def test_draw_vertex_buffers2_stride_ignored_on_static_pipeline(self):
+        # The pipeline bakes stride=24 statically (no
+        # VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE), so the *2
+        # pStrides operand is validated but does not steer the fetch:
+        # stride=48 would misplace every vertex if it were consumed.
+        self.upload(self.ndc_triangle())
+        self.prepared2(strides=(48,))
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        stats = job.drawexec_stats[job.operation - 1]
+        self.assertEqual(stats['triangles'], 1)
+        self.assertGreater(stats['fragments'], 0)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.fc_texel(x, y))
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
 
     def test_fs_kill_discards_fragments_per_pixel(self):
         # fs_kill_program OpKills every fragment with FragCoord.x < 4.0

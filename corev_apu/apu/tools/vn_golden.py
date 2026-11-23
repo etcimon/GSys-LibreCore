@@ -3715,7 +3715,8 @@ class FrontModel(ObjectTable, PayloadMemory):
                 if not rp_on or sp_act + 1 >= sp_n:
                     return True
                 sp_act += 1
-            elif ct == T.get('vkCmdBindVertexBuffers', -1):
+            elif ct in (T.get('vkCmdBindVertexBuffers', -1),
+                        T.get('vkCmdBindVertexBuffers2', -1)):
                 # G1c: payload = [bindingCount resolved handles]
                 # [bindingCount u64 offsets] at imm[7] — §5a G3b-iii:
                 # absolute PayMem addresses
@@ -5452,7 +5453,8 @@ class FrontModel(ObjectTable, PayloadMemory):
                         (ct in (session['T']['vkCmdPushConstants'],
                                 session['T'].get('vkCmdPushConstants2', -1))
                          and rec['imm'][2] > 256) or \
-                        (ct == session['T'].get('vkCmdBindVertexBuffers')
+                        (ct in (session['T'].get('vkCmdBindVertexBuffers'),
+                                session['T'].get('vkCmdBindVertexBuffers2', -1))
                          and (rec['imm'][0] & 0xFFFF) +
                              (rec['imm'][1] & 0xFFFF) > 16):
                     out['result'] = VK_ERR_UNKNOWN
@@ -5469,7 +5471,8 @@ class FrontModel(ObjectTable, PayloadMemory):
                         rk[rhi] = rec['kind'][i]
                         rhi += 1
                     if ct in (session['T']['vkCmdBindDescriptorSets'],
-                              session['T']['vkCmdBindVertexBuffers']) \
+                              session['T']['vkCmdBindVertexBuffers'],
+                              session['T'].get('vkCmdBindVertexBuffers2', -1)) \
                             and rec['blob'][0][1] >= 2 and rhi < 4:
                         k = (KIND['VkDescriptorSet']
                              if ct ==
@@ -5566,10 +5569,14 @@ class FrontModel(ObjectTable, PayloadMemory):
                             pwords.append(
                                 rec['pay'][(rec['imm'][2] & 0xFFFF) * 2
                                            + i] & 0xFFFFFFFF)
-                    elif ct == session['T'].get('vkCmdBindVertexBuffers'):
+                    elif ct in (session['T'].get('vkCmdBindVertexBuffers'),
+                                session['T'].get('vkCmdBindVertexBuffers2', -1)):
                         # G1c: arena = [nbind resolved buffer handles]
                         # [nbind u64 offsets] — staged ids sit at
-                        # 2b/2b+1, offsets verbatim at 2*nbind
+                        # 2b/2b+1, offsets verbatim at 2*nbind.  The *2
+                        # form appends [sizes][strides] after the offsets;
+                        # the executor reads the same 3*nb arena and
+                        # ignores them (static-stride profile).
                         nb = rec['imm'][1] & 0xFFFF
                         for b in range(nb):
                             bid = (rec['pay'][2 * b] |
@@ -12153,6 +12160,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # vkCmdPushConstants2 — the VkPushConstantsInfo struct flattens
         # to the identical record shape, exercising the *2 decode path.
         is_pc2 = 'pc2' in gfx
+        # trivb2: standard triangle but the vertex buffer binds through
+        # vkCmdBindVertexBuffers2 — appends per-binding size+stride
+        # operands after the offsets (static-stride fetch unchanged).
+        is_vb2 = 'vb2' in gfx
         # mrt: TWO colour attachments (G3a-iv-n).  fs_mrt emits
         # location0->ca[0] (o0 = the fs_color gradient, att0 reuses the
         # is_fcolor oracle) and location1->ca[1] (o1 = R/B swap of o0 —
@@ -16308,12 +16319,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 pDescriptorSets=[X['ds']], dynamicOffsetCount=0,
                 pDynamicOffsets=[])),
         ] if (is_fsubo or is_tex) else []) + [
-            ('vkCmdBindVertexBuffers', dict(
+            (('vkCmdBindVertexBuffers2' if is_vb2 and not is_wide
+              else 'vkCmdBindVertexBuffers'), dict(
                 commandBuffer=cbdraw, firstBinding=0,
                 bindingCount=5 if is_wide else 1,
                 pBuffers=([X['vb'], X['vb'], X['vb'], X['vb'], X['vb2']]
                           if is_wide else [X['vb']]),
-                pOffsets=[0] * 5 if is_wide else [0])),
+                pOffsets=[0] * 5 if is_wide else [0],
+                **({'pSizes': [72], 'pStrides': [24]}
+                   if is_vb2 and not is_wide else {}))),
         ] + ([] if is_statvp else [
             # statvp emits no SetViewport/SetScissor — coverage must
             # come from the pipeline-baked state.  withcnt swaps both

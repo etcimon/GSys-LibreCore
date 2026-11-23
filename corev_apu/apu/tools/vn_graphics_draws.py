@@ -76,7 +76,7 @@ class GraphicsDraws:
         if name in ('vkCmdSetViewport', 'vkCmdSetScissor',
                     'vkCmdSetViewportWithCount', 'vkCmdSetScissorWithCount'):
             return self._dynamic(name, record)
-        if name == 'vkCmdBindVertexBuffers':
+        if name in ('vkCmdBindVertexBuffers', 'vkCmdBindVertexBuffers2'):
             return self._vertex_bindings(record)
         if name in ('vkCmdBindIndexBuffer', 'vkCmdBindIndexBuffer2'):
             return self._index_binding(record)
