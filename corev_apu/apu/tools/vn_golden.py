@@ -760,12 +760,33 @@ class ArgGen:
                 else 0
         return self.rand_scalar(base)
 
+    def _ty_has_handle(self, ty, depth=0):
+        """True if struct/union `ty` has a HANDLE member (bounded recurse).
+        pNext chain structs carrying HANDLE fields get random uncreated
+        handles from gen_member — references no vkCreate* produced, so the
+        frontend's operand resolve rightly misses them.  gen_chain skips
+        such structs rather than emit an unresolvable reference."""
+        if ty is None or depth > 4:
+            return False
+        for v in getattr(ty, 'variables', None) or []:
+            bt = getattr(v, 'ty', None)
+            bt = bt.base if bt is not None else None
+            if bt is None:
+                continue
+            if getattr(bt, 'category', None) == vkxml.VkType.HANDLE:
+                return True
+            if getattr(bt, 'category', None) in (vkxml.VkType.STRUCT,
+                                                  vkxml.VkType.UNION) and \
+                    self._ty_has_handle(bt, depth + 1):
+                return True
+        return False
+
     def gen_chain(self, parent):
         out = []
         for nty in parent.p_next:
             if not self.m.chain_admit(nty):
                 continue
-            if self.rng.random() < 0.3:
+            if self.rng.random() < 0.3 and not self._ty_has_handle(nty):
                 out.append(self.gen_struct(nty, 2))
         return out[:2]
 
