@@ -3388,7 +3388,8 @@ class FrontModel(ObjectTable, PayloadMemory):
                     self.pg_alloc(65536, priv=True)
             if ct == T['vkCmdBindPipeline']:
                 bound = r['handle'][0]
-            elif ct == T['vkCmdBindDescriptorSets']:
+            elif ct in (T['vkCmdBindDescriptorSets'],
+                        T.get('vkCmdBindDescriptorSets2', -1)):
                 # §12.3 F5 payload stream: {handle,ndyn} pairs then the
                 # dynamic-offset words — §5a G3b-iii: absolute PayMem
                 abase = r['imm'][7] & 0xFFFFFFFF
@@ -5471,12 +5472,14 @@ class FrontModel(ObjectTable, PayloadMemory):
                         rk[rhi] = rec['kind'][i]
                         rhi += 1
                     if ct in (session['T']['vkCmdBindDescriptorSets'],
+                              session['T'].get('vkCmdBindDescriptorSets2', -1),
                               session['T']['vkCmdBindVertexBuffers'],
                               session['T'].get('vkCmdBindVertexBuffers2', -1)) \
                             and rec['blob'][0][1] >= 2 and rhi < 4:
                         k = (KIND['VkDescriptorSet']
-                             if ct ==
-                             session['T']['vkCmdBindDescriptorSets']
+                             if ct in (session['T']['vkCmdBindDescriptorSets'],
+                                       session['T'].get(
+                                           'vkCmdBindDescriptorSets2', -1))
                              else KIND['VkBuffer'])
                         st, s, be = self.resolve(blob_ids(0)[0], k)
                         if st == 'OK':
@@ -5547,11 +5550,26 @@ class FrontModel(ObjectTable, PayloadMemory):
                     if ct == session['T'].get('vkCmdResetEvent2', -1):
                         recd['imm'][0] = rec['q'][2] & 0xFFFFFFFF
                         recd['imm'][1] = (rec['q'][2] >> 32) & 0xFFFFFFFF
+                    # vkCmdBindDescriptorSets2 carries stageFlags (VkShaderStageFlags)
+                    # in imm[0] where the base command carries pipelineBindPoint.
+                    # Fold it to the same 0=graphics/1=compute bind point the
+                    # replay path expects: graphics = stage bits 0..4
+                    # (vertex..fragment = 0x1F), compute = bit5 (0x20).  Bits
+                    # above 0x3F (mesh/task/ray/accel) and a graphics+compute
+                    # mix are outside the bounded single-bind-point profile.
+                    if ct == session['T'].get('vkCmdBindDescriptorSets2', -1):
+                        sf = rec['imm'][0] & 0xFFFFFFFF
+                        gfx, cmp_ = sf & 0x1F, sf & 0x20
+                        if (not sf or sf & ~0x3F or (gfx and cmp_)):
+                            raise ValueError(
+                                'descriptor-set2 stageFlags exceed bind-point profile')
+                        recd['imm'][0] = 1 if cmp_ else 0
                     # §7b: BindDS streams resolved set handles then the
                     # dynamic offsets; PushConstants streams the staged
                     # words verbatim -- both through the payload chain
                     pwords = []
-                    if ct == session['T']['vkCmdBindDescriptorSets']:
+                    if ct in (session['T']['vkCmdBindDescriptorSets'],
+                              session['T'].get('vkCmdBindDescriptorSets2', -1)):
                         # §12.3 F5: the record stream is {set handle,
                         # ndyn} pairs for each bound set followed by the
                         # verbatim dynamic-offset words — the pair lets
@@ -5559,7 +5577,10 @@ class FrontModel(ObjectTable, PayloadMemory):
                         # re-reading the layouts.  §5a G3b-iii: sets
                         # past the 4-slot window (imm[1]=firstSet) are
                         # dropped, dyn words cap at 64, and the offsets
-                        # sit after ALL staged set ids (2*orig nset)
+                        # sit after ALL staged set ids (2*orig nset).
+                        # vkCmdBindDescriptorSets2 swaps pipelineBindPoint
+                        # for stageFlags in imm[0] (unused here) and keeps
+                        # firstSet/count/dynCount in the same imm slots.
                         nset = min(rec['imm'][2] & 0xFFFF,
                                    max(0, 4 - (rec['imm'][1] & 0xFFFF)))
                         ndyn = min(rec['imm'][3] & 0xFFFF, 64)

@@ -71,7 +71,8 @@ class GraphicsBindings:
             if snapshot.device != self.device:
                 raise ValueError('graphics binding pipeline belongs to another device')
             self.pipeline = refs[0][0]
-        elif name == 'vkCmdBindDescriptorSets' and record['imm'][0] == 0:
+        elif name in ('vkCmdBindDescriptorSets', 'vkCmdBindDescriptorSets2') \
+                and record['imm'][0] == 0:
             self._bind(record)
         elif (name in ('vkCmdPushConstants', 'vkCmdPushConstants2') and
                 record['imm'][0] and not record['imm'][0] & ~0x11):

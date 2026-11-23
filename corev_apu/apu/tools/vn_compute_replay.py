@@ -10,6 +10,7 @@ from vn_image_operands import image_descriptor
 
 class ComputeReplay:
     NAMES = frozenset(('vkCmdBindPipeline', 'vkCmdBindDescriptorSets',
+                       'vkCmdBindDescriptorSets2',
                        'vkCmdPushConstants', 'vkCmdPushConstants2',
                        'vkCmdDispatch', 'vkCmdDispatchIndirect'))
 
@@ -67,7 +68,7 @@ class ComputeReplay:
             for ref, kind in references:
                 self.remember(ref, kind, allow_zomb=kind == self.kinds['VkShaderModule'])
             self.pipeline = handle
-        elif name == 'vkCmdBindDescriptorSets':
+        elif name in ('vkCmdBindDescriptorSets', 'vkCmdBindDescriptorSets2'):
             point, first, count, dynamic_count = record['imm'][:4]
             template = self.template(record)
             if (point != 1 or not 0 < count <= 4 or first + count > len(template.sets) or

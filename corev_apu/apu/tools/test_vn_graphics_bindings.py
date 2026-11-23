@@ -107,6 +107,22 @@ class BindingTests(unittest.TestCase):
                 offset=offset, size=4 * len(values),
                 pValues=b''.join(value.to_bytes(4, 'little') for value in values)))
 
+    def bind2(self, *, stageFlags=0x11, sets=True, offsets=(), first=0,
+              layout=None, pipeline=True, point=0):
+        # vkCmdBindDescriptorSets2 wraps the same operands in a
+        # VkBindDescriptorSetsInfo struct; stageFlags replaces
+        # pipelineBindPoint and folds to the same 0=graphics/1=compute
+        # bind point the base record carries in imm[0].
+        if pipeline:
+            self.command('vkCmdBindPipeline', commandBuffer=self.f.CB,
+                         pipelineBindPoint=point, pipeline=self.g.PIPE)
+        self.command('vkCmdBindDescriptorSets2', commandBuffer=self.f.CB,
+            pBindDescriptorSetsInfo=self.w.structure('VkBindDescriptorSetsInfo',
+                pNext=[], stageFlags=stageFlags, layout=layout or self.g.PL,
+                firstSet=first, descriptorSetCount=1 if sets else 0,
+                pDescriptorSets=[self.SET] if sets else [],
+                dynamicOffsetCount=len(offsets), pDynamicOffsets=list(offsets)))
+
     def replay(self):
         for name, record in self.names[self.state.position:]:
             self.state.replay(name, record)
@@ -151,6 +167,32 @@ class BindingTests(unittest.TestCase):
         vs, fs = self.state.resolve().stages
         self.assertEqual((vs.push[0], fs.push[1]), (7, 9))
         self.assertEqual((vs.push[1], fs.push[0], vs.push[2], fs.push[2]), (0, 0, 0, 0))
+
+    def test_bind_descriptor_sets2_matches_base_record_shape(self):
+        # vkCmdBindDescriptorSets2 (VK_KHR_maintenance6) swaps
+        # pipelineBindPoint for stageFlags; the decoder flattens the
+        # VkBindDescriptorSetsInfo wrapper so firstSet/count/dynCount land
+        # in the same imm slots and the {set,ndyn}+offset payload streams
+        # identically.  Graphics stageFlags must resolve like the base
+        # graphics bind.
+        self.prepare()
+        self.bind2(stageFlags=0x11)
+        self.replay()
+        result = self.state.resolve()
+        self.assertEqual(tuple(stage.stage for stage in result.stages), (1, 16))
+        for stage in result.stages:
+            self.assertEqual((stage.bindings[0].offset, stage.bindings[0].kind),
+                             (0, 6))
+        result.validate()
+
+    def test_bind_descriptor_sets2_dynamic_offsets_match_base(self):
+        self.prepare(dtype=8, count=2)
+        self.bind2(stageFlags=0x11, offsets=(256, 512))
+        self.replay()
+        result = self.state.resolve()
+        for stage in result.stages:
+            self.assertEqual(tuple(binding.offset for binding in stage.bindings),
+                             (256, 768))
 
     def test_push_constants2_matches_base_record_shape(self):
         # vkCmdPushConstants2 wraps the same operands in a
