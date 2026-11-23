@@ -77,6 +77,14 @@ class GraphicsState:
     restart: int = 0
 
 
+# VkDynamicState wire values admitted beyond the mandatory viewport(0)/
+# scissor(1) pair.  Extension entries use the Venus synthetic encoding
+# 1000000000 + (extnumber-1)*1000 + offset (vkxml._parse_enum); only states
+# whose vkCmdSet* command has golden modeling may be declared here.
+DYNAMIC_PRIMITIVE_RESTART = 1000000000 + (378 - 1) * 1000 + 4
+_DYNAMIC_ADMITTED = frozenset((DYNAMIC_PRIMITIVE_RESTART,))
+
+
 def validate(engine, fields, blobs, render_pass, subpass=0):
     def one(name):
         values = fields.get(name, ())
@@ -93,7 +101,6 @@ def validate(engine, fields, blobs, render_pass, subpass=0):
         'lineWidth': 0x3F800000,
         'rasterizationSamples': 1, 'sampleShadingEnable': 0,
         'pSampleMask': 0, 'alphaToCoverageEnable': 0, 'alphaToOneEnable': 0,
-        'dynamicStateCount': 2, 'pDynamicStates': 2,
         'blendConstants': 4,
     }
     for name, value in required.items():
@@ -147,8 +154,12 @@ def validate(engine, fields, blobs, render_pass, subpass=0):
                 raise ValueError('graphics fixed depth bounds exceed profile')
             bounds = (bmin, bmax)
     dynamic = blobs.get('pDynamicStates', ())
-    if sorted(dynamic) != [0, 1]:
-        raise ValueError('graphics fixed dynamic viewport/scissor must be distinct')
+    dyn_count = one('dynamicStateCount')
+    if (dyn_count != one('pDynamicStates') or dyn_count != len(dynamic) or
+            not 2 <= dyn_count <= 16 or len(set(dynamic)) != dyn_count or
+            not {0, 1} <= set(dynamic) or
+            not set(dynamic) <= {0, 1} | _DYNAMIC_ADMITTED):
+        raise ValueError('graphics fixed dynamic states exceed profile')
     cull, front = one('cullMode'), one('frontFace')
     if cull not in (0, 1, 2, 3) or front not in (0, 1) or not 0 <= one('logicOp') <= 15:
         raise ValueError('graphics fixed raster enums exceed profile')

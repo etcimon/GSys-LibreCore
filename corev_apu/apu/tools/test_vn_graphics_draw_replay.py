@@ -75,7 +75,7 @@ class DrawReplayTests(unittest.TestCase):
     def pipeline(self, rp=None, subpass=0, blend=None, blend_constants=None,
                  logic_op=None, raster_discard=0, poly_mode=0, topology=3,
                  attachments=None, cull=0, front=0, restart=0, vs=None,
-                 rate1=False):
+                 rate1=False, dynamic=None):
         s = self.w.structure
         # rate1 adds a second vertex binding (binding1, inputRate=1,
         # stride=4) carrying a per-instance scalar float at location 2 —
@@ -150,7 +150,8 @@ class DrawReplayTests(unittest.TestCase):
                                     **a) for a in atts],
                     blendConstants=blend_constants or [0, 0, 0, 0]),
                 pDynamicState=s('VkPipelineDynamicStateCreateInfo', pNext=[],
-                    flags=0, dynamicStateCount=2, pDynamicStates=[0, 1]),
+                    flags=0, dynamicStateCount=len(dynamic or [0, 1]),
+                    pDynamicStates=dynamic or [0, 1]),
                 layout=self.g.PL, renderPass=rp or self.g.r.RP,
                 subpass=subpass, basePipelineHandle=0, basePipelineIndex=-1)])
 
@@ -1803,6 +1804,30 @@ class DrawReplayTests(unittest.TestCase):
         self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
         self.f.end()
 
+    def dyn_restart_prepared(self, index_type, index_count, enable,
+                             first_index=0, vertex_offset=0,
+                             instance_count=1, first_instance=0):
+        # vkCmdSetPrimitiveRestartEnable dynamic state: the pipeline declares
+        # VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE (wire 1000377004) so the
+        # command value overrides the (ignored) create-info restart flag.
+        self.pipeline(topology=3, restart=0,
+                      dynamic=[0, 1, 1000377004])
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdSetPrimitiveRestartEnable',
+                       commandBuffer=self.f.CB,
+                       primitiveRestartEnable=enable)
+        self.f.command('vkCmdBindIndexBuffer', commandBuffer=self.f.CB,
+                       buffer=self.IB, offset=0, indexType=index_type)
+        self.f.command('vkCmdDrawIndexed', commandBuffer=self.f.CB,
+                       indexCount=index_count, instanceCount=instance_count,
+                       firstIndex=first_index, vertexOffset=vertex_offset,
+                       firstInstance=first_instance)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
     def indexed_coverage(self, clip, indices):
         # clip = per-vertex clip positions; indices select/reorder them
         # into TRIANGLE_LIST triples for the golden coverage union.
@@ -2366,6 +2391,63 @@ class DrawReplayTests(unittest.TestCase):
         clip = [(x, y, 0.5, 1.0) for x, y in pos]
         self.check_fb_coverage(
             self.restart_coverage(clip, indices, 0xFFFF, 4))
+
+    def dyn_restart_coverage_off(self, clip, indices, sentinel):
+        # restart disabled: the sentinel is an ordinary index.  uint16
+        # 0xFFFF fetches a robust-access vertex whose zero attributes give
+        # Position=(0,0,z,1) -> clip (0,0,0.5,1); indexCount=7 leaves the
+        # trailing index incomplete so only two triples assemble.
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        cov = set()
+        cov |= vn_golden.gfx_tri_coverage(
+            [clip[indices[0]], clip[indices[1]], clip[indices[2]]],
+            vp, sc, cw, ch, True, 0)
+        cov |= vn_golden.gfx_tri_coverage(
+            [(0.0, 0.0, 0.5, 1.0), clip[indices[4]], clip[indices[5]]],
+            vp, sc, cw, ch, True, 0)
+        return cov
+
+    def test_draw_indexed_dynamic_restart_enable_splits(self):
+        # vkCmdSetPrimitiveRestartEnable(1) overrides the pipeline flag:
+        # the uint16 sentinel splits [0,1,2] and [3,4,5] into two
+        # triangles — identical to the pipeline-static restart=1 path.
+        col = (0.25, 0.5, 0.75, 1.0)
+        pos = [(-1.0, -1.0), (-1.0, 1.0), (0.0, -1.0),
+               (0.0, 1.0), (1.0, -1.0), (1.0, 1.0)]
+        self.upload([(p, col) for p in pos])
+        indices = [0, 1, 2, 0xFFFF, 3, 4, 5]
+        self.upload_indices(indices, 0)
+        self.dyn_restart_prepared(0, len(indices), 1)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        clip = [(x, y, 0.5, 1.0) for x, y in pos]
+        self.check_fb_coverage(
+            self.restart_coverage(clip, indices, 0xFFFF, 3))
+
+    def test_draw_indexed_dynamic_restart_disable_contiguous(self):
+        # vkCmdSetPrimitiveRestartEnable(0) keeps the sentinel as an
+        # ordinary index: it robust-fetches a centre vertex, so the second
+        # triangle differs from the restart split.
+        col = (0.25, 0.5, 0.75, 1.0)
+        pos = [(-1.0, -1.0), (-1.0, 1.0), (0.0, -1.0),
+               (0.0, 1.0), (1.0, -1.0), (1.0, 1.0)]
+        self.upload([(p, col) for p in pos])
+        indices = [0, 1, 2, 0xFFFF, 3, 4, 5]
+        self.upload_indices(indices, 0)
+        # indexCount=6 keeps the contiguous (restart-off) stream
+        # primitive-aligned: two triples [0,1,2] and [0xFFFF,3,4]; the
+        # trailing index 5 is not read.
+        self.dyn_restart_prepared(0, 6, 0)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        clip = [(x, y, 0.5, 1.0) for x, y in pos]
+        self.check_fb_coverage(
+            self.dyn_restart_coverage_off(clip, indices, 0xFFFF))
 
     # ---- bounded MRT (two colour attachments) end-to-end ----
     # fs_program2 emits loc0=vcol, loc1=const; the single Writeback stage

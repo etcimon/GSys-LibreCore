@@ -21,10 +21,19 @@ class DynamicCommand(Recording):
 
 
 def capture(engine, current, name, record):
+    restart = name == 'vkCmdSetPrimitiveRestartEnable'
     base = name in ('vkCmdSetViewport', 'vkCmdSetScissor')
     counted = name in ('vkCmdSetViewportWithCount', 'vkCmdSetScissorWithCount')
-    if not (base or counted):
+    if not (base or counted or restart):
         return None
+    if restart:
+        # single VkBool32 immediate in imm[0]; no payload, chain or extra
+        # immediates — the bounded profile admits only the 0/1 domain.
+        if (record['imm'][0] not in (0, 1) or any(record['imm'][1:]) or
+                record['pay'] or record['chain']):
+            raise ValueError('graphics dynamic primitive-restart exceeds profile')
+        return DynamicCommand(*recording_identity(engine, current, record),
+                              'primitive_restart', (record['imm'][0],))
     viewport = 'Viewport' in name
     # base carries {first,count} in imm[0:2]; *WithCount drops first and
     # carries only count in imm[0] (always writes slots [0,count)).  The
@@ -82,7 +91,8 @@ def attach(out, snapshot):
 
 
 def validate(engine, context_id, snapshot):
-    if not isinstance(snapshot, DynamicCommand) or snapshot.kind not in ('viewport', 'scissor'):
+    if (not isinstance(snapshot, DynamicCommand) or
+            snapshot.kind not in ('viewport', 'scissor', 'primitive_restart')):
         raise KeyError('graphics dynamic identity is unavailable')
     validate_recording(engine, context_id, snapshot)
     return snapshot.values

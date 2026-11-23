@@ -20,6 +20,7 @@ import struct
 
 from vn_graphics_drawexec import DrawExec
 from vn_graphics_fetch import Fetch, FetchVertex
+from vn_graphics_state import DYNAMIC_PRIMITIVE_RESTART
 
 
 def _push(stages):
@@ -136,8 +137,15 @@ def operation(engine, context_id, plan, remember, guards):
         direct = (plan.values[0], plan.values[1], plan.values[2], 0,
                   plan.values[3])
         indirect = None
+    # vkCmdSetPrimitiveRestartEnable overrides the pipeline flag only when
+    # the pipeline declared VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE; an
+    # unset dynamic command keeps the create-info value (bounded default).
+    restart = fixed.restart
+    if (DYNAMIC_PRIMITIVE_RESTART in fixed.dynamic and
+            plan.restart is not None):
+        restart = plan.restart
     fetch = Fetch(indexed, plan.indices, vertices, direct, indirect,
-                  fixed.restart)
+                  restart)
     viewport = struct.unpack('<6f', struct.pack('<6I', *plan.viewport))
     framebuffer = plan.framebuffer.framebuffer
     op = DrawExec(fetch, snapshot.vertex.code, snapshot.fragment.code,

@@ -36,6 +36,7 @@ class DrawPlan(Recording):
     framebuffer: object
     viewport: tuple
     scissor: tuple
+    restart: object
     vertices: tuple
     indices: object
     references: tuple
@@ -55,6 +56,7 @@ class GraphicsDraws:
         self.device = recording.device
         self.bindings = GraphicsBindings(engine, context_id, recording)
         self.viewport = self.scissor = None
+        self.restart = None
         self.vertices, self.index_source = {}, None
         self.pass_state = None
         self.subpass = 0
@@ -76,6 +78,8 @@ class GraphicsDraws:
         if name in ('vkCmdSetViewport', 'vkCmdSetScissor',
                     'vkCmdSetViewportWithCount', 'vkCmdSetScissorWithCount'):
             return self._dynamic(name, record)
+        if name == 'vkCmdSetPrimitiveRestartEnable':
+            return self._restart(record)
         if name in ('vkCmdBindVertexBuffers', 'vkCmdBindVertexBuffers2'):
             return self._vertex_bindings(record)
         if name in ('vkCmdBindIndexBuffer', 'vkCmdBindIndexBuffer2'):
@@ -104,6 +108,15 @@ class GraphicsDraws:
             self.viewport = values
         else:
             self.scissor = values
+        return True
+
+    def _restart(self, record):
+        snapshot = record.get('native_graphics_dynamic')
+        if (not isinstance(snapshot, DynamicCommand) or
+                snapshot.kind != 'primitive_restart'):
+            raise KeyError('graphics draw restart snapshot is unavailable')
+        self.restart = dynamic_values(self.engine, self.context_id,
+                                      snapshot)[0]
         return True
 
     def _vertex_bindings(self, record):
@@ -302,5 +315,5 @@ class GraphicsDraws:
                 recording.command_buffer, recording.recording, len(self.plans),
                 name, values, indirect_op, snapshot, operands, self.pass_state,
                 self.subpass, framebuffer.attachments, framebuffer,
-                self.viewport, self.scissor, vertices, indices, references,
-                validate))
+                self.viewport, self.scissor, self.restart, vertices,
+                indices, references, validate))
