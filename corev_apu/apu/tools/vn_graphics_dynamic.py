@@ -31,16 +31,38 @@ _SCALAR_DYNAMIC = {
     'vkCmdSetDepthTestEnable': ('depth_test', 0, 1),
     'vkCmdSetDepthWriteEnable': ('depth_write', 0, 1),
     'vkCmdSetDepthCompareOp': ('depth_compare', 0, 7),
+    'vkCmdSetDepthBoundsTestEnable': ('bounds_test', 0, 1),
 }
 _BOOL_DYNAMIC = {n: k for n, (k, _lo, _hi) in _SCALAR_DYNAMIC.items()}
+
+# vkCmdSet* dynamic-state commands carrying N raw immediates in imm[0:N]
+# (float bit patterns or packed words) -> (kind, count).  Values ride the
+# DynamicCommand tuple verbatim; semantic float/range checks run per kind.
+_VECTOR_DYNAMIC = {
+    'vkCmdSetDepthBounds': ('bounds', 2),
+}
 
 
 def capture(engine, current, name, record):
     scalar = _SCALAR_DYNAMIC.get(name)
+    vector = _VECTOR_DYNAMIC.get(name)
     base = name in ('vkCmdSetViewport', 'vkCmdSetScissor')
     counted = name in ('vkCmdSetViewportWithCount', 'vkCmdSetScissorWithCount')
-    if not (base or counted or scalar):
+    if not (base or counted or scalar or vector):
         return None
+    if vector is not None:
+        kind, count = vector
+        # count raw immediates in imm[0:count]; no payload, chain or extra
+        # immediates.  'bounds' carries two fp32 bit patterns (min,max).
+        if (any(record['imm'][count:]) or record['pay'] or record['chain']):
+            raise ValueError('graphics dynamic %s exceeds profile' % kind)
+        values = tuple(record['imm'][:count])
+        if kind == 'bounds':
+            lo, hi = struct.unpack('<2f', struct.pack('<2I', *values))
+            if not (math.isfinite(lo) and math.isfinite(hi) and lo <= hi):
+                raise ValueError('graphics dynamic bounds floats exceed profile')
+        return DynamicCommand(*recording_identity(engine, current, record),
+                              kind, values)
     if scalar is not None:
         kind, lo, hi = scalar
         # single scalar immediate in imm[0]; no payload, chain or extra
@@ -109,7 +131,8 @@ def attach(out, snapshot):
 def validate(engine, context_id, snapshot):
     if (not isinstance(snapshot, DynamicCommand) or
             snapshot.kind not in ('viewport', 'scissor') +
-            tuple(_BOOL_DYNAMIC.values())):
+            tuple(_BOOL_DYNAMIC.values()) +
+            tuple(k for k, _c in _VECTOR_DYNAMIC.values())):
         raise KeyError('graphics dynamic identity is unavailable')
     validate_recording(engine, context_id, snapshot)
     return snapshot.values

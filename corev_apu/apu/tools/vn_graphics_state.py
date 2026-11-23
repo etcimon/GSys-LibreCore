@@ -20,10 +20,13 @@ class GraphicsState:
     # compare op is ALWAYS when the test is disabled so a lone depth write
     # still commits.  Stencil stays refused.
     depth: object = None
-    # optional bounded depth-bounds window (minDepthBounds, maxDepthBounds)
-    # when depthBoundsTestEnable=1: a covered fragment whose window-space
-    # depth falls outside [min, max] is discarded before colour/depth
-    # writeback.  Independent of the depth test; None keeps it off.
+    # optional bounded depth-bounds state whenever depth-stencil state
+    # exists: (depthBoundsTestEnable, minDepthBounds, maxDepthBounds).  A
+    # covered fragment whose window-space depth falls outside [min, max]
+    # is discarded before colour/depth writeback while the flag is set.
+    # The raw window is kept even when the flag is 0 so a dynamic
+    # VK_DYNAMIC_STATE_DEPTH_BOUNDS(_TEST_ENABLE) can re-enable it; None
+    # when the pipeline declares no depth-stencil state.
     bounds: object = None
     # optional bounded blend for the single active colour output:
     # (srcColorFactor, dstColorFactor, colorOp, srcAlphaFactor,
@@ -88,12 +91,17 @@ DYNAMIC_FRONT_FACE = 1000000000 + (268 - 1) * 1000 + 1
 DYNAMIC_DEPTH_TEST_ENABLE = 1000000000 + (268 - 1) * 1000 + 6
 DYNAMIC_DEPTH_WRITE_ENABLE = 1000000000 + (268 - 1) * 1000 + 7
 DYNAMIC_DEPTH_COMPARE_OP = 1000000000 + (268 - 1) * 1000 + 8
+DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE = 1000000000 + (268 - 1) * 1000 + 9
+# base VkDynamicState enums (vk.xml <enums> values, not extension offsets)
+DYNAMIC_DEPTH_BOUNDS = 5
 _DYNAMIC_ADMITTED = frozenset((DYNAMIC_PRIMITIVE_RESTART,
                              DYNAMIC_RASTERIZER_DISCARD,
                              DYNAMIC_CULL_MODE, DYNAMIC_FRONT_FACE,
                              DYNAMIC_DEPTH_TEST_ENABLE,
                              DYNAMIC_DEPTH_WRITE_ENABLE,
-                             DYNAMIC_DEPTH_COMPARE_OP))
+                             DYNAMIC_DEPTH_COMPARE_OP,
+                             DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE,
+                             DYNAMIC_DEPTH_BOUNDS))
 
 
 def validate(engine, fields, blobs, render_pass, subpass=0):
@@ -158,15 +166,18 @@ def validate(engine, fields, blobs, render_pass, subpass=0):
             # ops[i] is (front_i, back_i); regroup per face
             stencil = tuple(tuple(ops[f][i] for f in range(7))
                             for i in range(2))
-        if dbte:
-            bmin = struct.unpack('<f', struct.pack('<I',
-                one('minDepthBounds')))[0]
-            bmax = struct.unpack('<f', struct.pack('<I',
-                one('maxDepthBounds')))[0]
-            if not (math.isfinite(bmin) and math.isfinite(bmax) and
-                    bmin <= bmax):
-                raise ValueError('graphics fixed depth bounds exceed profile')
-            bounds = (bmin, bmax)
+        # keep the raw bounds window whenever depth-stencil state exists so a
+        # dynamic VK_DYNAMIC_STATE_DEPTH_BOUNDS(_TEST_ENABLE) can re-enable
+        # or re-window a test the create-info left off; bounds[0] is the
+        # fixed depthBoundsTestEnable flag, bounds[1:3] the (min,max) window.
+        bmin = struct.unpack('<f', struct.pack('<I',
+            one('minDepthBounds')))[0]
+        bmax = struct.unpack('<f', struct.pack('<I',
+            one('maxDepthBounds')))[0]
+        if not (math.isfinite(bmin) and math.isfinite(bmax) and
+                bmin <= bmax):
+            raise ValueError('graphics fixed depth bounds exceed profile')
+        bounds = (dbte, bmin, bmax)
     dynamic = blobs.get('pDynamicStates', ())
     dyn_count = one('dynamicStateCount')
     if (dyn_count != one('pDynamicStates') or dyn_count != len(dynamic) or

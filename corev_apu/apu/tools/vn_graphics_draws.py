@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from vn_graphics_bindings import GraphicsBindings
 from vn_graphics_dynamic import DynamicCommand, Recording, validate as dynamic_values
-from vn_graphics_dynamic import validate_recording, _BOOL_DYNAMIC
+from vn_graphics_dynamic import validate_recording, _BOOL_DYNAMIC, _VECTOR_DYNAMIC
 from vn_native_rendering import framebuffer_operand
 from vn_render_pass_commands import BeginPass, EndPass, NextPass
 from vn_vertex_operands import BufferBindings, BufferSource, operand as buffer_span
@@ -43,6 +43,8 @@ class DrawPlan(Recording):
     depth_test: object
     depth_write: object
     depth_compare: object
+    bounds_test: object
+    bounds: object
     vertices: tuple
     indices: object
     references: tuple
@@ -57,7 +59,8 @@ _BOOL_ATTR = {'primitive_restart': 'restart',
               'front_face': 'front_face',
               'depth_test': 'depth_test',
               'depth_write': 'depth_write',
-              'depth_compare': 'depth_compare'}
+              'depth_compare': 'depth_compare',
+              'bounds_test': 'bounds_test'}
 
 
 class GraphicsDraws:
@@ -75,6 +78,7 @@ class GraphicsDraws:
         self.viewport = self.scissor = None
         self.restart = self.discard = self.cull = self.front_face = None
         self.depth_test = self.depth_write = self.depth_compare = None
+        self.bounds_test = self.bounds = None
         self.vertices, self.index_source = {}, None
         self.pass_state = None
         self.subpass = 0
@@ -98,6 +102,8 @@ class GraphicsDraws:
             return self._dynamic(name, record)
         if name in _BOOL_DYNAMIC:
             return self._bool(record, _BOOL_DYNAMIC[name])
+        if name in _VECTOR_DYNAMIC:
+            return self._vector(record, _VECTOR_DYNAMIC[name][0])
         if name in ('vkCmdBindVertexBuffers', 'vkCmdBindVertexBuffers2'):
             return self._vertex_bindings(record)
         if name in ('vkCmdBindIndexBuffer', 'vkCmdBindIndexBuffer2'):
@@ -135,6 +141,15 @@ class GraphicsDraws:
             raise KeyError('graphics draw dynamic snapshot is unavailable')
         setattr(self, _BOOL_ATTR[kind],
                 dynamic_values(self.engine, self.context_id, snapshot)[0])
+        return True
+
+    def _vector(self, record, kind):
+        snapshot = record.get('native_graphics_dynamic')
+        if (not isinstance(snapshot, DynamicCommand) or
+                snapshot.kind != kind):
+            raise KeyError('graphics draw dynamic snapshot is unavailable')
+        setattr(self, kind,
+                dynamic_values(self.engine, self.context_id, snapshot))
         return True
 
     def _vertex_bindings(self, record):
@@ -336,4 +351,5 @@ class GraphicsDraws:
                 self.viewport, self.scissor, self.restart, self.discard,
                 self.cull, self.front_face,
                 self.depth_test, self.depth_write, self.depth_compare,
+                self.bounds_test, self.bounds,
                 vertices, indices, references, validate))

@@ -1895,11 +1895,13 @@ class DrawReplayTests(unittest.TestCase):
                                  'texel (%d,%d)' % (x, y))
 
     # vkCmdSetDepth* dynamic-state command -> VkDynamicState wire value
-    # (extension 268 offsets 6/7/8).
+    # (extension 268 offsets 6-9; DEPTH_BOUNDS is base enum 5).
     DYN_DEPTH_STATE = {
         'vkCmdSetDepthTestEnable': 1000267006,
         'vkCmdSetDepthWriteEnable': 1000267007,
         'vkCmdSetDepthCompareOp': 1000267008,
+        'vkCmdSetDepthBoundsTestEnable': 1000267009,
+        'vkCmdSetDepthBounds': 5,
     }
 
     def dyn_depth_prepared(self, commands, depth_load=0, depth_clear=None,
@@ -2697,6 +2699,71 @@ class DrawReplayTests(unittest.TestCase):
         for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
             self.assertEqual(self.read_texel(x, y), self.fc_texel(x, y))
             self.assertAlmostEqual(self.read_depth(x, y), 0.5, places=6)
+
+    @staticmethod
+    def fbits(v):
+        return struct.unpack('<I', struct.pack('<f', v))[0]
+
+    def test_draw_dynamic_depth_bounds_disable_passes(self):
+        # vkCmdSetDepthBoundsTestEnable(0) overrides create-info
+        # depthBoundsTestEnable=1: the [0.0,0.4] window that would reject
+        # z_win 0.5 is disabled, so covered fragments pass the ALWAYS depth
+        # compare and write colour + depth.
+        self.upload(self.ndc_triangle())
+        self.seed_depth(1.0)
+        self.dyn_depth_prepared(
+            [('vkCmdSetDepthBoundsTestEnable',
+              dict(depthBoundsTestEnable=0))],
+            compare=7, write=1, depth_test=1, bounds=(0.0, 0.4))
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.fc_texel(x, y))
+            self.assertAlmostEqual(self.read_depth(x, y), 0.5, places=6)
+
+    def test_draw_dynamic_depth_bounds_enable_and_window(self):
+        # vkCmdSetDepthBoundsTestEnable(1) + vkCmdSetDepthBounds(0.6,1.0) on
+        # a pipeline whose create-info left bounds off re-window the depth
+        # test: z_win 0.5 falls outside [0.6,1.0] so fragments are rejected
+        # before writeback — colour keeps clear, depth keeps the 1.0 seed.
+        self.upload(self.ndc_triangle())
+        self.seed_depth(1.0)
+        self.dyn_depth_prepared(
+            [('vkCmdSetDepthBoundsTestEnable',
+              dict(depthBoundsTestEnable=1)),
+             ('vkCmdSetDepthBounds',
+              dict(minDepthBounds=self.fbits(0.6),
+                   maxDepthBounds=self.fbits(1.0)))],
+            compare=7, write=1, depth_test=1, bounds=None)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        for x, y in ((0, 0), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.clear_texel())
+            self.assertAlmostEqual(self.read_depth(x, y), 1.0, places=6)
+
+    def test_draw_dynamic_depth_bounds_rewindow(self):
+        # vkCmdSetDepthBounds(0.6,1.0) overrides the create-info [0.0,1.0]
+        # window: z_win 0.5 now falls outside and is rejected, where the
+        # static window would have passed it.
+        self.upload(self.ndc_triangle())
+        self.seed_depth(1.0)
+        self.dyn_depth_prepared(
+            [('vkCmdSetDepthBounds',
+              dict(minDepthBounds=self.fbits(0.6),
+                   maxDepthBounds=self.fbits(1.0)))],
+            compare=7, write=1, depth_test=1, bounds=(0.0, 1.0))
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        for x, y in ((0, 0), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.clear_texel())
+            self.assertAlmostEqual(self.read_depth(x, y), 1.0, places=6)
 
     # ---- bounded MRT (two colour attachments) end-to-end ----
     # fs_program2 emits loc0=vcol, loc1=const; the single Writeback stage

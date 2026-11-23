@@ -25,7 +25,9 @@ from vn_graphics_state import (DYNAMIC_PRIMITIVE_RESTART,
                                DYNAMIC_CULL_MODE, DYNAMIC_FRONT_FACE,
                                DYNAMIC_DEPTH_TEST_ENABLE,
                                DYNAMIC_DEPTH_WRITE_ENABLE,
-                               DYNAMIC_DEPTH_COMPARE_OP)
+                               DYNAMIC_DEPTH_COMPARE_OP,
+                               DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE,
+                               DYNAMIC_DEPTH_BOUNDS)
 
 
 def _push(stages):
@@ -177,6 +179,22 @@ def operation(engine, context_id, plan, remember, guards):
     front_face = fixed.front_face
     if (DYNAMIC_FRONT_FACE in fixed.dynamic and plan.front_face is not None):
         front_face = plan.front_face
+    # vkCmdSetDepthBoundsTestEnable / vkCmdSetDepthBounds override the
+    # pipeline depth-bounds window only when the pipeline declared the
+    # matching VkDynamicState; unset commands keep create-info values.  The
+    # enable flag and the (min,max) window are tracked independently so a
+    # dynamic enable can re-window a test the create-info left off.
+    bounds = None
+    if fixed.bounds is not None:
+        bounds_enable, bmin, bmax = fixed.bounds
+        if (DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE in fixed.dynamic and
+                plan.bounds_test is not None):
+            bounds_enable = plan.bounds_test
+        if (DYNAMIC_DEPTH_BOUNDS in fixed.dynamic and
+                plan.bounds is not None):
+            bmin, bmax = struct.unpack('<2f', struct.pack('<2I',
+                *plan.bounds))
+        bounds = (bmin, bmax) if bounds_enable else None
     fetch = Fetch(indexed, plan.indices, vertices, direct, indirect,
                   restart)
     viewport = struct.unpack('<6f', struct.pack('<6I', *plan.viewport))
@@ -193,7 +211,7 @@ def operation(engine, context_id, plan, remember, guards):
                   write_mask=fixed.color_masks[location],
                   logic_op=fixed.logic_op, discard=discard,
                   extra_targets=extra_targets,
-                  bounds=fixed.bounds, depth_bias=fixed.depth_bias,
+                  bounds=bounds, depth_bias=fixed.depth_bias,
                   depth_clamp=fixed.depth_clamp, poly_mode=fixed.poly_mode,
                   topology=fixed.topology, depth_fmt=depth_fmt,
                   stencil=fixed.stencil, blend_extra=fixed.blend_extra)
