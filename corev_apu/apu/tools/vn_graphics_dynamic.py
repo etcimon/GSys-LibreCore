@@ -20,28 +20,33 @@ class DynamicCommand(Recording):
     values: tuple
 
 
-# vkCmdSet* dynamic-state commands carrying a single VkBool32 immediate in
-# imm[0] (no payload/chain/extra immediates) -> DynamicCommand kind.
-_BOOL_DYNAMIC = {
-    'vkCmdSetPrimitiveRestartEnable': 'primitive_restart',
-    'vkCmdSetRasterizerDiscardEnable': 'rasterizer_discard',
+# vkCmdSet* dynamic-state commands carrying a single scalar immediate in
+# imm[0] (no payload/chain/extra immediates) -> (kind, valid lo, hi).
+# Bool commands bound to (0,1); enum commands bound to their Vk* range.
+_SCALAR_DYNAMIC = {
+    'vkCmdSetPrimitiveRestartEnable': ('primitive_restart', 0, 1),
+    'vkCmdSetRasterizerDiscardEnable': ('rasterizer_discard', 0, 1),
+    'vkCmdSetCullMode': ('cull', 0, 3),
+    'vkCmdSetFrontFace': ('front_face', 0, 1),
 }
+_BOOL_DYNAMIC = {n: k for n, (k, _lo, _hi) in _SCALAR_DYNAMIC.items()}
 
 
 def capture(engine, current, name, record):
-    bool_kind = _BOOL_DYNAMIC.get(name)
+    scalar = _SCALAR_DYNAMIC.get(name)
     base = name in ('vkCmdSetViewport', 'vkCmdSetScissor')
     counted = name in ('vkCmdSetViewportWithCount', 'vkCmdSetScissorWithCount')
-    if not (base or counted or bool_kind):
+    if not (base or counted or scalar):
         return None
-    if bool_kind is not None:
-        # single VkBool32 immediate in imm[0]; no payload, chain or extra
-        # immediates — the bounded profile admits only the 0/1 domain.
-        if (record['imm'][0] not in (0, 1) or any(record['imm'][1:]) or
+    if scalar is not None:
+        kind, lo, hi = scalar
+        # single scalar immediate in imm[0]; no payload, chain or extra
+        # immediates — bounded to the command's Vk* value domain.
+        if (not lo <= record['imm'][0] <= hi or any(record['imm'][1:]) or
                 record['pay'] or record['chain']):
-            raise ValueError('graphics dynamic %s exceeds profile' % bool_kind)
+            raise ValueError('graphics dynamic %s exceeds profile' % kind)
         return DynamicCommand(*recording_identity(engine, current, record),
-                              bool_kind, (record['imm'][0],))
+                              kind, (record['imm'][0],))
     viewport = 'Viewport' in name
     # base carries {first,count} in imm[0:2]; *WithCount drops first and
     # carries only count in imm[0] (always writes slots [0,count)).  The

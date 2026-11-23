@@ -1844,6 +1844,54 @@ class DrawReplayTests(unittest.TestCase):
         self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
         self.f.end()
 
+    def dyn_cull_prepared(self, cull_mode):
+        # vkCmdSetCullMode dynamic state: the pipeline declares
+        # VK_DYNAMIC_STATE_CULL_MODE (wire 1000267000) so the command value
+        # overrides the (ignored) create-info cullMode.
+        self.pipeline(dynamic=[0, 1, 1000267000])
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdSetCullMode', commandBuffer=self.f.CB,
+                       cullMode=cull_mode)
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
+    def dyn_front_face_prepared(self, front_face, cull=2):
+        # vkCmdSetFrontFace dynamic state: the pipeline declares
+        # VK_DYNAMIC_STATE_FRONT_FACE (wire 1000267001); create-info cullMode
+        # stays fixed at `cull` so the winding swap changes the cull verdict.
+        self.pipeline(cull=cull, front=0, dynamic=[0, 1, 1000267001])
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdSetFrontFace', commandBuffer=self.f.CB,
+                       frontFace=front_face)
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
+    def ndc_clip_coverage(self, front_ccw, cull):
+        # golden coverage for the single ndc_triangle under the given
+        # front-face/cull raster state (clip z/w are the pipeline defaults).
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        clip = [(x, y, 0.5, 1.0) for (x, y), _col in self.ndc_triangle()]
+        return vn_golden.gfx_tri_coverage(clip, vp, sc, cw, ch,
+                                          front_ccw, cull)
+
+    def assert_cleared(self, job):
+        self.assertEqual(job.state, 'done')
+        stats = job.drawexec_stats[job.operation - 1]
+        self.assertEqual(stats['records'], 0)
+        for x in range(8):
+            for y in range(4):
+                self.assertEqual(self.read_texel(x, y), self.clear_texel(),
+                                 'texel (%d,%d)' % (x, y))
+
     def indexed_coverage(self, clip, indices):
         # clip = per-vertex clip positions; indices select/reorder them
         # into TRIANGLE_LIST triples for the golden coverage union.
@@ -2499,6 +2547,54 @@ class DrawReplayTests(unittest.TestCase):
         self.assertGreater(stats['records'], 0)
         for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
             self.assertEqual(self.read_texel(x, y), self.fc_texel(x, y))
+
+    def test_draw_dynamic_cull_back_culls_triangle(self):
+        # vkCmdSetCullMode(BACK) overrides the create-info cull=0: the
+        # back-facing ndc_triangle is culled before rasterization, so zero
+        # fragment records reach writeback and the framebuffer keeps clear.
+        self.upload(self.ndc_triangle())
+        self.dyn_cull_prepared(2)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assert_cleared(job)
+
+    def test_draw_dynamic_cull_none_covers(self):
+        # vkCmdSetCullMode(NONE) keeps normal rasterization: identical to the
+        # static cull=0 path (dynamic off == create-info default).
+        self.upload(self.ndc_triangle())
+        self.dyn_cull_prepared(0)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        stats = job.drawexec_stats[job.operation - 1]
+        self.assertGreater(stats['records'], 0)
+        self.check_fb_coverage(self.ndc_clip_coverage(1, 0))
+
+    def test_draw_dynamic_front_face_swap_covers(self):
+        # vkCmdSetFrontFace(CLOCKWISE) flips front_ccw 1->0: under the fixed
+        # cullMode=BACK the triangle becomes front-facing and is kept, where
+        # the create-info front=CCW would have culled it.
+        self.upload(self.ndc_triangle())
+        self.dyn_front_face_prepared(1, cull=2)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        stats = job.drawexec_stats[job.operation - 1]
+        self.assertGreater(stats['records'], 0)
+        self.check_fb_coverage(self.ndc_clip_coverage(0, 2))
+
+    def test_draw_dynamic_front_face_keep_culls(self):
+        # vkCmdSetFrontFace(CCW) keeps front_ccw=1: the back-facing triangle
+        # stays culled under fixed cullMode=BACK — clear framebuffer.
+        self.upload(self.ndc_triangle())
+        self.dyn_front_face_prepared(0, cull=2)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assert_cleared(job)
 
     # ---- bounded MRT (two colour attachments) end-to-end ----
     # fs_program2 emits loc0=vcol, loc1=const; the single Writeback stage

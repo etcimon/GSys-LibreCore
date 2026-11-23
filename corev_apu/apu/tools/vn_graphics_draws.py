@@ -38,6 +38,8 @@ class DrawPlan(Recording):
     scissor: tuple
     restart: object
     discard: object
+    cull: object
+    front_face: object
     vertices: tuple
     indices: object
     references: tuple
@@ -45,9 +47,11 @@ class DrawPlan(Recording):
 
 
 # DynamicCommand kind -> GraphicsDraws shadow attribute for the single-
-# VkBool32 dynamic-state commands.
+# scalar dynamic-state commands.
 _BOOL_ATTR = {'primitive_restart': 'restart',
-              'rasterizer_discard': 'discard'}
+              'rasterizer_discard': 'discard',
+              'cull': 'cull',
+              'front_face': 'front_face'}
 
 
 class GraphicsDraws:
@@ -63,7 +67,7 @@ class GraphicsDraws:
         self.device = recording.device
         self.bindings = GraphicsBindings(engine, context_id, recording)
         self.viewport = self.scissor = None
-        self.restart = self.discard = None
+        self.restart = self.discard = self.cull = self.front_face = None
         self.vertices, self.index_source = {}, None
         self.pass_state = None
         self.subpass = 0
@@ -323,4 +327,5 @@ class GraphicsDraws:
                 name, values, indirect_op, snapshot, operands, self.pass_state,
                 self.subpass, framebuffer.attachments, framebuffer,
                 self.viewport, self.scissor, self.restart, self.discard,
+                self.cull, self.front_face,
                 vertices, indices, references, validate))

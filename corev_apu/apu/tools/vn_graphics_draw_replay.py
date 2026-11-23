@@ -21,7 +21,8 @@ import struct
 from vn_graphics_drawexec import DrawExec
 from vn_graphics_fetch import Fetch, FetchVertex
 from vn_graphics_state import (DYNAMIC_PRIMITIVE_RESTART,
-                               DYNAMIC_RASTERIZER_DISCARD)
+                               DYNAMIC_RASTERIZER_DISCARD,
+                               DYNAMIC_CULL_MODE, DYNAMIC_FRONT_FACE)
 
 
 def _push(stages):
@@ -149,6 +150,15 @@ def operation(engine, context_id, plan, remember, guards):
     if (DYNAMIC_RASTERIZER_DISCARD in fixed.dynamic and
             plan.discard is not None):
         discard = plan.discard
+    # vkCmdSetCullMode / vkCmdSetFrontFace override the pipeline rasterizer
+    # face state only when the pipeline declared the matching VkDynamicState;
+    # an unset dynamic command keeps the create-info value.
+    cull = fixed.cull
+    if (DYNAMIC_CULL_MODE in fixed.dynamic and plan.cull is not None):
+        cull = plan.cull
+    front_face = fixed.front_face
+    if (DYNAMIC_FRONT_FACE in fixed.dynamic and plan.front_face is not None):
+        front_face = plan.front_face
     fetch = Fetch(indexed, plan.indices, vertices, direct, indirect,
                   restart)
     viewport = struct.unpack('<6f', struct.pack('<6I', *plan.viewport))
@@ -159,8 +169,8 @@ def operation(engine, context_id, plan, remember, guards):
                   attachment.fmt, vs_push=vs_push, fs_push=fs_push,
                   vs_bindings=vs_bindings, fs_bindings=fs_bindings,
                   flat=snapshot.flat, nopersp=snapshot.nopersp,
-                  front_ccw=1 - fixed.front_face,
-                  cull=fixed.cull, location=location, depth=depth,
+                  front_ccw=1 - front_face,
+                  cull=cull, location=location, depth=depth,
                   blend=fixed.blend,
                   write_mask=fixed.color_masks[location],
                   logic_op=fixed.logic_op, discard=discard,

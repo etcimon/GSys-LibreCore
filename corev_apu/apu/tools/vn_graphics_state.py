@@ -83,8 +83,11 @@ class GraphicsState:
 # whose vkCmdSet* command has golden modeling may be declared here.
 DYNAMIC_PRIMITIVE_RESTART = 1000000000 + (378 - 1) * 1000 + 4
 DYNAMIC_RASTERIZER_DISCARD = 1000000000 + (378 - 1) * 1000 + 1
+DYNAMIC_CULL_MODE = 1000000000 + (268 - 1) * 1000 + 0
+DYNAMIC_FRONT_FACE = 1000000000 + (268 - 1) * 1000 + 1
 _DYNAMIC_ADMITTED = frozenset((DYNAMIC_PRIMITIVE_RESTART,
-                             DYNAMIC_RASTERIZER_DISCARD))
+                             DYNAMIC_RASTERIZER_DISCARD,
+                             DYNAMIC_CULL_MODE, DYNAMIC_FRONT_FACE))
 
 
 def validate(engine, fields, blobs, render_pass, subpass=0):
