@@ -104,6 +104,8 @@ DYNAMIC_STENCIL_OP = 1000000000 + (268 - 1) * 1000 + 11
 DYNAMIC_STENCIL_COMPARE_MASK = 6
 DYNAMIC_STENCIL_WRITE_MASK = 7
 DYNAMIC_STENCIL_REFERENCE = 8
+# base VkDynamicState enum for the pipeline-global blend constants
+DYNAMIC_BLEND_CONSTANTS = 4
 # base VkDynamicState enums (vk.xml <enums> values, not extension offsets)
 DYNAMIC_DEPTH_BOUNDS = 5
 DYNAMIC_DEPTH_BIAS = 3
@@ -120,7 +122,8 @@ _DYNAMIC_ADMITTED = frozenset((DYNAMIC_PRIMITIVE_RESTART,
                              DYNAMIC_STENCIL_TEST_ENABLE, DYNAMIC_STENCIL_OP,
                              DYNAMIC_STENCIL_COMPARE_MASK,
                              DYNAMIC_STENCIL_WRITE_MASK,
-                             DYNAMIC_STENCIL_REFERENCE))
+                             DYNAMIC_STENCIL_REFERENCE,
+                             DYNAMIC_BLEND_CONSTANTS))
 
 
 def validate(engine, fields, blobs, render_pass, subpass=0):

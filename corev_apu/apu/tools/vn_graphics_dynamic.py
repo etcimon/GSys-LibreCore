@@ -58,8 +58,22 @@ def capture(engine, current, name, record):
     vector = _VECTOR_DYNAMIC.get(name)
     base = name in ('vkCmdSetViewport', 'vkCmdSetScissor')
     counted = name in ('vkCmdSetViewportWithCount', 'vkCmdSetScissorWithCount')
-    if not (base or counted or scalar or vector):
+    blend_constants = name == 'vkCmdSetBlendConstants'
+    if not (base or counted or scalar or vector or blend_constants):
         return None
+    if blend_constants:
+        # the four fp32 blend constants ride the command payload verbatim
+        # (VkCmdSetBlendConstants carries const float blendConstants[4]);
+        # no immediates, chain or extra payload words are admitted.
+        if (any(record['imm']) or len(record['pay']) != 4 or record['chain']):
+            raise ValueError(
+                'graphics dynamic blend_constants exceeds profile')
+        floats = struct.unpack('<4f', struct.pack('<4I', *record['pay']))
+        if not all(math.isfinite(v) for v in floats):
+            raise ValueError(
+                'graphics dynamic blend_constants floats exceed profile')
+        return DynamicCommand(*recording_identity(engine, current, record),
+                              'blend_constants', tuple(record['pay']))
     if vector is not None:
         kind, count = vector
         # count raw immediates in imm[0:count]; no payload, chain or extra
@@ -154,7 +168,8 @@ def attach(out, snapshot):
 
 def validate(engine, context_id, snapshot):
     if (not isinstance(snapshot, DynamicCommand) or
-            snapshot.kind not in ('viewport', 'scissor') +
+            snapshot.kind not in ('viewport', 'scissor',
+                                  'blend_constants') +
             tuple(_BOOL_DYNAMIC.values()) +
             tuple(k for k, _c in _VECTOR_DYNAMIC.values())):
         raise KeyError('graphics dynamic identity is unavailable')

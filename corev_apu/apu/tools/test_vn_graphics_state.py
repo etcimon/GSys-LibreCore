@@ -159,7 +159,7 @@ class GraphicsStateTests(unittest.TestCase):
         self.assertEqual(snapshot.fixed.topology, 2)
 
     def test_dynamic_state_counts_duplicates_and_unknowns_fail(self):
-        for states in ([0, 0], [0, 2], [], [0, 1, 4]):
+        for states in ([0, 0], [0, 2], [], [0, 1, 999]):
             with self.subTest(states=states):
                 self.refuses({'pDynamicState': dict(dynamicStateCount=len(states),
                                                    pDynamicStates=states)})

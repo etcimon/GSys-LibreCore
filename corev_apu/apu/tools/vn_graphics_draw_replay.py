@@ -33,7 +33,8 @@ from vn_graphics_state import (DYNAMIC_PRIMITIVE_RESTART,
                                DYNAMIC_STENCIL_TEST_ENABLE, DYNAMIC_STENCIL_OP,
                                DYNAMIC_STENCIL_COMPARE_MASK,
                                DYNAMIC_STENCIL_WRITE_MASK,
-                               DYNAMIC_STENCIL_REFERENCE)
+                               DYNAMIC_STENCIL_REFERENCE,
+                               DYNAMIC_BLEND_CONSTANTS)
 
 
 def _push(stages):
@@ -262,6 +263,19 @@ def operation(engine, context_id, plan, remember, guards):
     if (DYNAMIC_PRIMITIVE_TOPOLOGY in fixed.dynamic and
             plan.topology is not None):
         topology = plan.topology
+    # vkCmdSetBlendConstants overrides the pipeline-global k0..k3 words only
+    # when the pipeline declared VK_DYNAMIC_STATE_BLEND_CONSTANTS; the four
+    # fp32 words sit at indices 7..10 of each per-attachment blend tuple.
+    blend = fixed.blend
+    blend_extra = fixed.blend_extra
+    if (DYNAMIC_BLEND_CONSTANTS in fixed.dynamic and
+            plan.blend_constants is not None):
+        k = plan.blend_constants
+        def reconst(state):
+            return None if state is None else state[:7] + tuple(k)
+        blend = reconst(blend)
+        if blend_extra is not None:
+            blend_extra = tuple(reconst(s) for s in blend_extra)
     fetch = Fetch(indexed, plan.indices, vertices, direct, indirect,
                   restart)
     viewport = struct.unpack('<6f', struct.pack('<6I', *plan.viewport))
@@ -274,14 +288,14 @@ def operation(engine, context_id, plan, remember, guards):
                   flat=snapshot.flat, nopersp=snapshot.nopersp,
                   front_ccw=1 - front_face,
                   cull=cull, location=location, depth=depth,
-                  blend=fixed.blend,
+                  blend=blend,
                   write_mask=fixed.color_masks[location],
                   logic_op=fixed.logic_op, discard=discard,
                   extra_targets=extra_targets,
                   bounds=bounds, depth_bias=depth_bias,
                   depth_clamp=fixed.depth_clamp, poly_mode=fixed.poly_mode,
                   topology=topology, depth_fmt=depth_fmt,
-                  stencil=stencil, blend_extra=fixed.blend_extra)
+                  stencil=stencil, blend_extra=blend_extra)
     for ref, kind in plan.references:
         remember(ref, kind)
     guards.append(plan.validate)

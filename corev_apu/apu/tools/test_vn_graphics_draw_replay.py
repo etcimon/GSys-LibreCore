@@ -1972,6 +1972,23 @@ class DrawReplayTests(unittest.TestCase):
         self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
         self.f.end()
 
+    def dyn_blend_constants_prepared(self, blend, clear, blend_constants,
+                                     dynamic_constants, **draw_kw):
+        # the pipeline declares VK_DYNAMIC_STATE_BLEND_CONSTANTS (base enum
+        # 4); vkCmdSetBlendConstants overrides the create-info k0..k3 words.
+        # blend_constants/dynamic_constants are fp32 bit-pattern lists.
+        self.pipeline(blend=blend, blend_constants=blend_constants,
+                      dynamic=[0, 1, 4])
+        self.begin_pass(clear=clear)
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdSetBlendConstants', commandBuffer=self.f.CB,
+                       blendConstants=dynamic_constants)
+        self.draw(**draw_kw)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
     def indexed_coverage(self, clip, indices):
         # clip = per-vertex clip positions; indices select/reorder them
         # into TRIANGLE_LIST triples for the golden coverage union.
@@ -2974,6 +2991,32 @@ class DrawReplayTests(unittest.TestCase):
             self.assertEqual(self.read_ds(x, y) >> 24, 0xC3)
         w = self.read_ds(7, 3)
         self.assertEqual(w >> 24, 0)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_draw_dynamic_blend_constants_override(self):
+        # vkCmdSetBlendConstants overrides the create-info k0..k3: CONSTANT_
+        # COLOR/1M_CONSTANT_COLOR factors read the dynamic (1,0,0,1) words
+        # instead of the create-info (0.5,0.5,0.5,1.0) set.
+        self.upload(self.ndc_triangle())
+        blend = dict(blendEnable=1, srcColorBlendFactor=10,
+                     dstColorBlendFactor=11, colorBlendOp=0,
+                     srcAlphaBlendFactor=1, dstAlphaBlendFactor=0,
+                     alphaBlendOp=0, colorWriteMask=15)
+        clear = [0x3E800000, 0x3E800000, 0, 0x3F800000]
+        dyn = [0x3F800000, 0, 0, 0x3F800000]  # 1.0,0.0,0.0,1.0
+        self.dyn_blend_constants_prepared(
+            blend, clear, [0x3F000000] * 3 + [0x3F800000], dyn)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        kw = dict(sf=10, df=11, cop=0, saf=1, daf=0, aop=0, mask=15,
+                  konst=(1.0, 0.0, 0.0, 1.0))
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y),
+                             self.blend_fc_texel(x, y, clear, **kw))
+        self.assertEqual(self.read_texel(7, 3), self.blend_clear_texel(clear))
         self.assertEqual(self.f.owner.work_refs, 0)
 
     # ---- bounded MRT (two colour attachments) end-to-end ----

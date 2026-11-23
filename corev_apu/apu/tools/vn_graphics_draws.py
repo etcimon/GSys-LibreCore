@@ -53,6 +53,7 @@ class DrawPlan(Recording):
     stencil_compare_mask: object
     stencil_write_mask: object
     stencil_reference: object
+    blend_constants: object
     vertices: tuple
     indices: object
     references: tuple
@@ -94,6 +95,7 @@ class GraphicsDraws:
         self.topology = None
         self.stencil_test = self.stencil_op = self.stencil_compare_mask = None
         self.stencil_write_mask = self.stencil_reference = None
+        self.blend_constants = None
         self.vertices, self.index_source = {}, None
         self.pass_state = None
         self.subpass = 0
@@ -119,6 +121,8 @@ class GraphicsDraws:
             return self._bool(record, _BOOL_DYNAMIC[name])
         if name in _VECTOR_DYNAMIC:
             return self._vector(record, _VECTOR_DYNAMIC[name][0])
+        if name == 'vkCmdSetBlendConstants':
+            return self._vector(record, 'blend_constants')
         if name in ('vkCmdBindVertexBuffers', 'vkCmdBindVertexBuffers2'):
             return self._vertex_bindings(record)
         if name in ('vkCmdBindIndexBuffer', 'vkCmdBindIndexBuffer2'):
@@ -370,5 +374,5 @@ class GraphicsDraws:
                 self.depth_bias_enable, self.depth_bias, self.topology,
                 self.stencil_test, self.stencil_op,
                 self.stencil_compare_mask, self.stencil_write_mask,
-                self.stencil_reference,
+                self.stencil_reference, self.blend_constants,
                 vertices, indices, references, validate))
