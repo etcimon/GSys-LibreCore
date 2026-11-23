@@ -479,12 +479,22 @@ package build_config_pkg;
     // (can still force-off only by also disabling OoO). Explicit MemDepPredEn=1 keeps on for slice/etc.
     cfg.MemDepPredEn = CVA6Cfg.MemDepPredEn || CVA6Cfg.OoOEn;
     cfg.L3En = CVA6Cfg.L3En;
+`ifdef G6LC_STORAMIC_L3
+    // Storamic W1 qualification overlay: single-core L2+L3 (SRAM tags,
+    // inclusive, posted writes, write-update, L2+L3 prefetchers, CMO).
+    cfg.L2En = 1'b1;
+    cfg.L3En = 1'b1;
+`elsif G6LC_STORAMIC_L2
+    // Storamic W1 qualification overlay: single-core L2 (flop tags, posted
+    // writes, write-update, L2 prefetcher, CMO).
+    cfg.L2En = 1'b1;
+`endif
     // --- Shared L2/L3 geometry inference (0 = auto from NrCores) -------------
     // Model: shared inclusive L2 below private L1s, shared L3 below L2.
     //   L2 ≈ max(256 KiB, NrCores × 128 KiB), 8-way, 64 B line, MSHR ~ 4×cores
     //   L3 ≈ max(2 MiB,  NrCores × 1 MiB),   16-way, match L2 line, MSHR ~ 4×cores
     //   Prefetch streams ≈ max(4, 2×NrCores); snoop-filter entries ≈ 64×NrCores
-    if (CVA6Cfg.L2En) begin
+    if (cfg.L2En) begin
       if (CVA6Cfg.L2ByteSize == 0) begin
         automatic int unsigned l2 = cfg.NrCores * 32'd131072; // 128 KiB / core
         if (l2 < 32'd262144) l2 = 32'd262144;
@@ -507,7 +517,7 @@ package build_config_pkg;
       cfg.L2MshrDepth = CVA6Cfg.L2MshrDepth;
       cfg.L2DataBanks = CVA6Cfg.L2DataBanks;
     end
-    if (CVA6Cfg.L3En) begin
+    if (cfg.L3En) begin
       if (CVA6Cfg.L3ByteSize == 0) begin
         automatic int unsigned l3 = cfg.NrCores * 32'd1048576; // 1 MiB / core
         if (l3 < 32'd2097152) l3 = 32'd2097152;
@@ -563,6 +573,26 @@ package build_config_pkg;
                              ? CVA6Cfg.L2PfMaxOutstanding : 1;
     cfg.L2PfQuiet    = (CVA6Cfg.L2PfQuiet != 0) ? CVA6Cfg.L2PfQuiet : 8;
     cfg.L3PrefetchEn   = CVA6Cfg.L3PrefetchEn;
+`ifdef G6LC_STORAMIC_L3
+    cfg.WtAxiAllocEn    = 1'b1;
+    cfg.L2RoundRobinEn  = 1'b1;
+    cfg.L3InclusiveEn   = 1'b1;
+    cfg.L2TagSramEn     = 1'b1;
+    cfg.L2WriteUpdateEn = 1'b1;
+    cfg.L2CmoEn         = 1'b1;
+    cfg.L2PostedWriteEn = 1'b1;
+    cfg.L2PrefetchEn    = 1'b1;
+    cfg.L2PfStrideEn    = 1'b1;
+    cfg.L3PrefetchEn    = 1'b1;
+`elsif G6LC_STORAMIC_L2
+    cfg.WtAxiAllocEn    = 1'b1;
+    cfg.L2RoundRobinEn  = 1'b1;
+    cfg.L2WriteUpdateEn = 1'b1;
+    cfg.L2CmoEn         = 1'b1;
+    cfg.L2PostedWriteEn = 1'b1;
+    cfg.L2PrefetchEn    = 1'b1;
+    cfg.L2PfStrideEn    = 1'b1;
+`endif
     // Multi-core snoop-filter / prefetch defaults when left zero
     if (cfg.NrCores > 1 && CVA6Cfg.SnoopFilterEn && CVA6Cfg.SnoopFilterEntries == 0)
       cfg.SnoopFilterEntries = cfg.NrCores * 64;

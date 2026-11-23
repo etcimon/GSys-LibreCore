@@ -1109,9 +1109,11 @@ package config_pkg;
   /// sense for all parameters, here is the place to sanity check them.
   // Internal data-origin encoding. 000 is unknown/legacy, never M authority.
   function automatic bit g6lc_storamic_origin_supported(cva6_cfg_t Cfg);
-    return Cfg.StoramicEn && Cfg.StoramicIoEn && Cfg.StoramicCheckpointEn && Cfg.NrHarts == 1 &&
+    return Cfg.StoramicEn && Cfg.StoramicIoEn && Cfg.StoramicCheckpointEn &&
+        Cfg.NrHarts == 1 && Cfg.NrCores <= 1 &&
         !Cfg.OoOEn && !Cfg.RVH && Cfg.DCacheType == WT &&
-        !Cfg.EnableAccelerator && Cfg.CoproType == COPRO_NONE;
+        !Cfg.EnableAccelerator && Cfg.CoproType == COPRO_NONE &&
+        !Cfg.AiCfg.MatrixEn && !Cfg.ServerPrefetchEn;
   endfunction
 
   function automatic logic [2:0] g6lc_storamic_data_prot(

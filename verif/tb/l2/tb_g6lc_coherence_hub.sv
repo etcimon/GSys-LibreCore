@@ -1732,7 +1732,9 @@ module tb_g6lc_coherence_l2;
       .l2_posted_hold_o(),
       .l2_evict_valid_o(),.l2_evict_addr_o(),.l2_evict_ready_i(1'b1),
       .l2_back_inval_valid_i(cmo_l2_v),.l2_back_inval_addr_i(cmo_l2_a),
-      .l2_back_inval_ready_o(cmo_l2_rdy),.l2_write_idle_o(cmo_l2_idle));
+      .l2_back_inval_ready_o(cmo_l2_rdy),.l2_write_idle_o(cmo_l2_idle),
+      .l2_quiesce_i(1'b0),.l2_block_slv_i(1'b0),.l2_idle_o(),
+      .l2_inval_all_i(1'b0),.l2_inval_all_done_o());
   if (USE_L3) begin : gen_l3_stack
     req_t cut_req,l3_slv_req,l3_mst_req;
     resp_t cut_rsp;
@@ -1766,7 +1768,9 @@ module tb_g6lc_coherence_l2;
       .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1),
       .l3_write_idle_o(cmo_l3_idle),
       .l3_back_inval_valid_i(cmo_l3_v),.l3_back_inval_addr_i(cmo_l3_a),
-      .l3_back_inval_ready_o(cmo_l3_rdy)
+      .l3_back_inval_ready_o(cmo_l3_rdy),
+      .l3_quiesce_i(1'b0),.l3_block_slv_i(1'b0),.l3_idle_o(),
+      .l3_inval_all_i(1'b0),.l3_inval_all_done_o()
     );
     always_comb begin
       dram_req=l3_mst_req;
@@ -2402,7 +2406,9 @@ module tb_g6lc_coherence_credits;
       .l2_posted_hold_o(),
       .l2_evict_valid_o(),.l2_evict_addr_o(),.l2_evict_ready_i(1'b1),
       .l2_back_inval_valid_i(1'b0),.l2_back_inval_addr_i('0),.l2_back_inval_ready_o(),
-      .l2_write_idle_o());
+      .l2_write_idle_o(),
+      .l2_quiesce_i(1'b0),.l2_block_slv_i(1'b0),.l2_idle_o(),
+      .l2_inval_all_i(1'b0),.l2_inval_all_done_o());
   if (USE_L3) begin : gen_l3_stack
     req_t cut_req;
     resp_t cut_rsp;
@@ -2432,7 +2438,9 @@ module tb_g6lc_coherence_credits;
       .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1),
       .l3_write_idle_o(),
       .l3_back_inval_valid_i(1'b0),.l3_back_inval_addr_i('0),
-      .l3_back_inval_ready_o()
+      .l3_back_inval_ready_o(),
+      .l3_quiesce_i(1'b0),.l3_block_slv_i(1'b0),.l3_idle_o(),
+      .l3_inval_all_i(1'b0),.l3_inval_all_done_o()
     );
   end else begin : gen_no_l3
     assign dram_req=l2m_req;

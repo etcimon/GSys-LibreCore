@@ -70,7 +70,8 @@ module tb_g6lc_l2_tag_miter;
       .write_tag_i(write_tag), .write_valid_i(write_valid),
       .inval_i(1'b0), .inval_index_i('0), .inval_way_i('0),
       .inval_match_i(inval), .inval_match_index_i(inval_index),
-      .inval_match_tag_i(inval_tag), .inval_match_hit_o(imh_g)
+      .inval_match_tag_i(inval_tag), .inval_match_hit_o(imh_g),
+      .inval_set_i(1'b0), .inval_set_index_i('0)
   );
 
   g6lc_l2_tag #(
@@ -86,7 +87,8 @@ module tb_g6lc_l2_tag_miter;
       .write_tag_i(write_tag), .write_valid_i(write_valid),
       .inval_i(1'b0), .inval_index_i('0), .inval_way_i('0),
       .inval_match_i(inval), .inval_match_index_i(inval_index),
-      .inval_match_tag_i(inval_tag), .inval_match_hit_o(imh_s)
+      .inval_match_tag_i(inval_tag), .inval_match_hit_o(imh_s),
+      .inval_set_i(1'b0), .inval_set_index_i('0)
   );
 
   // Drive just after posedge, check at the following negedge: stimulus lives

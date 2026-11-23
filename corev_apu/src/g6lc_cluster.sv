@@ -97,16 +97,64 @@ module g6lc_cluster
   // Effective inclusion policy: TB override parameter OR package bit. The
   // testbench keeps INCLUSIVE_L3=0 so production packages own the policy.
   localparam bit INCL = INCLUSIVE_L3 || CVA6Cfg.L3InclusiveEn;
-  // C4 storamic pause/drain provider: scalar, core-0 only, single-core and
-  // bounded-origin-profile gated. NR_CORES>1 or unsupported => fully inert.
+  // C4/C5/W1 storamic pause/drain and LLC resync provider: scalar, core-0
+  // only, single-core and origin-profile gated. NR_CORES>1 or unsupported =>
+  // fully inert. When L2/L3 is present (HAS_LLC), pause also quiesces L2/L3
+  // prefetchers, blocks new L2 slave AR/AW once core 0 is drained so in-flight
+  // LLC work drains monotonically, and runs a whole-cache set-invalidation
+  // walk on release while keeping core 0 paused.
+  localparam bit HAS_LLC = L2_ENABLE || CVA6Cfg.L2En;
+  localparam bit STO_PAUSE_EN = (NC == 1) && config_pkg::g6lc_storamic_origin_supported(CVA6Cfg);
   logic cluster_sto_pause;
   logic [NC-1:0] core_sto_drained_w;
-  assign cluster_sto_pause =
-      (NC == 1) && config_pkg::g6lc_storamic_origin_supported(CVA6Cfg)
-          ? storamic_pause_i : 1'b0;
-  assign storamic_drained_o =
-      (NC == 1) && config_pkg::g6lc_storamic_origin_supported(CVA6Cfg)
-          ? core_sto_drained_w[0] : 1'b0;
+  logic l2_all_idle, l3_all_idle;
+  logic l2_inval_all_done, l3_inval_all_done;
+  logic incl_inv_busy;
+  logic llc_armed_q, llc_inval_q;
+  logic llc_inval_done, llc_release_pend, core0_sto_pause;
+  logic llc_quiesce, l2_block_slv;
+
+  assign cluster_sto_pause = STO_PAUSE_EN ? storamic_pause_i : 1'b0;
+
+  if (STO_PAUSE_EN && HAS_LLC) begin : gen_sto_llc_resync
+    assign llc_inval_done   = llc_inval_q && l2_inval_all_done && l3_inval_all_done;
+    assign llc_release_pend = llc_inval_q || (llc_armed_q && !cluster_sto_pause);
+    assign core0_sto_pause  = cluster_sto_pause || llc_inval_q || llc_armed_q;
+    assign llc_quiesce      = core0_sto_pause;
+    assign l2_block_slv     = (cluster_sto_pause && core_sto_drained_w[0]) || llc_release_pend;
+    assign storamic_drained_o =
+        core_sto_drained_w[0] && l2_all_idle && l3_all_idle &&
+        !incl_inv_busy && !llc_release_pend;
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        llc_armed_q <= 1'b0;
+        llc_inval_q <= 1'b0;
+      end else if (llc_inval_q) begin
+        if (l2_inval_all_done && l3_inval_all_done) begin
+          llc_inval_q <= 1'b0;
+          // Re-arm immediately if a new pause arrived mid-walk.
+          llc_armed_q <= cluster_sto_pause;
+        end
+      end else if (llc_armed_q && !cluster_sto_pause) begin
+        if (!l2_inval_all_done && !l3_inval_all_done) begin
+          llc_inval_q <= 1'b1;
+          llc_armed_q <= 1'b0;
+        end
+      end else if (cluster_sto_pause) begin
+        llc_armed_q <= 1'b1;
+      end
+    end
+  end else begin : gen_no_sto_llc_resync
+    assign llc_armed_q        = 1'b0;
+    assign llc_inval_q        = 1'b0;
+    assign llc_inval_done     = 1'b0;
+    assign llc_release_pend   = 1'b0;
+    assign core0_sto_pause    = cluster_sto_pause;
+    assign llc_quiesce        = 1'b0;
+    assign l2_block_slv       = 1'b0;
+    assign storamic_drained_o = STO_PAUSE_EN ? core_sto_drained_w[0] : 1'b0;
+  end
   localparam int unsigned LINE_B =
       (CVA6Cfg.DCACHE_LINE_WIDTH != 0) ? CVA6Cfg.DCACHE_LINE_WIDTH / 8
                                        : COH_DEFAULT_LINE_BYTES;
@@ -406,7 +454,7 @@ module g6lc_cluster
         .ai_isl_retired_ticket_i(ai_isl_retired_ticket_i),
         .ai_isl_last_ticket_i   (ai_isl_last_ticket_i),
         .ai_isl_last_status_i   (ai_isl_last_status_i),
-        .storamic_pause_i       ((c == 0) ? cluster_sto_pause : 1'b0),
+        .storamic_pause_i       ((c == 0) ? core0_sto_pause : 1'b0),
         .storamic_drained_o     (core_sto_drained_w[c])
     );
 
@@ -634,7 +682,12 @@ module g6lc_cluster
         .l2_back_inval_valid_i (l2_back_inval_v),
         .l2_back_inval_addr_i  (l2_back_inval_a),
         .l2_back_inval_ready_o (l2_back_inval_ready),
-        .l2_write_idle_o       (l2_idle_w)
+        .l2_write_idle_o       (l2_idle_w),
+        .l2_quiesce_i          (llc_quiesce),
+        .l2_block_slv_i        (l2_block_slv),
+        .l2_idle_o             (l2_all_idle),
+        .l2_inval_all_i        (llc_inval_q),
+        .l2_inval_all_done_o   (l2_inval_all_done)
     );
   end else begin : gen_no_l2
     assign l2_mst_req   = hub_mem_req;
@@ -644,6 +697,8 @@ module g6lc_cluster
     assign l2_evict_a   = '0;
     assign l2_back_inval_ready = 1'b1;
     assign l2_idle_w    = 1'b1;
+    assign l2_all_idle  = 1'b1;
+    assign l2_inval_all_done = llc_inval_q;
     assign l2_pwhold_w  = 1'b0;
     assign l2_pf_iss_w  = 1'b0;
     assign l2_pf_use_w  = 1'b0;
@@ -713,7 +768,12 @@ module g6lc_cluster
         .l3_write_idle_o       (l3_idle_w),
         .l3_back_inval_valid_i (cmo_l3_v),
         .l3_back_inval_addr_i  (cmo_l3_a),
-        .l3_back_inval_ready_o (cmo_l3_rdy)
+        .l3_back_inval_ready_o (cmo_l3_rdy),
+        .l3_quiesce_i          (llc_quiesce),
+        .l3_block_slv_i        (1'b0),
+        .l3_idle_o             (l3_all_idle),
+        .l3_inval_all_i        (llc_inval_q),
+        .l3_inval_all_done_o   (l3_inval_all_done)
     );
   end else begin : gen_no_l3
     assign l3_mst_req  = l2_mst_req;
@@ -724,6 +784,8 @@ module g6lc_cluster
     assign l3_evict_v  = 1'b0;
     assign l3_evict_a  = '0;
     assign l3_idle_w   = 1'b1;
+    assign l3_all_idle = 1'b1;
+    assign l3_inval_all_done = llc_inval_q;
     assign l3_pwhold_w = 1'b0;
     assign cmo_l3_rdy  = 1'b1;
   end
@@ -750,8 +812,7 @@ module g6lc_cluster
       .pf_train_o (pf_train_w)
   );
 
-  // Inclusive back-inval (parameter; default off)
-  logic incl_inv_busy;
+  // Inclusive back-inval (parameter; default off; incl_inv_busy declared above)
   g6lc_l3_inclusive_inv #(
       .InclusiveEn   (INCL),
       .NR_CORES      (NC),

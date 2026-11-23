@@ -1624,12 +1624,15 @@ module ariane_testharness #(
   logic ckpt_paused_d, ckpt_pause_req_d;
   // Pause requests that found the VirtIO writer with work outstanding.
   int unsigned ckpt_vio_busy_pauses;
+  // W1 LLC resync/activity observability (driven after i_cluster below).
+  logic        ckpt_llc_inval_done, ckpt_llc_idle, ckpt_l2_hit, ckpt_l3_hit;
+  int unsigned ckpt_llc_invals, ckpt_l2_hits, ckpt_l3_hits;
   logic [3:0] ckpt_phase_d;
   logic ckpt_locked_d, ckpt_init_d;
   bit ckpt_trace_en;
   initial ckpt_trace_en = $test$plusargs("storamic_ckpt_trace");
   task automatic ckpt_state_line(input string tag);
-    $display("STORAMIC_CKPT_STATE %s t=%0t initialized=%0d locked=%0d busy=%0d phase=%0d valid=%0d generation=%0d policy_ready=%0d policy_epoch=%0d providers=%02h present=%0d paused=%03b errors=%03b map_gen=%0d reset_gen=%0d pauses=%0d releases=%0d issue=%0d done=%0d error=%0d refuse=%0d rec_active=%0d rec_failed=%0d vio_busy_pauses=%0d",
+    $display("STORAMIC_CKPT_STATE %s t=%0t initialized=%0d locked=%0d busy=%0d phase=%0d valid=%0d generation=%0d policy_ready=%0d policy_epoch=%0d providers=%02h present=%0d paused=%03b errors=%03b map_gen=%0d reset_gen=%0d pauses=%0d releases=%0d issue=%0d done=%0d error=%0d refuse=%0d rec_active=%0d rec_failed=%0d vio_busy_pauses=%0d llc_invals=%0d l2_hits=%0d l3_hits=%0d",
              tag, $time, ckpt_out.initialized, ckpt_out.recovery_locked,
              ckpt_out.busy, ckpt_out.phase, ckpt_out.checkpoint_valid,
              ckpt_out.checkpoint_generation, ckpt_out.policy_ready,
@@ -1639,7 +1642,7 @@ module ariane_testharness #(
              ckpt_pause_count, ckpt_release_count, ckpt_issue_count,
              ckpt_done_count, ckpt_error_count, ckpt_refuse_count,
              ckpt_out.recovery_active, ckpt_out.recovery_failed,
-             ckpt_vio_busy_pauses);
+             ckpt_vio_busy_pauses, ckpt_llc_invals, ckpt_l2_hits, ckpt_l3_hits);
   endtask
   always_ff @(posedge clk_i) begin
     if (!ndmreset_n) begin
@@ -1654,6 +1657,9 @@ module ariane_testharness #(
       if (ckpt_pause_req && !ckpt_pause_req_d &&
           (ckpt_virtio_inflight || ckpt_dma_inflight))
         ckpt_vio_busy_pauses <= ckpt_vio_busy_pauses + 1;
+      if (ckpt_llc_inval_done) ckpt_llc_invals <= ckpt_llc_invals + 1;
+      if (ckpt_l2_hit) ckpt_l2_hits <= ckpt_l2_hits + 1;
+      if (ckpt_l3_hit) ckpt_l3_hits <= ckpt_l3_hits + 1;
       ckpt_phase_d <= ckpt_out.phase;
       ckpt_locked_d <= ckpt_out.recovery_locked;
       ckpt_init_d <= ckpt_out.initialized;
@@ -1680,6 +1686,9 @@ module ariane_testharness #(
         !(ckpt_cpu_paused && ckpt_dbg_closed && ckpt_virtio_paused))
       $fatal(1, "STORAMIC_CKPT_VIOLATION producer_running phase=%0d paused=%b%b%b",
              ckpt_out.phase, ckpt_virtio_paused, ckpt_dbg_closed, ckpt_cpu_paused);
+    if (ndmreset_n && (ckpt_out.phase inside {4'd3, 4'd4, 4'd5, 4'd8, 4'd9}) &&
+        !ckpt_llc_idle)
+      $fatal(1, "STORAMIC_CKPT_VIOLATION llc_not_idle phase=%0d", ckpt_out.phase);
   end
   // pragma translate_on
 `else
@@ -2258,6 +2267,16 @@ module ariane_testharness #(
   );
 
 `ifdef G6LC_STORAMIC_CKPT
+  // pragma translate_off
+  assign ckpt_llc_inval_done = i_cluster.llc_inval_done;
+  assign ckpt_llc_idle       = i_cluster.l2_all_idle && i_cluster.l3_all_idle;
+  if (CVA6Cfg.L2En) begin : gen_ckpt_l2_hit
+    assign ckpt_l2_hit = i_cluster.gen_l2.i_l2.l2_hit_o;
+  end else begin : gen_ckpt_no_l2_hit
+    assign ckpt_l2_hit = 1'b0;
+  end
+  assign ckpt_l3_hit = mc_l3_hit;
+  // pragma translate_on
   // C4: CPU (port 0) pause sequencer and AXI admission gate. paused_o is the
   // CPU writer's drain acknowledgement (core drained AND gate closed).
   ariane_axi::req_t    ckpt_cpu_req;

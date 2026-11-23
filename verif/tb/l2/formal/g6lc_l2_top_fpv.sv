@@ -68,7 +68,12 @@ module g6lc_l2_top_fpv
       .l2_back_inval_valid_i (1'b0),
       .l2_back_inval_addr_i  ('0),
       .l2_back_inval_ready_o (),
-      .l2_write_idle_o       ()
+      .l2_write_idle_o       (),
+      .l2_quiesce_i          (1'b0),
+      .l2_block_slv_i        (1'b0),
+      .l2_idle_o             (),
+      .l2_inval_all_i        (1'b0),
+      .l2_inval_all_done_o   ()
   );
 
   // Start in reset so the unconstrained register initial state is forced

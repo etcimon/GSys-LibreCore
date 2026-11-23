@@ -72,7 +72,11 @@ module g6lc_l2_tag #(
     // Observability: pulses in the cycle an inval-match actually clears at
     // least one live way (counted as [mc_cache] l2_selfinv by the TB). A
     // match that finds only already-invalid ways does not pulse.
-    output logic                          inval_match_hit_o
+    output logic                          inval_match_hit_o,
+    // Whole-set invalidate (Storamic W1 resync walk): clear every way's valid
+    // (and pf) bit in inval_set_index_i. Inert when tied 0.
+    input  logic                          inval_set_i,
+    input  logic [IDX_WIDTH-1:0]          inval_set_index_i
 );
 
   localparam int unsigned WAY_W = (SET_ASSOC <= 1) ? 1 : $clog2(SET_ASSOC);
@@ -117,6 +121,7 @@ module g6lc_l2_tag #(
         end
         // First demand hit on a PF-installed line consumes the bit.
         if (|hit_way) pf_d[index_i] = pf_q[index_i] & ~hit_way;
+        if (inval_set_i) pf_d[inval_set_index_i] = '0;
       end
       always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) pf_q <= '0;
@@ -171,6 +176,11 @@ module g6lc_l2_tag #(
             tags_d[inval_match_index_i][w].valid = 1'b0;
             inval_match_hit_o = 1'b1;
           end
+        end
+      end
+      if (inval_set_i) begin
+        for (int unsigned w = 0; w < SET_ASSOC; w++) begin
+          tags_d[inval_set_index_i][w].valid = 1'b0;
         end
       end
     end
@@ -321,6 +331,7 @@ module g6lc_l2_tag #(
         if (inval_i) pf_d[inval_index_i][inval_way_i] = 1'b0;
         // First demand hit on a PF-installed line consumes the bit.
         if (|hit_way) pf_d[index_i] = pf_q[index_i] & ~hit_way;
+        if (inval_set_i) pf_d[inval_set_index_i] = '0;
       end
       always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) pf_q <= '0;
@@ -362,6 +373,9 @@ module g6lc_l2_tag #(
       end
       if (inval_i) begin
         valid_d[inval_index_i][inval_way_i] = 1'b0;
+      end
+      if (inval_set_i) begin
+        valid_d[inval_set_index_i] = '0;
       end
     end
 

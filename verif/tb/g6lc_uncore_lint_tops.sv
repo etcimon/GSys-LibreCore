@@ -296,7 +296,12 @@ module g6lc_l2_top_lint_top
       .l2_back_inval_valid_i(l2_back_inval_valid),
       .l2_back_inval_addr_i (l2_back_inval_addr),
       .l2_back_inval_ready_o(l2_back_inval_ready),
-      .l2_write_idle_o      ()
+      .l2_write_idle_o      (),
+      .l2_quiesce_i         (1'b0),
+      .l2_block_slv_i       (1'b0),
+      .l2_idle_o            (),
+      .l2_inval_all_i       (1'b0),
+      .l2_inval_all_done_o  ()
   );
 endmodule
 
@@ -359,7 +364,12 @@ module g6lc_l3_top_lint_top
       .l3_write_idle_o (),
       .l3_back_inval_valid_i(l3_back_inval_valid),
       .l3_back_inval_addr_i (l3_back_inval_addr),
-      .l3_back_inval_ready_o(l3_back_inval_ready)
+      .l3_back_inval_ready_o(l3_back_inval_ready),
+      .l3_quiesce_i         (1'b0),
+      .l3_block_slv_i       (1'b0),
+      .l3_idle_o            (),
+      .l3_inval_all_i       (1'b0),
+      .l3_inval_all_done_o  ()
   );
 endmodule
 

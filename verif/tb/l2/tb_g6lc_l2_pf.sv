@@ -135,7 +135,9 @@ module tb_g6lc_l2_pf;
       .l2_pf_drop_o(pf_drop_p),
       .l2_evict_valid_o(), .l2_evict_addr_o(), .l2_evict_ready_i(1'b1),
       .l2_back_inval_valid_i(1'b0), .l2_back_inval_addr_i('0),
-      .l2_back_inval_ready_o(), .l2_write_idle_o()
+      .l2_back_inval_ready_o(), .l2_write_idle_o(),
+      .l2_quiesce_i(1'b0), .l2_block_slv_i(1'b0), .l2_idle_o(),
+      .l2_inval_all_i(1'b0), .l2_inval_all_done_o()
   );
 
   // ---- reference memory: sparse map over an address hash ------------------

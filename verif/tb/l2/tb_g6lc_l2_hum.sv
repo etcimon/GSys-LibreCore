@@ -138,7 +138,12 @@ module tb_g6lc_l2_hum;
       .l2_back_inval_valid_i (inval_valid),
       .l2_back_inval_addr_i  (inval_addr),
       .l2_back_inval_ready_o (back_inval_ready),
-      .l2_write_idle_o       (l2_idle_w)
+      .l2_write_idle_o       (l2_idle_w),
+      .l2_quiesce_i          (1'b0),
+      .l2_block_slv_i        (1'b0),
+      .l2_idle_o             (),
+      .l2_inval_all_i        (1'b0),
+      .l2_inval_all_done_o   ()
   );
 
   if(CHAIN_L3)begin : gen_l3_chain
@@ -173,7 +178,9 @@ module tb_g6lc_l2_hum;
       .l3_evict_ready_i(back_inval_ready && !back_inval_valid),
       .l3_write_idle_o(),
       .l3_back_inval_valid_i(1'b0), .l3_back_inval_addr_i('0),
-      .l3_back_inval_ready_o()
+      .l3_back_inval_ready_o(),
+      .l3_quiesce_i(1'b0), .l3_block_slv_i(1'b0), .l3_idle_o(),
+      .l3_inval_all_i(1'b0), .l3_inval_all_done_o()
     );
     always_ff @(posedge clk) if(rst_n && l3_evict_valid && back_inval_ready &&
                                 !back_inval_valid)
