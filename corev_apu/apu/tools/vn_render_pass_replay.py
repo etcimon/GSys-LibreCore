@@ -141,14 +141,14 @@ def _clear_attachments(engine, context_id, state, remember, append, guards):
 
 def replay(engine, context_id, name, record, remember, append, guards):
     state = record.get('native_render_pass')
-    if name == 'vkCmdNextSubpass':
+    if name in ('vkCmdNextSubpass', 'vkCmdNextSubpass2'):
         if not isinstance(state, NextPass):
             raise ValueError('render pass replay next subpass has no native identity')
         result = _operand(engine, context_id, state.begin, remember, guards)
         _enter_subpass(engine, result.framebuffer,
                        state.begin.render_pass_state, state.subpass, remember)
         return
-    if name == 'vkCmdEndRenderPass':
+    if name in ('vkCmdEndRenderPass', 'vkCmdEndRenderPass2'):
         if not isinstance(state, EndPass):
             raise ValueError('render pass replay end has no begin identity')
         begin = state.begin

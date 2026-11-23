@@ -164,11 +164,13 @@ def _packet(engine, words, count):
 
 
 def capture(engine, current, name, words, record):
-    if name == 'vkCmdNextSubpass':
+    if name in ('vkCmdNextSubpass', 'vkCmdNextSubpass2'):
         return _capture_next(engine, current, words, record)
     if name == 'vkCmdClearAttachments':
         return _capture_clear(engine, current, words, record)
-    if name not in ('vkCmdBeginRenderPass', 'vkCmdEndRenderPass', 'vkEndCommandBuffer'):
+    if name not in ('vkCmdBeginRenderPass', 'vkCmdBeginRenderPass2',
+                    'vkCmdEndRenderPass', 'vkCmdEndRenderPass2',
+                    'vkEndCommandBuffer'):
         return None
     identity = recording_identity(engine, current, record)
     active = _active(identity[3])
@@ -176,7 +178,7 @@ def capture(engine, current, name, words, record):
         if active is not None:
             raise ValueError('render pass command scope remains open')
         return None
-    if name == 'vkCmdEndRenderPass':
+    if name in ('vkCmdEndRenderPass', 'vkCmdEndRenderPass2'):
         if active is None:
             raise ValueError('render pass command end has no begin')
         return EndPass(*identity, active, _subpass_index(identity[3], active))

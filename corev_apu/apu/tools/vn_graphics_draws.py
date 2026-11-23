@@ -80,13 +80,13 @@ class GraphicsDraws:
             return self._vertex_bindings(record)
         if name in ('vkCmdBindIndexBuffer', 'vkCmdBindIndexBuffer2'):
             return self._index_binding(record)
-        if name == 'vkCmdBeginRenderPass':
+        if name in ('vkCmdBeginRenderPass', 'vkCmdBeginRenderPass2'):
             self._begin(record)
             return True
-        if name == 'vkCmdEndRenderPass':
+        if name in ('vkCmdEndRenderPass', 'vkCmdEndRenderPass2'):
             self._end(record)
             return True
-        if name == 'vkCmdNextSubpass':
+        if name in ('vkCmdNextSubpass', 'vkCmdNextSubpass2'):
             self._next(record)
             return True
         if name in self.DRAWS:

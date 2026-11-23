@@ -333,6 +333,40 @@ class RenderingTests(unittest.TestCase):
         # subpass-0 layout (2), not subpass-1's (1); finalLayout=1 publishes
         self.assertEqual(image.get('layout', 0), 1)
 
+    def test_multi_subpass_render_pass2_executes_like_base(self):
+        # vkCmd{Begin,NextSubpass,End}RenderPass2 (VK_KHR_maintenance4 /
+        # synchronization2) carry the same VkRenderPassBeginInfo plus a
+        # VkSubpassBeginInfo/VkSubpassEndInfo wrapper whose contents field
+        # the decoder strips to the identical record shape.  They must
+        # replay through the same pass path as the base commands.
+        self.multi_pass(subpasses=(((0, 2),), ((0, 1),)), att_count=1)
+        self.framebuffer(self.FB2, render_pass=self.RP2)
+        self.f.begin()
+        begin = self.w.structure('VkRenderPassBeginInfo', pNext=[],
+            renderPass=self.RP2, framebuffer=self.FB2, renderArea=self.w.structure(
+                'VkRect2D', offset=self.w.structure('VkOffset2D', x=0, y=0),
+                extent=self.w.structure('VkExtent2D', width=8, height=4)),
+            clearValueCount=1, pClearValues=[self.w.structure('VkClearValue',
+                color=self.w.structure('VkClearColorValue', uint32=[0, 0, 0, 0]))])
+        sub_begin = self.w.structure('VkSubpassBeginInfo', pNext=[], contents=0)
+        sub_end = self.w.structure('VkSubpassEndInfo', pNext=[], contents=0)
+        self.f.command('vkCmdBeginRenderPass2', commandBuffer=self.f.CB,
+            pRenderPassBegin=begin, pSubpassBeginInfo=sub_begin)
+        self.f.command('vkCmdNextSubpass2', commandBuffer=self.f.CB,
+            pSubpassBeginInfo=sub_begin, pSubpassEndInfo=sub_end)
+        self.f.command('vkCmdEndRenderPass2', commandBuffer=self.f.CB,
+            pSubpassEndInfo=sub_end)
+        self.f.end()
+        image = self.f.entry(self.IMAGE)
+        self.assertEqual(image.get('layout', 0), 0)
+        self.e.replay.enqueue(1, [self.f.CB])
+        self.f.drain()
+        self.assertEqual(image.get('layout', 0), 1)
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        texel = self.e.golden.img_clear_texel(self.e.model, did, (0, 0, 0, 0))
+        self.assertEqual(self.f.state.aperture.read(self.f.owner.base + 4096, 32),
+                         texel * 8)
+
     def test_multi_subpass_next_subpass_count_and_scope_refusals(self):
         for mode in ('no_pass', 'past_last'):
             with self.subTest(mode=mode):
