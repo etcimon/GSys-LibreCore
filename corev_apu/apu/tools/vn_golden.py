@@ -1503,6 +1503,12 @@ SESSION_MAX_REP = 352
 # recmany/allocmany where the device succeeds (payfull passes its own)
 PAY_WORDS = 16 * 1024 * 1024 // 4
 PAY_STAGE = 32768
+# §multi-draw-indirect: one indirect-draw record issues one work item per
+# stride-stepped Vk*IndirectCommand.  The RTL loops unbounded (bounded only
+# by the operand extent); the golden bounds the predicted work list so a
+# degenerate stride==0/astronomic drawCount cannot grow it without limit —
+# any real vector stays far below this profile ceiling.
+IND_WORK_MAX = 1 << 16
 APU_VN_FAULT_PAYLOAD = 9
 # §7b/5a-ii: pipelines keep no ObjPay extent — the staged payload is
 # consumed at creation and the object carries {slot, layout} in aux.
@@ -3335,7 +3341,7 @@ class FrontModel(ObjectTable, PayloadMemory):
             # nothing and issues no work — no item, no rast scratch
             ind_noop = ct in (T.get('vkCmdDrawIndirect', -1),
                               T.get('vkCmdDrawIndexedIndirect', -1)) \
-                and (r['imm'][0] & 0xFFFF) == 0
+                and r['imm'][0] == 0
             if self.is_work(ct) and not ind_noop:
                 wk.append(ct)
                 # G1c: a draw routes to g6lc_apu_rast, which lazily
@@ -3433,7 +3439,27 @@ class FrontModel(ObjectTable, PayloadMemory):
                         if ct == T.get('vkCmdDrawIndexedIndirect', -2) \
                         else 16 if draw else 12
                     off = r['imm'][2] & 0xFFFFFFFF
-                    if off > be[1] or be[1] - off < lenb:
+                    # §multi-draw-indirect: a draw-indirect record issues
+                    # one work item per stride-stepped command — drawCount
+                    # rides imm[0], stride imm[1].  Every command's byte
+                    # range must fit the resolved operand extent, mirroring
+                    # cmdexec's per-step StDsDone bounds check; dispatch-
+                    # indirect keeps the single-fetch profile.
+                    if ct in (T.get('vkCmdDrawIndirect', -1),
+                              T.get('vkCmdDrawIndexedIndirect', -1)):
+                        ndraw = r['imm'][0] & 0xFFFFFFFF
+                        stride = r['imm'][1] & 0xFFFFFFFF
+                        # last command's end offset; stride==0 aliases every
+                        # command onto the first so only its own range counts
+                        last = off + lenb if stride == 0 else \
+                            off + (ndraw - 1) * stride + lenb
+                        if (off > be[1] or last > be[1] or
+                                ndraw > IND_WORK_MAX):
+                            return True
+                        # primary item was appended above; each further
+                        # stride-stepped command issues one more work item
+                        wk.extend([ct] * (ndraw - 1))
+                    elif off > be[1] or be[1] - off < lenb:
                         return True
                 st, _s, pe = self.resolve(bound, KIND['VkPipeline'])
                 if st != 'OK':
