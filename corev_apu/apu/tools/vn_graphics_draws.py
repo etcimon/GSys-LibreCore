@@ -44,7 +44,8 @@ class DrawPlan(Recording):
 
 class GraphicsDraws:
     DRAWS = frozenset(('vkCmdDraw', 'vkCmdDrawIndexed',
-                        'vkCmdDrawIndirect', 'vkCmdDrawIndexedIndirect'))
+                        'vkCmdDrawIndirect', 'vkCmdDrawIndexedIndirect',
+                        'vkCmdDrawIndirectCount', 'vkCmdDrawIndexedIndirectCount'))
 
     def __init__(self, engine, context_id, recording):
         validate_recording(engine, context_id, recording)
@@ -145,25 +146,9 @@ class GraphicsDraws:
         self.pass_state = None
         self.subpass = 0
 
-    def _indirect(self, name, record):
-        size = 20 if 'Indexed' in name else 16
-        draw_count, stride = record['imm'][0], record['imm'][1]
-        if draw_count == 0:
-            return (), ()
-        offset = record['imm'][2] | record['imm'][3] << 32
-        if (stride < size or stride % 4 or offset > 0xFFFFFFFF or
-                offset % 4 or record['payload_words']):
-            raise ValueError('graphics indirect draw exceeds profile')
-        # each command becomes one draw plan/op, so the count is bounded
-        # by the executor's per-job operation budget (a larger request
-        # could never be admitted and must not spin the plan loop).
-        if draw_count > self.engine.transfers.max_operations:
-            raise ValueError('graphics indirect draw count exceeds profile')
-        buffer_raw = next((handle for handle, kind in zip(record['handle'], record['kind'])
-                           if kind == self.kinds['VkBuffer'] and handle), None)
-        if buffer_raw is None:
-            raise KeyError('graphics indirect draw buffer operand is unavailable')
-        status, slot, entry = self.front.resolve(buffer_raw, self.kinds['VkBuffer'])
+    def _buffer_binding(self, raw):
+        """Resolve one generational VkBuffer handle to (slot, entry, memory, handle)."""
+        status, slot, entry = self.front.resolve(raw, self.kinds['VkBuffer'])
         if status != 'OK' or entry['ctx'] != self.context_id:
             raise KeyError('graphics indirect buffer generation/context is stale')
         device_slot = entry['parent']
@@ -180,6 +165,58 @@ class GraphicsDraws:
         if (status != 'OK' or memory['parent'] != device_slot or
                 memory['kind'] != self.kinds['VkDeviceMemory']):
             raise KeyError('graphics indirect buffer memory is stale')
+        return slot, entry, memory, memory_handle
+
+    def _indirect_count(self, entry, memory_handle, count_offset, max_draw_count):
+        """Read the u32 draw count a Count-indirect command carries in memory.
+
+        The count is sampled when the submission's ops are assembled; the
+        per-command argument fetches stay execution-time, matching how the
+        executor re-reads each stride-offset command at draw issue."""
+        if count_offset % 4 or count_offset + 4 > entry['size']:
+            raise ValueError('graphics indirect count range exceeds buffer')
+        base = self.engine.memory(self.context_id, memory_handle).base
+        if base is None:
+            raise ValueError('graphics indirect count buffer is unbacked')
+        addr = base + entry.get('bind_off', 0) + count_offset
+        count = int.from_bytes(self.engine.state.aperture.read(addr, 4), 'little')
+        return min(count, max_draw_count)
+
+    def _indirect(self, name, record):
+        indexed = 'Indexed' in name
+        size = 20 if indexed else 16
+        count_cmd = 'IndirectCount' in name
+        stride = record['imm'][1]
+        offset = record['imm'][2] | record['imm'][3] << 32
+        draw_count = None
+        if count_cmd:
+            max_draw_count = record['imm'][0]
+            count_offset = record['imm'][4] | record['imm'][5] << 32
+        else:
+            draw_count = record['imm'][0]
+            if draw_count == 0:
+                return (), ()
+        if (stride < size or stride % 4 or offset > 0xFFFFFFFF or
+                offset % 4 or record['payload_words']):
+            raise ValueError('graphics indirect draw exceeds profile')
+        buffers = [handle for handle, kind in zip(record['handle'], record['kind'])
+                   if kind == self.kinds['VkBuffer'] and handle]
+        if not buffers:
+            raise KeyError('graphics indirect draw buffer operand is unavailable')
+        slot, entry, memory, memory_handle = self._buffer_binding(buffers[0])
+        if count_cmd:
+            if len(buffers) < 2:
+                raise KeyError('graphics indirect count buffer operand is unavailable')
+            _, count_entry, _, count_handle = self._buffer_binding(buffers[1])
+            draw_count = self._indirect_count(count_entry, count_handle,
+                                              count_offset, max_draw_count)
+            if draw_count == 0:
+                return (), ()
+        # each command becomes one draw plan/op, so the count is bounded
+        # by the executor's per-job operation budget (a larger request
+        # could never be admitted and must not spin the plan loop).
+        if draw_count > self.engine.transfers.max_operations:
+            raise ValueError('graphics indirect draw count exceeds profile')
         usage = entry.get('native_usage', 0)
         if (not usage & 0x100 or offset >= entry['size'] or
                 entry.get('bind_off', 0) + entry['size'] > memory['size'] or

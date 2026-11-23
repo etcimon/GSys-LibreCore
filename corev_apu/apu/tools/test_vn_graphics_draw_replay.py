@@ -2082,6 +2082,95 @@ class DrawReplayTests(unittest.TestCase):
                self.indirect_coverage(clip, [1, 2, 3]))
         self.check_fb_coverage(cov)
 
+    def test_draw_indirect_count_reads_count_from_buffer(self):
+        # vkCmdDrawIndirectCount takes its draw count from a u32 in
+        # countBuffer (at countBufferOffset), clamped to maxDrawCount —
+        # not from an operand.  count=2, maxDrawCount=5 -> two stride-
+        # stepped draws; same full-quad oracle as the drawCount=2 case.
+        col = (0.25, 0.5, 0.75, 1.0)
+        pos = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
+        self.upload([(p, col) for p in pos])
+        self.upload_indirect(3, 1, 0, 0, 3, 1, 1, 0)  # two 16B commands in XB
+        # VB2 (bound at offset 1088) doubles as the count buffer: u32 count=2.
+        self.f.state.aperture.write(self.f.owner.base + self.VB2_OFF,
+                                    struct.pack('<I', 2))
+        self.pipeline()
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdDrawIndirectCount', commandBuffer=self.f.CB,
+                       buffer=self.XB, offset=0, countBuffer=self.VB2,
+                       countBufferOffset=0, maxDrawCount=5, stride=16)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        clip = [(x, y, 0.5, 1.0) for x, y in pos]
+        cov = (self.indirect_coverage(clip, [0, 1, 2]) |
+               self.indirect_coverage(clip, [1, 2, 3]))
+        self.check_fb_coverage(cov)
+
+    def test_draw_indirect_count_clamps_to_max_draw_count(self):
+        # count=9 in the buffer but maxDrawCount=1 -> a single draw (the
+        # clamp, not the stored count, bounds the loop).  Only cmd0's
+        # coverage lands; cmd1 is never issued.
+        col = (0.25, 0.5, 0.75, 1.0)
+        pos = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
+        self.upload([(p, col) for p in pos])
+        self.upload_indirect(3, 1, 0, 0, 3, 1, 1, 0)
+        self.f.state.aperture.write(self.f.owner.base + self.VB2_OFF,
+                                    struct.pack('<I', 9))
+        self.pipeline()
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdDrawIndirectCount', commandBuffer=self.f.CB,
+                       buffer=self.XB, offset=0, countBuffer=self.VB2,
+                       countBufferOffset=0, maxDrawCount=1, stride=16)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        clip = [(x, y, 0.5, 1.0) for x, y in pos]
+        # only the first command (verts 0,1,2) ran
+        self.check_fb_coverage(self.indirect_coverage(clip, [0, 1, 2]))
+
+    def test_draw_indirect_count_zero_issues_no_draw(self):
+        # count=0 -> the command is a no-op; the framebuffer keeps only
+        # the render-pass clear, no triangle coverage.
+        col = (0.25, 0.5, 0.75, 1.0)
+        pos = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
+        self.upload([(p, col) for p in pos])
+        self.upload_indirect(3, 1, 0, 0, 3, 1, 1, 0)
+        self.f.state.aperture.write(self.f.owner.base + self.VB2_OFF,
+                                    struct.pack('<I', 0))
+        self.pipeline()
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdDrawIndirectCount', commandBuffer=self.f.CB,
+                       buffer=self.XB, offset=0, countBuffer=self.VB2,
+                       countBufferOffset=0, maxDrawCount=5, stride=16)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        # no draw issued: every texel keeps the render-pass clear colour
+        for x in range(8):
+            for y in range(4):
+                self.assertEqual(self.read_texel(x, y), self.clear_texel(),
+                                 'texel (%d,%d)' % (x, y))
+        self.assertEqual(self.f.owner.work_refs, 0)
+
     def test_draw_indexed_indirect_multi_draw(self):
         # vkCmdDrawIndexedIndirect drawCount=2 stride=20: two
         # DrawIndexedIndirectCommand records {indexCount,instanceCount,

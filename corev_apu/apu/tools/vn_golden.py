@@ -3242,6 +3242,23 @@ class FrontModel(ObjectTable, PayloadMemory):
             return False
         return False   # indexed/2/copy variants: not model-tracked yet
 
+    def _count_draws(self, r):
+        """Count-variant indirect draw count: the u32 at countBuffer
+        [countBufferOffset] (imm[4:5]) clamped to maxDrawCount (imm[0]).
+        Returns the effective draw count, or None when the count
+        operand cannot be resolved — a dead handle, unbacked extent, or
+        an offset whose 4 bytes fall outside the bound buffer — which
+        cmdexec treats as DEVICE_LOST like any other bad operand."""
+        be = self._xfer_extent(r['handle'][1], r['kind'][1])
+        if be is None:
+            return None
+        coff = (r['imm'][4] & 0xFFFFFFFF) | \
+            ((r['imm'][5] & 0xFFFFFFFF) << 32)
+        if coff % 4 or coff + 4 > be[1]:
+            return None
+        count = self.apr64(be[0] + coff) & 0xFFFFFFFF
+        return min(count, r['imm'][0] & 0xFFFFFFFF)
+
     def _disp_assembly_lost(self, session, s, resume=None):
         """§7b/5a-ii + §12.3 F5: replay one command buffer's records
         the way cmdexec does at submit; True -> DEVICE_LOST on the
@@ -3337,11 +3354,24 @@ class FrontModel(ObjectTable, PayloadMemory):
                     st, _s, _e = self.resolve(h, r['kind'][i])
                     if st != 'OK':
                         return True
+            # §multi-draw-indirect Count: the u32 draw count lives in
+            # countBuffer at exec; resolve it now so a zero count
+            # suppresses the work item exactly like drawCount==0 and the
+            # stride expansion below knows N.  An unresolvable count
+            # operand loses the submission like any bad operand fetch.
+            cnt_ids = (T.get('vkCmdDrawIndirectCount', -1),
+                       T.get('vkCmdDrawIndexedIndirectCount', -1))
+            cnt_draws = -1
+            if ct in cnt_ids:
+                cnt_draws = self._count_draws(r)
+                if cnt_draws is None:
+                    return True
             # §5a G3b-iii: an indirect draw with drawCount==0 fetches
             # nothing and issues no work — no item, no rast scratch
             ind_noop = ct in (T.get('vkCmdDrawIndirect', -1),
-                              T.get('vkCmdDrawIndexedIndirect', -1)) \
-                and r['imm'][0] == 0
+                              T.get('vkCmdDrawIndexedIndirect', -1),
+                              *cnt_ids) and \
+                (cnt_draws == 0 if ct in cnt_ids else r['imm'][0] == 0)
             if self.is_work(ct) and not ind_noop:
                 wk.append(ct)
                 # G1c: a draw routes to g6lc_apu_rast, which lazily
@@ -3351,6 +3381,7 @@ class FrontModel(ObjectTable, PayloadMemory):
                           T.get('vkCmdDrawIndexed', -1),
                           T.get('vkCmdDrawIndirect', -1),
                           T.get('vkCmdDrawIndexedIndirect', -1),
+                          *cnt_ids,
                           T.get('vkCmdClearAttachments', -1)) and \
                         not self._rast_scr:
                     self._rast_scr = True
@@ -3409,7 +3440,8 @@ class FrontModel(ObjectTable, PayloadMemory):
                         T.get('vkCmdDraw', -1),
                         T.get('vkCmdDrawIndexed', -1),
                         T.get('vkCmdDrawIndirect', -1),
-                        T.get('vkCmdDrawIndexedIndirect', -1)):
+                        T.get('vkCmdDrawIndexedIndirect', -1),
+                        *cnt_ids):
                 if rep_dbg:
                     sys.stderr.write('DISPDBG bound=%x dset=%s plw?\n'
                                      % (bound, ['%x' % d for d in dset]))
@@ -3418,7 +3450,8 @@ class FrontModel(ObjectTable, PayloadMemory):
                                  T.get('vkCmdDispatchIndirect', -1))
                 indirect = ct in (T.get('vkCmdDispatchIndirect', -1),
                                   T.get('vkCmdDrawIndirect', -1),
-                                  T.get('vkCmdDrawIndexedIndirect', -1))
+                                  T.get('vkCmdDrawIndexedIndirect', -1),
+                                  *cnt_ids)
                 draw = not compute
                 # G1c: a draw also wants an active color attachment —
                 # either missing loses the submission like the
@@ -3436,18 +3469,23 @@ class FrontModel(ObjectTable, PayloadMemory):
                     if be is None:
                         return True
                     lenb = 20 \
-                        if ct == T.get('vkCmdDrawIndexedIndirect', -2) \
+                        if ct in (T.get('vkCmdDrawIndexedIndirect', -2),
+                                  T.get('vkCmdDrawIndexedIndirectCount', -2)) \
                         else 16 if draw else 12
                     off = r['imm'][2] & 0xFFFFFFFF
                     # §multi-draw-indirect: a draw-indirect record issues
                     # one work item per stride-stepped command — drawCount
-                    # rides imm[0], stride imm[1].  Every command's byte
-                    # range must fit the resolved operand extent, mirroring
-                    # cmdexec's per-step StDsDone bounds check; dispatch-
-                    # indirect keeps the single-fetch profile.
+                    # rides imm[0] (non-Count) or the countBuffer u32
+                    # clamped to maxDrawCount (Count), stride imm[1].
+                    # Every command's byte range must fit the resolved
+                    # operand extent, mirroring cmdexec's per-step
+                    # StDsDone bounds check; dispatch-indirect keeps the
+                    # single-fetch profile.
                     if ct in (T.get('vkCmdDrawIndirect', -1),
-                              T.get('vkCmdDrawIndexedIndirect', -1)):
-                        ndraw = r['imm'][0] & 0xFFFFFFFF
+                              T.get('vkCmdDrawIndexedIndirect', -1),
+                              *cnt_ids):
+                        ndraw = cnt_draws if ct in cnt_ids else \
+                            (r['imm'][0] & 0xFFFFFFFF)
                         stride = r['imm'][1] & 0xFFFFFFFF
                         # last command's end offset; stride==0 aliases every
                         # command onto the first so only its own range counts
@@ -5467,11 +5505,21 @@ class FrontModel(ObjectTable, PayloadMemory):
                     # §5a G3b-iii: the indirect operand's byte offset
                     # decodes into q[2] (u64) — the record carries it
                     # in imm[2:3] for the executor's aperture fetch
-                    if ct in (session['T']['vkCmdDrawIndirect'],
-                              session['T']['vkCmdDrawIndexedIndirect'],
-                              session['T']['vkCmdDispatchIndirect']):
+                    _ind_ids = (session['T'].get('vkCmdDrawIndirect', -1),
+                                 session['T'].get('vkCmdDrawIndexedIndirect', -1),
+                                 session['T'].get('vkCmdDispatchIndirect', -1),
+                                 session['T'].get('vkCmdDrawIndirectCount', -1),
+                                 session['T'].get('vkCmdDrawIndexedIndirectCount', -1))
+                    if ct in _ind_ids:
                         recd['imm'][2] = rec['q'][2] & 0xFFFFFFFF
                         recd['imm'][3] = (rec['q'][2] >> 32) & 0xFFFFFFFF
+                    # Count variants carry a second u64 — countBufferOffset
+                    # decodes into q[4]; pack it into imm[4:5] so the
+                    # executor/golden can locate the u32 draw count
+                    if ct in (session['T'].get('vkCmdDrawIndirectCount', -1),
+                              session['T'].get('vkCmdDrawIndexedIndirectCount', -1)):
+                        recd['imm'][4] = rec['q'][4] & 0xFFFFFFFF
+                        recd['imm'][5] = (rec['q'][4] >> 32) & 0xFFFFFFFF
                     # query u64 scalars ride q[] like the indirect offset:
                     # WriteTimestamp2 stage -> imm[1:3] (query stays
                     # imm[0]); CopyQueryPoolResults dstOffset/stride ->
