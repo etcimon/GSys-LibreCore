@@ -4164,13 +4164,27 @@ module g6lc_apu_vnfront
                     op_q.cmd_type ==
                     APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT ||
                     op_q.cmd_type ==
-                    APU_VN_TYPE_VK_CMD_DISPATCH_INDIRECT_EXT) begin
+                    APU_VN_TYPE_VK_CMD_DISPATCH_INDIRECT_EXT ||
+                    op_q.cmd_type ==
+                    APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_COUNT_EXT ||
+                    op_q.cmd_type ==
+                    APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_COUNT_EXT) begin
                   // §5a G3b-iii: the indirect operand's byte offset
                   // is the command's only u64 top-level arg — the
                   // decode lands it in q[2]; the record carries it in
                   // imm[2:3] for the executor's aperture fetch
                   rec_q.imm[2] <= op_q.q[2][31:0];
                   rec_q.imm[3] <= op_q.q[2][63:32];
+                  // Vulkan 1.2 drawIndirectCount: countBufferOffset is
+                  // the second u64 arg (q[4]) — carried in imm[4:5] so
+                  // the executor can read the draw count
+                  if (op_q.cmd_type ==
+                      APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_COUNT_EXT ||
+                      op_q.cmd_type ==
+                      APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_COUNT_EXT) begin
+                    rec_q.imm[4] <= op_q.q[4][31:0];
+                    rec_q.imm[5] <= op_q.q[4][63:32];
+                  end
                 end
                 // §7b/§12.3 F5: payload-arena word counts per record —
                 // BindDS emits {set handle, ndyn} pairs (2×sets)
