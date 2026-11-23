@@ -34,6 +34,7 @@ _SCALAR_DYNAMIC = {
     'vkCmdSetDepthBoundsTestEnable': ('bounds_test', 0, 1),
     'vkCmdSetDepthBiasEnable': ('depth_bias_enable', 0, 1),
     'vkCmdSetPrimitiveTopology': ('topology', 0, 5),
+    'vkCmdSetStencilTestEnable': ('stencil_test', 0, 1),
 }
 _BOOL_DYNAMIC = {n: k for n, (k, _lo, _hi) in _SCALAR_DYNAMIC.items()}
 
@@ -43,6 +44,12 @@ _BOOL_DYNAMIC = {n: k for n, (k, _lo, _hi) in _SCALAR_DYNAMIC.items()}
 _VECTOR_DYNAMIC = {
     'vkCmdSetDepthBounds': ('bounds', 2),
     'vkCmdSetDepthBias': ('depth_bias', 3),
+    # (faceMask, failOp, passOp, depthFailOp, compareOp)
+    'vkCmdSetStencilOp': ('stencil_op', 5),
+    # (faceMask, compareMask|writeMask|reference)
+    'vkCmdSetStencilCompareMask': ('stencil_compare_mask', 2),
+    'vkCmdSetStencilWriteMask': ('stencil_write_mask', 2),
+    'vkCmdSetStencilReference': ('stencil_reference', 2),
 }
 
 
@@ -68,6 +75,16 @@ def capture(engine, current, name, record):
                     'graphics dynamic %s floats exceed profile' % kind)
             if kind == 'bounds' and not floats[0] <= floats[1]:
                 raise ValueError('graphics dynamic bounds floats exceed profile')
+        elif kind.startswith('stencil_') and kind != 'stencil_test':
+            # faceMask is VkStencilFaceFlags {FRONT=1,BACK=2,BOTH=3}; the
+            # trailing values are bounded VkStencilOp/VkCompareOp (0..7) or
+            # stencil bytes (0..255) per command.
+            if values[0] not in (1, 2, 3):
+                raise ValueError('graphics dynamic %s faceMask exceeds profile'
+                                 % kind)
+            limit = 7 if kind == 'stencil_op' else 255
+            if any(not 0 <= v <= limit for v in values[1:]):
+                raise ValueError('graphics dynamic %s exceeds profile' % kind)
         return DynamicCommand(*recording_identity(engine, current, record),
                               kind, values)
     if scalar is not None:

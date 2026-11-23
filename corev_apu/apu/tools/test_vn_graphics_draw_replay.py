@@ -1940,6 +1940,38 @@ class DrawReplayTests(unittest.TestCase):
         self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
         self.f.end()
 
+    # vkCmdSetStencil* dynamic-state command -> VkDynamicState wire value
+    # (extension 268 offsets 10-11; base enums 6-8 for mask/reference).
+    DYN_STENCIL_STATE = {
+        'vkCmdSetStencilTestEnable': 1000267010,
+        'vkCmdSetStencilOp': 1000267011,
+        'vkCmdSetStencilCompareMask': 6,
+        'vkCmdSetStencilWriteMask': 7,
+        'vkCmdSetStencilReference': 8,
+    }
+
+    def dyn_stencil_prepared(self, stencil, commands, compare=7, write=1,
+                             depth_test=1, depth_clear=1.0, stencil_clear=0,
+                             **draw_kw):
+        # `commands` is a list of (name, kwargs) vkCmdSetStencil* records
+        # issued between bind and draw; the pipeline declares each command's
+        # VkDynamicState so the values override the create-info stencil state.
+        self.depth_resources(depth_load=1, fmt=129)
+        dynamic = [0, 1] + [self.DYN_STENCIL_STATE[n] for n, _kw in commands]
+        self.depth_pipeline(compare=compare, write=write,
+                            depth_test=depth_test, stencil=stencil,
+                            dynamic=dynamic)
+        self.depth_begin_pass(depth_clear=depth_clear,
+                              stencil_clear=stencil_clear)
+        self.viewport()
+        self.scissor()
+        self.bind()
+        for name, kw in commands:
+            self.f.command(name, commandBuffer=self.f.CB, **kw)
+        self.draw(**draw_kw)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
     def indexed_coverage(self, clip, indices):
         # clip = per-vertex clip positions; indices select/reorder them
         # into TRIANGLE_LIST triples for the golden coverage union.
@@ -2865,6 +2897,84 @@ class DrawReplayTests(unittest.TestCase):
                   (-1.0, 1.0, 0.5, 1.0)]:
             cov |= vn_golden.gfx_line_coverage([p, p], vp, sc, cw, ch)
         self.check_fb_coverage(cov)
+
+    def test_draw_dynamic_stencil_enable_replace(self):
+        # vkCmdSetStencilTestEnable(1) re-enables a create-info-disabled
+        # stencil test; StencilOp/CompareMask/WriteMask/Reference supply the
+        # ops the disabled pipeline left zeroed, so passOp=REPLACE under
+        # compareOp=ALWAYS writes ref 0x5A on every covered fragment.
+        self.upload(self.ndc_triangle())
+        ops = (self.st_ops(pas=2, ref=0x5A), self.st_ops(pas=2, ref=0x5A))
+        commands = [
+            ('vkCmdSetStencilTestEnable', dict(stencilTestEnable=1)),
+            ('vkCmdSetStencilOp', dict(faceMask=3, failOp=0, passOp=2,
+                                       depthFailOp=0, compareOp=7)),
+            ('vkCmdSetStencilCompareMask', dict(faceMask=3, compareMask=0xFF)),
+            ('vkCmdSetStencilWriteMask', dict(faceMask=3, writeMask=0xFF)),
+            ('vkCmdSetStencilReference', dict(faceMask=3, reference=0x5A)),
+        ]
+        # stencil=None keeps stencilTestEnable=0 in create-info.
+        self.dyn_stencil_prepared(None, commands, compare=7, write=1,
+                                  depth_test=1, depth_clear=1.0,
+                                  stencil_clear=0)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            w = self.read_ds(x, y)
+            self.assertEqual(w >> 24, 0x5A)
+            self.assertEqual(w & 0xFFFFFF, 0x800000)
+        w = self.read_ds(7, 3)
+        self.assertEqual(w >> 24, 0)
+        self.assertEqual(w & 0xFFFFFF, 0xFFFFFF)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_draw_dynamic_stencil_disable_keeps_clear(self):
+        # vkCmdSetStencilTestEnable(0) disables an enabled stencil test:
+        # the stencil byte keeps its clear value while depth and colour
+        # still commit under the independent depth test.
+        self.upload(self.ndc_triangle())
+        ops = (self.st_ops(pas=2, ref=0x5A), self.st_ops(pas=2, ref=0x5A))
+        commands = [('vkCmdSetStencilTestEnable',
+                     dict(stencilTestEnable=0))]
+        self.dyn_stencil_prepared(ops, commands, compare=7, write=1,
+                                  depth_test=1, depth_clear=1.0,
+                                  stencil_clear=0)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        for x, y in ((0, 0), (4, 1)):
+            w = self.read_ds(x, y)
+            self.assertEqual(w >> 24, 0)            # stencil kept at clear
+            self.assertEqual(w & 0xFFFFFF, 0x800000)  # depth still written
+            self.assertNotEqual(self.read_texel(x, y), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_draw_dynamic_stencil_op_reference_override(self):
+        # vkCmdSetStencilOp + vkCmdSetStencilReference override the
+        # create-info KEEP ops on an enabled stencil test: passOp=REPLACE
+        # writes the dynamic reference 0xC3 on covered fragments.
+        self.upload(self.ndc_triangle())
+        ops = (self.st_ops(), self.st_ops())  # KEEP ops, masks 0xFF, ALWAYS
+        commands = [
+            ('vkCmdSetStencilOp', dict(faceMask=3, failOp=0, passOp=2,
+                                       depthFailOp=0, compareOp=7)),
+            ('vkCmdSetStencilReference', dict(faceMask=3, reference=0xC3)),
+        ]
+        self.dyn_stencil_prepared(ops, commands, compare=7, write=1,
+                                  depth_test=1, depth_clear=1.0,
+                                  stencil_clear=0)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_ds(x, y) >> 24, 0xC3)
+        w = self.read_ds(7, 3)
+        self.assertEqual(w >> 24, 0)
+        self.assertEqual(self.f.owner.work_refs, 0)
 
     # ---- bounded MRT (two colour attachments) end-to-end ----
     # fs_program2 emits loc0=vcol, loc1=const; the single Writeback stage

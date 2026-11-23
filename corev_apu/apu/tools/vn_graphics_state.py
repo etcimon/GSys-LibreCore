@@ -98,6 +98,12 @@ DYNAMIC_DEPTH_COMPARE_OP = 1000000000 + (268 - 1) * 1000 + 8
 DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE = 1000000000 + (268 - 1) * 1000 + 9
 DYNAMIC_DEPTH_BIAS_ENABLE = 1000000000 + (378 - 1) * 1000 + 2
 DYNAMIC_PRIMITIVE_TOPOLOGY = 1000000000 + (268 - 1) * 1000 + 2
+DYNAMIC_STENCIL_TEST_ENABLE = 1000000000 + (268 - 1) * 1000 + 10
+DYNAMIC_STENCIL_OP = 1000000000 + (268 - 1) * 1000 + 11
+# base VkDynamicState enums for the per-face stencil mask/reference commands
+DYNAMIC_STENCIL_COMPARE_MASK = 6
+DYNAMIC_STENCIL_WRITE_MASK = 7
+DYNAMIC_STENCIL_REFERENCE = 8
 # base VkDynamicState enums (vk.xml <enums> values, not extension offsets)
 DYNAMIC_DEPTH_BOUNDS = 5
 DYNAMIC_DEPTH_BIAS = 3
@@ -110,7 +116,11 @@ _DYNAMIC_ADMITTED = frozenset((DYNAMIC_PRIMITIVE_RESTART,
                              DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE,
                              DYNAMIC_DEPTH_BOUNDS,
                              DYNAMIC_DEPTH_BIAS_ENABLE, DYNAMIC_DEPTH_BIAS,
-                             DYNAMIC_PRIMITIVE_TOPOLOGY))
+                             DYNAMIC_PRIMITIVE_TOPOLOGY,
+                             DYNAMIC_STENCIL_TEST_ENABLE, DYNAMIC_STENCIL_OP,
+                             DYNAMIC_STENCIL_COMPARE_MASK,
+                             DYNAMIC_STENCIL_WRITE_MASK,
+                             DYNAMIC_STENCIL_REFERENCE))
 
 
 def validate(engine, fields, blobs, render_pass, subpass=0):
@@ -156,25 +166,28 @@ def validate(engine, fields, blobs, render_pass, subpass=0):
         # re-enable a real compare; the dte->ALWAYS fold happens at draw
         # assembly in vn_graphics_draw_replay.
         depth = (dte, dwe, dco) if (dte or dwe) else None
-        if ste:
-            # bounded stencil: the front/back VkStencilOpState fields arrive
-            # as two-element [front, back] arrays; ops are VkStencilOp
-            # 0..7, compareOp is VkCompareOp 0..7, and the compare/write
-            # masks plus reference are stencil bytes 0..255.
-            ops = []
-            for name, limit in (('failOp', 7), ('passOp', 7),
-                                ('depthFailOp', 7), ('compareOp', 7),
-                                ('compareMask', 255), ('writeMask', 255),
-                                ('reference', 255)):
-                vals = fields.get(name, ())
-                if (len(vals) != 2 or
-                        any(not 0 <= v <= limit for v in vals)):
-                    raise ValueError(
-                        'graphics fixed stencil state exceeds profile: ' + name)
-                ops.append(tuple(vals))
-            # ops[i] is (front_i, back_i); regroup per face
-            stencil = tuple(tuple(ops[f][i] for f in range(7))
-                            for i in range(2))
+        # keep the raw stencil field table whenever depth-stencil state
+        # exists so a dynamic VK_DYNAMIC_STATE_STENCIL_* can re-enable or
+        # re-tune a test the create-info left off; stencil[0] is the fixed
+        # stencilTestEnable flag, stencil[1]/[2] the (front,back) 7-field
+        # tables in failOp/passOp/depthFailOp/compareOp/compareMask/
+        # writeMask/reference order.  The bounded stencil op fields arrive
+        # as two-element [front, back] arrays; ops are VkStencilOp 0..7,
+        # compareOp is VkCompareOp 0..7, masks/reference are bytes 0..255.
+        ops = []
+        for name, limit in (('failOp', 7), ('passOp', 7),
+                            ('depthFailOp', 7), ('compareOp', 7),
+                            ('compareMask', 255), ('writeMask', 255),
+                            ('reference', 255)):
+            vals = fields.get(name, ())
+            if (len(vals) != 2 or
+                    any(not 0 <= v <= limit for v in vals)):
+                raise ValueError(
+                    'graphics fixed stencil state exceeds profile: ' + name)
+            ops.append(tuple(vals))
+        stencil = (ste,
+                   tuple(ops[f][0] for f in range(7)),
+                   tuple(ops[f][1] for f in range(7)))
         # keep the raw bounds window whenever depth-stencil state exists so a
         # dynamic VK_DYNAMIC_STATE_DEPTH_BOUNDS(_TEST_ENABLE) can re-enable
         # or re-window a test the create-info left off; bounds[0] is the

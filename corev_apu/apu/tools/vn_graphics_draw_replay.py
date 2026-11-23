@@ -29,7 +29,11 @@ from vn_graphics_state import (DYNAMIC_PRIMITIVE_RESTART,
                                DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE,
                                DYNAMIC_DEPTH_BOUNDS,
                                DYNAMIC_DEPTH_BIAS_ENABLE, DYNAMIC_DEPTH_BIAS,
-                               DYNAMIC_PRIMITIVE_TOPOLOGY)
+                               DYNAMIC_PRIMITIVE_TOPOLOGY,
+                               DYNAMIC_STENCIL_TEST_ENABLE, DYNAMIC_STENCIL_OP,
+                               DYNAMIC_STENCIL_COMPARE_MASK,
+                               DYNAMIC_STENCIL_WRITE_MASK,
+                               DYNAMIC_STENCIL_REFERENCE)
 
 
 def _push(stages):
@@ -110,6 +114,46 @@ def operation(engine, context_id, plan, remember, guards):
     extra_targets = tuple(
         (att.owner, att.offset, att.pitch, att.fmt, loc,
          fixed.color_masks[loc]) for loc, att in targets[1:])
+    # resolve effective stencil: fixed.stencil is (enable, front7, back7)
+    # whenever depth-stencil state exists; each vkCmdSetStencil* command
+    # overrides the pipeline state only when the pipeline declared the
+    # matching VkDynamicState.  The commands address disjoint field groups
+    # (StencilOp->0..3, CompareMask->4, WriteMask->5, Reference->6) so they
+    # merge order-independently; faceMask selects FRONT(1)/BACK(2)/BOTH(3).
+    stencil = None
+    if fixed.stencil is not None:
+        ste, front_f, back_f = fixed.stencil
+        front_f, back_f = list(front_f), list(back_f)
+        dyn = fixed.dynamic
+        if (DYNAMIC_STENCIL_TEST_ENABLE in dyn and
+                plan.stencil_test is not None):
+            ste = plan.stencil_test
+        overrides = []
+        if (DYNAMIC_STENCIL_OP in dyn and plan.stencil_op is not None):
+            overrides.append((plan.stencil_op[0],
+                              ((0, plan.stencil_op[1]),
+                               (1, plan.stencil_op[2]),
+                               (2, plan.stencil_op[3]),
+                               (3, plan.stencil_op[4]))))
+        if (DYNAMIC_STENCIL_COMPARE_MASK in dyn and
+                plan.stencil_compare_mask is not None):
+            overrides.append((plan.stencil_compare_mask[0],
+                              ((4, plan.stencil_compare_mask[1]),)))
+        if (DYNAMIC_STENCIL_WRITE_MASK in dyn and
+                plan.stencil_write_mask is not None):
+            overrides.append((plan.stencil_write_mask[0],
+                              ((5, plan.stencil_write_mask[1]),)))
+        if (DYNAMIC_STENCIL_REFERENCE in dyn and
+                plan.stencil_reference is not None):
+            overrides.append((plan.stencil_reference[0],
+                              ((6, plan.stencil_reference[1]),)))
+        for face_mask, field_updates in overrides:
+            for face, table in ((0, front_f), (1, back_f)):
+                if face_mask & (1 << face):
+                    for fi, value in field_updates:
+                        table[fi] = value
+        if ste:
+            stencil = (tuple(front_f), tuple(back_f))
     # bounded late-z / stencil: a pipeline depth test or stencil test needs
     # a matching depth-stencil attachment on the active subpass; the
     # framebuffer already resolved it to a geometry operand alongside the
@@ -118,7 +162,7 @@ def operation(engine, context_id, plan, remember, guards):
     # still activates the packed path with an ALWAYS/no-write depth tuple.
     depth = None
     depth_fmt = 12
-    if fixed.depth is not None or fixed.stencil is not None:
+    if fixed.depth is not None or stencil is not None:
         dref = plan.pass_state.render_pass_state.subpass_depth(plan.subpass)
         if dref is not None:
             depth_att = plan.attachments[dref[0]]
@@ -145,7 +189,7 @@ def operation(engine, context_id, plan, remember, guards):
             # still reach the (optional) depth write.
             depth = (depth_att.owner, depth_att.offset, depth_att.pitch,
                      dco if dte else 7, dwe)
-    if fixed.stencil is not None and depth is None:
+    if stencil is not None and depth is None:
         raise ValueError('graphics stencil needs a depth-stencil attachment')
     vertices = tuple(FetchVertex(vertex.location, vertex.format,
                                  vertex.offset, vertex.stride, vertex.rate,
@@ -237,7 +281,7 @@ def operation(engine, context_id, plan, remember, guards):
                   bounds=bounds, depth_bias=depth_bias,
                   depth_clamp=fixed.depth_clamp, poly_mode=fixed.poly_mode,
                   topology=topology, depth_fmt=depth_fmt,
-                  stencil=fixed.stencil, blend_extra=fixed.blend_extra)
+                  stencil=stencil, blend_extra=fixed.blend_extra)
     for ref, kind in plan.references:
         remember(ref, kind)
     guards.append(plan.validate)

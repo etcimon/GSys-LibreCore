@@ -48,6 +48,11 @@ class DrawPlan(Recording):
     depth_bias_enable: object
     depth_bias: object
     topology: object
+    stencil_test: object
+    stencil_op: object
+    stencil_compare_mask: object
+    stencil_write_mask: object
+    stencil_reference: object
     vertices: tuple
     indices: object
     references: tuple
@@ -65,7 +70,8 @@ _BOOL_ATTR = {'primitive_restart': 'restart',
               'depth_compare': 'depth_compare',
               'bounds_test': 'bounds_test',
               'depth_bias_enable': 'depth_bias_enable',
-              'topology': 'topology'}
+              'topology': 'topology',
+              'stencil_test': 'stencil_test'}
 
 
 class GraphicsDraws:
@@ -86,6 +92,8 @@ class GraphicsDraws:
         self.bounds_test = self.bounds = None
         self.depth_bias_enable = self.depth_bias = None
         self.topology = None
+        self.stencil_test = self.stencil_op = self.stencil_compare_mask = None
+        self.stencil_write_mask = self.stencil_reference = None
         self.vertices, self.index_source = {}, None
         self.pass_state = None
         self.subpass = 0
@@ -360,4 +368,7 @@ class GraphicsDraws:
                 self.depth_test, self.depth_write, self.depth_compare,
                 self.bounds_test, self.bounds,
                 self.depth_bias_enable, self.depth_bias, self.topology,
+                self.stencil_test, self.stencil_op,
+                self.stencil_compare_mask, self.stencil_write_mask,
+                self.stencil_reference,
                 vertices, indices, references, validate))
