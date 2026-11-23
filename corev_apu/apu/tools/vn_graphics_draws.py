@@ -96,6 +96,10 @@ class GraphicsDraws:
         self.stencil_test = self.stencil_op = self.stencil_compare_mask = None
         self.stencil_write_mask = self.stencil_reference = None
         self.blend_constants = None
+        # line width is bounded-inert: create-info requires exactly 1.0 and
+        # the raster ignores width, so the dynamic command is validated and
+        # consumed but carries no per-draw override into DrawPlan.
+        self.line_width = None
         self.vertices, self.index_source = {}, None
         self.pass_state = None
         self.subpass = 0

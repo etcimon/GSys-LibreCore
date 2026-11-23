@@ -3019,6 +3019,35 @@ class DrawReplayTests(unittest.TestCase):
         self.assertEqual(self.read_texel(7, 3), self.blend_clear_texel(clear))
         self.assertEqual(self.f.owner.work_refs, 0)
 
+    def test_draw_dynamic_line_width_bounded_noop(self):
+        # vkCmdSetLineWidth is admitted and validated to the fixed 1.0 width
+        # (lineWidthRange=[1,1]); the bounded raster ignores width, so the
+        # command is a consumed no-op and the triangle covers normally.
+        col = (0.25, 0.5, 0.75, 1.0)
+        self.upload([((-1.0, -1.0), col), ((1.0, -1.0), col),
+                     ((-1.0, 1.0), col)])
+        self.pipeline(dynamic=[0, 1, 2])
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdSetLineWidth', commandBuffer=self.f.CB,
+                       lineWidth=0x3F800000)
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        stats = job.drawexec_stats[job.operation - 1]
+        self.assertGreater(stats['records'], 0)
+        cov = vn_golden.gfx_tri_coverage(
+            [(-1.0, -1.0, 0.5, 1.0), (1.0, -1.0, 0.5, 1.0),
+             (-1.0, 1.0, 0.5, 1.0)],
+            (0.0, 0.0, 8.0, 4.0, 0.0, 1.0), (0, 0, 8, 4), 8, 4, True, 0)
+        self.check_fb_coverage(cov)
+
     # ---- bounded MRT (two colour attachments) end-to-end ----
     # fs_program2 emits loc0=vcol, loc1=const; the single Writeback stage
     # writes both attachments per fragment under one shared depth gate.

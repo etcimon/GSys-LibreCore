@@ -50,6 +50,8 @@ _VECTOR_DYNAMIC = {
     'vkCmdSetStencilCompareMask': ('stencil_compare_mask', 2),
     'vkCmdSetStencilWriteMask': ('stencil_write_mask', 2),
     'vkCmdSetStencilReference': ('stencil_reference', 2),
+    # single fp32 line width in imm[0]; bounded to lineWidthRange=[1,1]
+    'vkCmdSetLineWidth': ('line_width', 1),
 }
 
 
@@ -81,7 +83,7 @@ def capture(engine, current, name, record):
         if (any(record['imm'][count:]) or record['pay'] or record['chain']):
             raise ValueError('graphics dynamic %s exceeds profile' % kind)
         values = tuple(record['imm'][:count])
-        if kind in ('bounds', 'depth_bias'):
+        if kind in ('bounds', 'depth_bias', 'line_width'):
             floats = struct.unpack('<%df' % count,
                                    struct.pack('<%dI' % count, *values))
             if not all(math.isfinite(v) for v in floats):
@@ -89,6 +91,11 @@ def capture(engine, current, name, record):
                     'graphics dynamic %s floats exceed profile' % kind)
             if kind == 'bounds' and not floats[0] <= floats[1]:
                 raise ValueError('graphics dynamic bounds floats exceed profile')
+            if kind == 'line_width':
+                lo, hi = engine.model.profile['limits']['lineWidthRange']
+                if not lo <= floats[0] <= hi:
+                    raise ValueError(
+                        'graphics dynamic line_width exceeds profile')
         elif kind.startswith('stencil_') and kind != 'stencil_test':
             # faceMask is VkStencilFaceFlags {FRONT=1,BACK=2,BOTH=3}; the
             # trailing values are bounded VkStencilOp/VkCompareOp (0..7) or

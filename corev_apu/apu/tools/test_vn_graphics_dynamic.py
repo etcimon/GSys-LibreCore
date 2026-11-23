@@ -54,6 +54,11 @@ class DynamicTests(unittest.TestCase):
                 extent=self.w.structure('VkExtent2D', width=width, height=height))])
         return self.snapshot()
 
+    def line_width(self, value=1.0):
+        self.f.command('vkCmdSetLineWidth', commandBuffer=self.f.CB,
+                       lineWidth=bits(value))
+        return self.snapshot()
+
     def refuses(self, method, *args, **kwargs):
         case = DynamicTests()
         case.setUp()
@@ -133,6 +138,20 @@ class DynamicTests(unittest.TestCase):
         job = self.e.replay.enqueue(1, [self.f.CB], compute=True)
         self.assertEqual(job.operations, ())
         self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_line_width_single_slot_value_is_preserved(self):
+        # vkCmdSetLineWidth carries one fp32 in imm[0]; the bounded profile
+        # admits only the fixed 1.0 width (lineWidthRange=[1,1]).
+        source = self.line_width()
+        self.assertEqual((source.kind, source.values),
+                         ('line_width', (bits(1.0),)))
+        self.assertEqual(validate(self.e, 1, source), (bits(1.0),))
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_line_width_outside_bounded_range_or_nonfinite_fails(self):
+        for value in (0.5, 2.0, float('nan'), float('inf'), -1.0):
+            with self.subTest(value=value):
+                self.refuses('line_width', value)
 
 
 if __name__ == '__main__':
