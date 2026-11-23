@@ -1536,6 +1536,72 @@ module tb_g6lc_apu_cmdexec;
       cases++;
     end
 
+    // ---- DrawIndexedIndirectCount: indexed Count (type 166) ---------
+    // Same countBuffer machinery as 165 but the command is the 20-byte
+    // VkDrawIndexedIndirectCommand {indexCount,instanceCount,firstIndex,
+    // vertexOffset,firstInstance} at stride 20 -> exercises ind_idx_q,
+    // lenb=20 and the indexed f_iw word mapping through the Count path.
+    // count=3/maxDrawCount=6 -> 3 draws (count read, not the bound).
+    // No index buffer is bound, so StDrIbN skips the IB resolve.
+    tb_drv = 1'b1;
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_007A,
+          APU_VN_KIND_VK_DEVICE_MEMORY, .size(64'd256));
+    ind_mem_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETAUXHI, 64'h1000_0000_0000_007A,
+          APU_VN_KIND_VK_DEVICE_MEMORY,
+          .mask(32'hFFFF_FFFF), .value(32'h0000_E000));
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_007B,
+          APU_VN_KIND_VK_BUFFER, .size(64'd256));
+    ind_buf_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETBIND, 64'h1000_0000_0000_007B,
+          APU_VN_KIND_VK_BUFFER, .size(64'd256),
+          .mem_id(64'h1000_0000_0000_007A));
+    for (int i = 0; i < 4; i++) begin
+      i_emem.apm[32'h3800 + i*5 + 0] = 32'd3;  // indexCount
+      i_emem.apm[32'h3800 + i*5 + 1] = 32'd1;  // instanceCount
+      i_emem.apm[32'h3800 + i*5 + 2] = 32'd0;  // firstIndex
+      i_emem.apm[32'h3800 + i*5 + 3] = 32'd0;  // vertexOffset
+      i_emem.apm[32'h3800 + i*5 + 4] = 32'd0;  // firstInstance
+    end
+    i_emem.apm[32'h3000] = 32'd3;   // countBuffer word (reuse 0xC000 buf)
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[16], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT, gpipe1_h,
+                APU_VN_KIND_VK_PIPELINE, 0));
+    begin
+      apu_cmdrec_rec_t rr = mkrec(
+          APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT, rp2_h,
+          APU_VN_KIND_VK_RENDER_PASS, 0);
+      rr.handle[1] = fb2_h; rr.kind[1] = APU_VN_KIND_VK_FRAMEBUFFER;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0, rr, 16'd1);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_EXT, 0, 0, 0));
+    begin
+      apu_cmdrec_rec_t dr = mkrec(
+          APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_COUNT_EXT, ind_buf_h,
+          APU_VN_KIND_VK_BUFFER, 32'd6);
+      dr.handle[1] = ind_buf2_h; dr.kind[1] = APU_VN_KIND_VK_BUFFER;
+      dr.imm[1] = 32'd20;  // stride
+      cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0, dr);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_END_RENDER_PASS_EXT, 0, 0, 0));
+    cr_op(APU_CMDREC_OP_END, cbd[16], 0, '0);
+    tb_drv = 1'b0;
+    begin
+      int w0 = work_i, ndi = 0;
+      fclr[15] = 1'b1; @(negedge clk); fclr[15] = 1'b0; @(negedge clk);
+      submit(5'd15, 1, cbd[16], cb_h, 32'h0, 32'h0);
+      wait_fence(15, 8000);
+      for (int w = w0; w < work_i; w++)
+        if (got_work[w] ==
+            APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_COUNT_EXT) ndi++;
+      check("mdic no lost", flost[15] === 1'b0);
+      check("mdic count=3 work", ndi == 3);
+      cases++;
+    end
+
     // ---- §3a case: query pool WRITE_TIMESTAMP ---------------------------
     // Runs before case 13 (watchdog device-death): a dead device rejects
     // new ObjTab ALLOCs, so the pools must be created while the device is
