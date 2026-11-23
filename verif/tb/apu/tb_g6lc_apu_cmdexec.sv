@@ -1535,6 +1535,49 @@ module tb_g6lc_apu_cmdexec;
       check("mdc clamp count=9->4 work", ndi == 4);
       cases++;
     end
+    // ---- submit C: count=0 -> zero draws, clean retire -------------
+    // Exercises the StIndRdC dr==0 early-out: both buffers still
+    // resolve and the count word is fetched, but min(0,maxDrawCount)=0
+    // retires the record with no draw work item and no loss.
+    tb_drv = 1'b1;
+    i_emem.apm[32'h3000] = 32'd0;
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[16], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT, gpipe1_h,
+                APU_VN_KIND_VK_PIPELINE, 0));
+    begin
+      apu_cmdrec_rec_t rr = mkrec(
+          APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT, rp2_h,
+          APU_VN_KIND_VK_RENDER_PASS, 0);
+      rr.handle[1] = fb2_h; rr.kind[1] = APU_VN_KIND_VK_FRAMEBUFFER;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0, rr, 16'd1);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_EXT, 0, 0, 0));
+    begin
+      apu_cmdrec_rec_t dr = mkrec(
+          APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_COUNT_EXT, ind_buf_h,
+          APU_VN_KIND_VK_BUFFER, 32'd5);
+      dr.handle[1] = ind_buf2_h; dr.kind[1] = APU_VN_KIND_VK_BUFFER;
+      dr.imm[1] = 32'd16;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0, dr);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_END_RENDER_PASS_EXT, 0, 0, 0));
+    cr_op(APU_CMDREC_OP_END, cbd[16], 0, '0);
+    tb_drv = 1'b0;
+    begin
+      int w0 = work_i, ndi = 0;
+      fclr[5] = 1'b1; @(negedge clk); fclr[5] = 1'b0; @(negedge clk);
+      submit(5'd5, 1, cbd[16], cb_h, 32'h0, 32'h0);
+      wait_fence(5, 8000);
+      for (int w = w0; w < work_i; w++)
+        if (got_work[w] ==
+            APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_COUNT_EXT) ndi++;
+      check("mdc count=0 no lost", flost[5] === 1'b0);
+      check("mdc count=0 no work", ndi == 0);
+      cases++;
+    end
 
     // ---- DrawIndexedIndirectCount: indexed Count (type 166) ---------
     // Same countBuffer machinery as 165 but the command is the 20-byte

@@ -3205,8 +3205,14 @@ module g6lc_apu_cmdexec
                   automatic logic [63:0] nb  =
                       ind_xb_q + {32'h0, rec_q.imm[2]};
                   if (dr == 32'd0) begin
-                    ind_cnt_q <= 1'b0;
-                    state_q   <= StNextBuf;
+                    // count=0 retires the record with no draw work —
+                    // clear ind_q like the normal StIndRdC completion so
+                    // no indirect-fetch state leaks into the next record
+                    ind_q       <= 1'b0;
+                    ind_cnt_q   <= 1'b0;
+                    ind_loop_q  <= 1'b0;
+                    ind_left_q  <= '0;
+                    state_q     <= StNextBuf;
                   end else begin
                     ind_base_q <= nb;
                     ind_nb_q   <= 3'((32'(ind_len_q) +
