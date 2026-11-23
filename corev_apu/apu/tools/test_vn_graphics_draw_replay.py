@@ -1710,14 +1710,20 @@ class DrawReplayTests(unittest.TestCase):
 
     def indexed_prepared(self, index_type, index_count, first_index=0,
                          vertex_offset=0, topology=3, restart=0,
-                         instance_count=1, first_instance=0, vs=None):
+                         instance_count=1, first_instance=0, vs=None,
+                         ib2_size=None):
         self.pipeline(topology=topology, restart=restart, vs=vs)
         self.begin_pass()
         self.viewport()
         self.scissor()
         self.bind()
-        self.f.command('vkCmdBindIndexBuffer', commandBuffer=self.f.CB,
-                       buffer=self.IB, offset=0, indexType=index_type)
+        if ib2_size is None:
+            self.f.command('vkCmdBindIndexBuffer', commandBuffer=self.f.CB,
+                           buffer=self.IB, offset=0, indexType=index_type)
+        else:
+            self.f.command('vkCmdBindIndexBuffer2', commandBuffer=self.f.CB,
+                           buffer=self.IB, offset=0, size=ib2_size,
+                           indexType=index_type)
         self.f.command('vkCmdDrawIndexed', commandBuffer=self.f.CB,
                        indexCount=index_count, instanceCount=instance_count,
                        firstIndex=first_index, vertexOffset=vertex_offset,
@@ -1752,6 +1758,54 @@ class DrawReplayTests(unittest.TestCase):
         self.assertEqual(job.state, 'done')
         clip = [(x, y, 0.5, 1.0) for x, y in pos]
         self.check_fb_coverage(self.indexed_coverage(clip, indices))
+
+    def test_draw_indexed_bind2_size_covers_index_range(self):
+        # vkCmdBindIndexBuffer2 carries an explicit byte size alongside
+        # the u64 offset; a size spanning the u16 index list must replay
+        # identically to the base bind (size=0 means "to buffer end").
+        col = (0.25, 0.5, 0.75, 1.0)
+        pos = [(-1.0, -1.0), (-1.0, 1.0), (0.5, -1.0), (1.0, 0.0)]
+        self.upload([(p, col) for p in pos])
+        indices = [0, 1, 2, 1, 3, 2]
+        self.upload_indices(indices, 0)
+        # 6 u16 indices = 12 bytes; bind size covers exactly that range.
+        self.indexed_prepared(0, len(indices), ib2_size=12)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        clip = [(x, y, 0.5, 1.0) for x, y in pos]
+        self.check_fb_coverage(self.indexed_coverage(clip, indices))
+
+    def test_draw_indexed_bind2_size_zero_whole_buffer(self):
+        # size=0 is the Vulkan "offset to end of buffer" form — it must
+        # admit the same index range as the base bind.
+        col = (0.25, 0.5, 0.75, 1.0)
+        pos = [(-1.0, -1.0), (-1.0, 1.0), (0.5, -1.0), (1.0, 0.0)]
+        self.upload([(p, col) for p in pos])
+        indices = [0, 1, 2]
+        self.upload_indices(indices, 0)
+        self.indexed_prepared(0, len(indices), ib2_size=0)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        clip = [(x, y, 0.5, 1.0) for x, y in pos]
+        self.check_fb_coverage(self.indexed_coverage(clip, indices))
+
+    def test_draw_indexed_bind2_size_out_of_range_refused(self):
+        # A bind size reaching past the buffer extent is a validation
+        # fault — the model must refuse rather than admit a truncated
+        # index range silently.
+        col = (0.25, 0.5, 0.75, 1.0)
+        pos = [(-1.0, -1.0), (-1.0, 1.0), (0.5, -1.0)]
+        self.upload([(p, col) for p in pos])
+        indices = [0, 1, 2]
+        self.upload_indices(indices, 0)
+        with self.assertRaises(StreamFault):
+            self.indexed_prepared(0, len(indices), ib2_size=1 << 20)
+            self.f.enqueue()
+            self.f.drain()
 
     def test_draw_indexed_uint32_selects_subset(self):
         # uint32 indices select a 3-vertex subset out of order — v1 is a

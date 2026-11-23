@@ -15,6 +15,7 @@ class BufferSource:
     usage: int
     offset: int
     index_bytes: int
+    size: int = 0
 
 
 @dataclass(frozen=True)
@@ -24,7 +25,8 @@ class BufferBindings:
 
 
 def capture(engine, current, name, record):
-    if name not in ('vkCmdBindVertexBuffers', 'vkCmdBindIndexBuffer'):
+    if name not in ('vkCmdBindVertexBuffers', 'vkCmdBindIndexBuffer',
+                    'vkCmdBindIndexBuffer2'):
         return None
     front, kinds = current.frontend, engine.golden.KIND
     context = engine.contexts[front.ctx]
@@ -58,17 +60,22 @@ def capture(engine, current, name, record):
             raise ValueError('vertex binding count/payload exceeds profile')
         data = record['pay']
         values = [(data[2 * i] | data[2 * i + 1] << 32,
-                   data[2 * count + 2 * i] | data[2 * count + 2 * i + 1] << 32, 0)
+                   data[2 * count + 2 * i] | data[2 * count + 2 * i + 1] << 32,
+                   0, 0)
                   for i in range(count)]
     else:
         first, index_type = 0, record['imm'][0]
-        if index_type not in (0, 1) or len(record['pay']) != 2:
+        is2 = name == 'vkCmdBindIndexBuffer2'
+        if (index_type not in (0, 1) or
+                len(record['pay']) != (4 if is2 else 2)):
             raise ValueError('index type/payload exceeds uint16/uint32 profile')
         buffer = next(record['q'][i] for i in range(8)
                       if record['qv'] >> i & 1 and record['kind'][i] == kinds['VkBuffer'])
-        values = [(buffer, record['pay'][0] | record['pay'][1] << 32, 2 << index_type)]
+        offset = record['pay'][0] | record['pay'][1] << 32
+        bsize = record['pay'][2] | record['pay'][3] << 32 if is2 else 0
+        values = [(buffer, offset, 2 << index_type, bsize)]
     sources = []
-    for raw, offset, index_bytes in values:
+    for raw, offset, index_bytes, bsize in values:
         buffer, entry = resolve(raw, 'VkBuffer')
         slot = entry.get('bind_mem', -1)
         if not 0 <= slot < front.SLOTS:
@@ -78,10 +85,11 @@ def capture(engine, current, name, record):
         if (entry['parent'] != parent or me['parent'] != parent or
                 not usage & (0x40 if index_bytes else 0x80) or offset >= capacity or
                 binding + capacity > me['size'] or
-                index_bytes and (offset % index_bytes or binding % index_bytes)):
+                index_bytes and (offset % index_bytes or binding % index_bytes) or
+                bsize and offset + bsize > capacity):
             raise ValueError('vertex/index usage/device/alignment/range exceeds logical buffer')
         sources.append(BufferSource(context, device, buffer, memory, binding,
-                                    capacity, usage, offset, index_bytes))
+                                    capacity, usage, offset, index_bytes, bsize))
     return BufferBindings(first, tuple(sources))
 
 
@@ -116,8 +124,11 @@ def operand(engine, context_id, source, length=None):
 
     resolve(source.device, 'VkDevice')
     entry, memory = resolve(source.buffer, 'VkBuffer'), resolve(source.memory, 'VkDeviceMemory')
-    size = source.capacity - source.offset if length is None else length
-    if (type(size) is not int or not 0 < size <= source.capacity - source.offset or
+    avail = source.capacity - source.offset
+    if source.size:
+        avail = min(avail, source.size)
+    size = avail if length is None else length
+    if (type(size) is not int or not 0 < size <= avail or
             source.binding + source.capacity > memory['size'] or
             source.index_bytes and size % source.index_bytes and length is not None):
         raise ValueError('vertex/index operand range exceeds logical buffer')

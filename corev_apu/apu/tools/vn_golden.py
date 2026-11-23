@@ -3724,7 +3724,8 @@ class FrontModel(ObjectTable, PayloadMemory):
                 nbind = r['imm'][1] & 0xFFFF
                 for i in range(min(nbind, 16 - fbnd)):
                     vbs[fbnd + i] = self.pay.get(abase + i, 0)
-            elif ct == T.get('vkCmdBindIndexBuffer', -1):
+            elif ct in (T.get('vkCmdBindIndexBuffer', -1),
+                        T.get('vkCmdBindIndexBuffer2', -1)):
                 ib = r['handle'][0]
             elif ct in (T['vkCmdCopyBuffer'], T['vkCmdFillBuffer'],
                         T['vkCmdUpdateBuffer'],
@@ -5618,6 +5619,7 @@ class FrontModel(ObjectTable, PayloadMemory):
                                 session['T'].get('vkCmdSetScissorWithCount'),
                                 session['T'].get('vkCmdSetBlendConstants'),
                                 session['T'].get('vkCmdBindIndexBuffer'),
+                                session['T'].get('vkCmdBindIndexBuffer2'),
                                 session['T']['vkCmdPipelineBarrier'],
                                 session['T']['vkCmdCopyBuffer'],
                                 session['T']['vkCmdFillBuffer'],
@@ -12411,6 +12413,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # variant; stride-stepped commands + count u32 (ib2+0x180) +
         # relocated index list (ib2+0x100) all share ib2.
         is_ixcnt = 'drawindxcnt' in gfx
+        # drawindxib2: same indexed-indirect triangle but the index
+        # buffer binds through vkCmdBindIndexBuffer2 — the *2 operand
+        # adds a byte-size bound (ib2+0x20 index list) alongside offset.
+        is_ib2 = 'ib2' in gfx
         is_drawind = 'drawind' in gfx and not is_drawindx
         # drawindmd<N>: multi-draw-indirect — N stride-stepped identical
         # VkDrawIndirectCommand structs issue N work items over the one
@@ -16326,11 +16332,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                               width=SC[2], height=SC[3]))]))),
         ]) + ([] if not is_drawindx else [
             # drawindx binds the u16 {0,1,2} list inside ib2 before
-            # the indexed indirect record
-            ('vkCmdBindIndexBuffer', dict(
-                commandBuffer=cbdraw, buffer=X['ib2'],
-                offset=(0x100 if (is_ixmd or is_ixcnt) else 0x20),
-                indexType=0)),
+            # the indexed indirect record; drawindxib2 rides the *2
+            # operand (offset + byte-size bound) instead
+            ('vkCmdBindIndexBuffer2' if is_ib2 else 'vkCmdBindIndexBuffer',
+             dict(commandBuffer=cbdraw, buffer=X['ib2'],
+                  offset=(0x100 if (is_ixmd or is_ixcnt) else 0x20),
+                  indexType=0,
+                  **({'size': 0x100} if is_ib2 else {}))),
         ]) + [
             ([('vkCmdDrawIndirect', dict(
                 commandBuffer=cbdraw, buffer=X['ib2'], offset=4,

@@ -78,7 +78,7 @@ class GraphicsDraws:
             return self._dynamic(name, record)
         if name == 'vkCmdBindVertexBuffers':
             return self._vertex_bindings(record)
-        if name == 'vkCmdBindIndexBuffer':
+        if name in ('vkCmdBindIndexBuffer', 'vkCmdBindIndexBuffer2'):
             return self._index_binding(record)
         if name == 'vkCmdBeginRenderPass':
             self._begin(record)

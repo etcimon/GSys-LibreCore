@@ -191,6 +191,10 @@ python3 $G --graphics-session ue_gpos_dindcnt_1 1
 # (no raster scratch); stored 9 clamps to maxDrawCount=4 draws
 python3 $G --graphics-session ue_gpos_dindcntz_1 1
 python3 $G --graphics-session ue_gpos_dindcntx_1 1
+# drawindxib2: vkCmdBindIndexBuffer2 — indexed indirect triangle whose
+# index buffer binds through the *2 operand (offset + byte-size bound);
+# coverage identical to ue_gpos_drawindx_1 (only arena pointers shift)
+python3 $G --graphics-session ue_gpos_drawindxib2_1 1
 # triwithcnt: vkCmdSet{Viewport,Scissor}WithCount(count=1) dynamic state —
 # identical VP/SC values to ue_gpos_tri_1 so coverage is unchanged; first
 # RTL-level exercise of the *2 payload path (golden pwords whitelist fix)
