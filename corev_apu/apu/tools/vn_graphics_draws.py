@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from vn_graphics_bindings import GraphicsBindings
 from vn_graphics_dynamic import DynamicCommand, Recording, validate as dynamic_values
-from vn_graphics_dynamic import validate_recording
+from vn_graphics_dynamic import validate_recording, _BOOL_DYNAMIC
 from vn_native_rendering import framebuffer_operand
 from vn_render_pass_commands import BeginPass, EndPass, NextPass
 from vn_vertex_operands import BufferBindings, BufferSource, operand as buffer_span
@@ -37,10 +37,17 @@ class DrawPlan(Recording):
     viewport: tuple
     scissor: tuple
     restart: object
+    discard: object
     vertices: tuple
     indices: object
     references: tuple
     validate: object
+
+
+# DynamicCommand kind -> GraphicsDraws shadow attribute for the single-
+# VkBool32 dynamic-state commands.
+_BOOL_ATTR = {'primitive_restart': 'restart',
+              'rasterizer_discard': 'discard'}
 
 
 class GraphicsDraws:
@@ -56,7 +63,7 @@ class GraphicsDraws:
         self.device = recording.device
         self.bindings = GraphicsBindings(engine, context_id, recording)
         self.viewport = self.scissor = None
-        self.restart = None
+        self.restart = self.discard = None
         self.vertices, self.index_source = {}, None
         self.pass_state = None
         self.subpass = 0
@@ -78,8 +85,8 @@ class GraphicsDraws:
         if name in ('vkCmdSetViewport', 'vkCmdSetScissor',
                     'vkCmdSetViewportWithCount', 'vkCmdSetScissorWithCount'):
             return self._dynamic(name, record)
-        if name == 'vkCmdSetPrimitiveRestartEnable':
-            return self._restart(record)
+        if name in _BOOL_DYNAMIC:
+            return self._bool(record, _BOOL_DYNAMIC[name])
         if name in ('vkCmdBindVertexBuffers', 'vkCmdBindVertexBuffers2'):
             return self._vertex_bindings(record)
         if name in ('vkCmdBindIndexBuffer', 'vkCmdBindIndexBuffer2'):
@@ -110,13 +117,13 @@ class GraphicsDraws:
             self.scissor = values
         return True
 
-    def _restart(self, record):
+    def _bool(self, record, kind):
         snapshot = record.get('native_graphics_dynamic')
         if (not isinstance(snapshot, DynamicCommand) or
-                snapshot.kind != 'primitive_restart'):
-            raise KeyError('graphics draw restart snapshot is unavailable')
-        self.restart = dynamic_values(self.engine, self.context_id,
-                                      snapshot)[0]
+                snapshot.kind != kind):
+            raise KeyError('graphics draw dynamic snapshot is unavailable')
+        setattr(self, _BOOL_ATTR[kind],
+                dynamic_values(self.engine, self.context_id, snapshot)[0])
         return True
 
     def _vertex_bindings(self, record):
@@ -315,5 +322,5 @@ class GraphicsDraws:
                 recording.command_buffer, recording.recording, len(self.plans),
                 name, values, indirect_op, snapshot, operands, self.pass_state,
                 self.subpass, framebuffer.attachments, framebuffer,
-                self.viewport, self.scissor, self.restart, vertices,
-                indices, references, validate))
+                self.viewport, self.scissor, self.restart, self.discard,
+                vertices, indices, references, validate))

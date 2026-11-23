@@ -20,20 +20,28 @@ class DynamicCommand(Recording):
     values: tuple
 
 
+# vkCmdSet* dynamic-state commands carrying a single VkBool32 immediate in
+# imm[0] (no payload/chain/extra immediates) -> DynamicCommand kind.
+_BOOL_DYNAMIC = {
+    'vkCmdSetPrimitiveRestartEnable': 'primitive_restart',
+    'vkCmdSetRasterizerDiscardEnable': 'rasterizer_discard',
+}
+
+
 def capture(engine, current, name, record):
-    restart = name == 'vkCmdSetPrimitiveRestartEnable'
+    bool_kind = _BOOL_DYNAMIC.get(name)
     base = name in ('vkCmdSetViewport', 'vkCmdSetScissor')
     counted = name in ('vkCmdSetViewportWithCount', 'vkCmdSetScissorWithCount')
-    if not (base or counted or restart):
+    if not (base or counted or bool_kind):
         return None
-    if restart:
+    if bool_kind is not None:
         # single VkBool32 immediate in imm[0]; no payload, chain or extra
         # immediates — the bounded profile admits only the 0/1 domain.
         if (record['imm'][0] not in (0, 1) or any(record['imm'][1:]) or
                 record['pay'] or record['chain']):
-            raise ValueError('graphics dynamic primitive-restart exceeds profile')
+            raise ValueError('graphics dynamic %s exceeds profile' % bool_kind)
         return DynamicCommand(*recording_identity(engine, current, record),
-                              'primitive_restart', (record['imm'][0],))
+                              bool_kind, (record['imm'][0],))
     viewport = 'Viewport' in name
     # base carries {first,count} in imm[0:2]; *WithCount drops first and
     # carries only count in imm[0] (always writes slots [0,count)).  The
@@ -92,7 +100,8 @@ def attach(out, snapshot):
 
 def validate(engine, context_id, snapshot):
     if (not isinstance(snapshot, DynamicCommand) or
-            snapshot.kind not in ('viewport', 'scissor', 'primitive_restart')):
+            snapshot.kind not in ('viewport', 'scissor') +
+            tuple(_BOOL_DYNAMIC.values())):
         raise KeyError('graphics dynamic identity is unavailable')
     validate_recording(engine, context_id, snapshot)
     return snapshot.values

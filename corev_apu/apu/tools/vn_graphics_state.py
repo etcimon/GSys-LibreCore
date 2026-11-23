@@ -82,7 +82,9 @@ class GraphicsState:
 # 1000000000 + (extnumber-1)*1000 + offset (vkxml._parse_enum); only states
 # whose vkCmdSet* command has golden modeling may be declared here.
 DYNAMIC_PRIMITIVE_RESTART = 1000000000 + (378 - 1) * 1000 + 4
-_DYNAMIC_ADMITTED = frozenset((DYNAMIC_PRIMITIVE_RESTART,))
+DYNAMIC_RASTERIZER_DISCARD = 1000000000 + (378 - 1) * 1000 + 1
+_DYNAMIC_ADMITTED = frozenset((DYNAMIC_PRIMITIVE_RESTART,
+                             DYNAMIC_RASTERIZER_DISCARD))
 
 
 def validate(engine, fields, blobs, render_pass, subpass=0):

@@ -20,7 +20,8 @@ import struct
 
 from vn_graphics_drawexec import DrawExec
 from vn_graphics_fetch import Fetch, FetchVertex
-from vn_graphics_state import DYNAMIC_PRIMITIVE_RESTART
+from vn_graphics_state import (DYNAMIC_PRIMITIVE_RESTART,
+                               DYNAMIC_RASTERIZER_DISCARD)
 
 
 def _push(stages):
@@ -144,6 +145,10 @@ def operation(engine, context_id, plan, remember, guards):
     if (DYNAMIC_PRIMITIVE_RESTART in fixed.dynamic and
             plan.restart is not None):
         restart = plan.restart
+    discard = fixed.discard
+    if (DYNAMIC_RASTERIZER_DISCARD in fixed.dynamic and
+            plan.discard is not None):
+        discard = plan.discard
     fetch = Fetch(indexed, plan.indices, vertices, direct, indirect,
                   restart)
     viewport = struct.unpack('<6f', struct.pack('<6I', *plan.viewport))
@@ -158,7 +163,7 @@ def operation(engine, context_id, plan, remember, guards):
                   cull=fixed.cull, location=location, depth=depth,
                   blend=fixed.blend,
                   write_mask=fixed.color_masks[location],
-                  logic_op=fixed.logic_op, discard=fixed.discard,
+                  logic_op=fixed.logic_op, discard=discard,
                   extra_targets=extra_targets,
                   bounds=fixed.bounds, depth_bias=fixed.depth_bias,
                   depth_clamp=fixed.depth_clamp, poly_mode=fixed.poly_mode,

@@ -1828,6 +1828,22 @@ class DrawReplayTests(unittest.TestCase):
         self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
         self.f.end()
 
+    def dyn_discard_prepared(self, enable, clear=None):
+        # vkCmdSetRasterizerDiscardEnable dynamic state: the pipeline
+        # declares VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE (wire
+        # 1000377001) so the command value overrides create-info discard.
+        self.pipeline(dynamic=[0, 1, 1000377001], raster_discard=0)
+        self.begin_pass(clear=clear)
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdSetRasterizerDiscardEnable',
+                       commandBuffer=self.f.CB,
+                       rasterizerDiscardEnable=enable)
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
     def indexed_coverage(self, clip, indices):
         # clip = per-vertex clip positions; indices select/reorder them
         # into TRIANGLE_LIST triples for the golden coverage union.
@@ -2448,6 +2464,41 @@ class DrawReplayTests(unittest.TestCase):
         clip = [(x, y, 0.5, 1.0) for x, y in pos]
         self.check_fb_coverage(
             self.dyn_restart_coverage_off(clip, indices, 0xFFFF))
+
+    def test_draw_dynamic_rasterizer_discard_enable(self):
+        # vkCmdSetRasterizerDiscardEnable(1) overrides the pipeline flag:
+        # every primitive is discarded before rasterization, so zero
+        # fragment records reach writeback and the framebuffer keeps the
+        # pass clear — identical to the static rasterizerDiscardEnable=1.
+        self.upload(self.ndc_triangle())
+        clear = [0x3E800000, 0x3E800000, 0, 0x3F800000]
+        self.dyn_discard_prepared(1, clear=clear)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertEqual(
+            job.drawexec_stats[job.operation - 1]['records'], 0)
+        clear_texel = self.e.golden.img_clear_texel(
+            self.e.model, self.e.golden.img_fmt_id(self.e.model, 37),
+            (0x3E800000, 0x3E800000, 0, 0x3F800000))
+        for x, y in ((0, 0), (4, 1), (7, 3)):
+            self.assertEqual(self.read_texel(x, y), clear_texel)
+
+    def test_draw_dynamic_rasterizer_discard_disable_covers(self):
+        # vkCmdSetRasterizerDiscardEnable(0) keeps normal rasterization:
+        # the triangle covers its usual texels (dynamic off == static 0).
+        self.upload(self.ndc_triangle())
+        self.dyn_discard_prepared(0)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        stats = job.drawexec_stats[job.operation - 1]
+        self.assertEqual(stats['triangles'], 1)
+        self.assertGreater(stats['records'], 0)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.fc_texel(x, y))
 
     # ---- bounded MRT (two colour attachments) end-to-end ----
     # fs_program2 emits loc0=vcol, loc1=const; the single Writeback stage
