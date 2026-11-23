@@ -194,7 +194,7 @@ module g6lc_apu_rast
     assign done_o = 1'b0; assign done_pl_o = '0;
     assign sh_work_valid_o = 1'b0; assign sh_ctype_o = '0;
     assign sh_imm_o = '0; assign sh_slot_o = '0;
-    assign sh_desc_o = '0; assign sh_push_n_o = '0; assign sh_push_o = '0;
+    assign sh_desc_o = '{default: '0}; assign sh_push_n_o = '0; assign sh_push_o = '0;
     assign mp_req_valid_o = 1'b0; assign mp_req_o = '0;
     assign pg_req_valid_o = 1'b0; assign pg_req_o = '0;
     assign pg_cpl_ready_o = 1'b0;
@@ -889,7 +889,8 @@ module g6lc_apu_rast
     logic [31:0]  vphw_q, vphh_q, vpdz_q;   // vp.w/2, vp.h/2, maxz-minz
     logic [31:0]  inst_q, bat_q;
     logic [5:0]   nv_q, j_q;
-    logic [2:0]   a_q;
+    logic [3:0]   a_q;
+    logic [15:0]  lstip_q;                  // Vulkan 1.4 line stipple counter
     logic [1:0]   i_q;                      // window word cursor
     logic [1:0]   t_q;                      // triangle vertex cursor
     logic signed [31:0] ib_i;               // current vertex index
@@ -1000,9 +1001,11 @@ module g6lc_apu_rast
     // Meaningful only while st_q==S_GA_IBX.
     wire signed [31:0] vt_cur_ib =
         dr_q.vertex_offset +
-        (dr_q.ib_type == 2'd1
-         ? {16'h0, win_q[8*caddr_q[2:0] +: 16]}
-         : win_q[8*caddr_q[2:0] +: 32]);
+        (dr_q.ib_type == 2'd3
+         ? {24'h0, win_q[8*caddr_q[2:0] +: 8]}
+         : dr_q.ib_type == 2'd1
+           ? {16'h0, win_q[8*caddr_q[2:0] +: 16]}
+           : win_q[8*caddr_q[2:0] +: 32]);
     // Cache byte addresses (8 B aligned).  Entry stride VTXC_STR=152 B:
     // word0 = tag, words1..18 = the VSTR post-transform record.  The
     // entry*152 product is kept in a 48-bit self-determined width (entry
@@ -1906,6 +1909,7 @@ module g6lc_apu_rast
         clr_pix_q <= '0; cy_q <= '0; cx_q <= '0;
         vphw_q <= '0; vphh_q <= '0; vpdz_q <= '0;
         inst_q <= '0; bat_q <= '0; nv_q <= '0; j_q <= '0; a_q <= '0;
+        lstip_q <= '0;
         i_q <= '0; t_q <= '0; ib_i <= '0; win_q <= '0; wn_q <= '0;
         caddr_q <= '0; gbase_q <= '0; gsize_q <= '0; csz_q <= '0;
         gret_q <= S_IDLE;
@@ -2084,7 +2088,6 @@ module g6lc_apu_rast
                 if ((dr_q.topology > 8'd5) ||
                     (!topo_list_w &&
                      dr_q.vertex_count > 32'(VSB)) ||
-                    dr_q.ib_type > 2'd2 ||
                     (dr_q.ib_type != 2'd0 && dr_q.ib_size == 32'd0) ||
                     (dr_q.ca_valid == 8'h0 && !dr_q.da_valid) ||
                     ca_fmt_bad ||
@@ -2199,8 +2202,10 @@ module g6lc_apu_rast
             end else begin
               caddr_q <= dr_q.ib_base +
                          (dr_q.first_index + bat_q + {26'h0, j_q}) *
-                         (dr_q.ib_type == 2'd1 ? 32'd2 : 32'd4);
-              csz_q <= (dr_q.ib_type == 2'd1) ? 5'd2 : 5'd4;
+                         (dr_q.ib_type == 2'd3 ? 32'd1 :
+                          dr_q.ib_type == 2'd1 ? 32'd2 : 32'd4);
+              csz_q <= (dr_q.ib_type == 2'd3) ? 5'd1 :
+                       (dr_q.ib_type == 2'd1) ? 5'd2 : 5'd4;
               gbase_q <= dr_q.ib_base;
               gsize_q <= dr_q.ib_size;
               gret_q <= S_GA_IBX;
@@ -2212,7 +2217,9 @@ module g6lc_apu_rast
             // slot stays in the batch so later assembly sees the
             // break, and no attribute fetch uses the sentinel.
             if (dr_q.restart && dr_q.ib_type != 2'd0 &&
-                ((dr_q.ib_type == 2'd1 &&
+                ((dr_q.ib_type == 2'd3 &&
+                  win_q[8*caddr_q[2:0] +: 8] == 8'hFF) ||
+                 (dr_q.ib_type == 2'd1 &&
                   win_q[8*caddr_q[2:0] +: 16] == 16'hFFFF) ||
                  (dr_q.ib_type == 2'd2 &&
                   win_q[8*caddr_q[2:0] +: 32] == 32'hFFFF_FFFF))) begin
@@ -2253,22 +2260,28 @@ module g6lc_apu_rast
             if (j_q >= nv_q) begin
               st_q <= S_VS_ISS;
             end else if (!dr_q.attr[a_q].valid) begin
-              if (a_q == 3'd7) begin
+              if (a_q == 4'd15) begin
                 a_q <= '0;
                 st_q <= S_GA_S8A;   // slot-8 write ends vertex j
               end
-              else a_q <= a_q + 3'd1;
+              else a_q <= a_q + 4'd1;
             end else if (!attr_ok) begin
               // valid flag set but unknown format -> honest refusal
               code_q <= APU_SH_DONE_UNSUPPORTED;
               st_q <= S_FIN_BAD;
             end else begin
               // instance-rate bindings index by the absolute instance
-              // index; vertex-rate bindings index by the (resolved)
-              // vertex index
+              // index (or divided by vb_div when divisor is enabled);
+              // vertex-rate bindings index by the resolved vertex index
+              automatic logic [31:0] inst_eff =
+                  !dr_q.vb_div_en[a_bnd] ? inst_q :
+                  (dr_q.vb_div[a_bnd] == 32'd0) ? dr_q.first_instance :
+                  (dr_q.vb_div[a_bnd] == 32'd1) ? inst_q :
+                  (((inst_q - dr_q.first_instance) / dr_q.vb_div[a_bnd]) +
+                   dr_q.first_instance);
               caddr_q <= dr_q.vb_base[a_bnd] +
                          32'($signed(dr_q.vb_rate[a_bnd]
-                                    ? inst_q : 32'(ib_i)) *
+                                    ? inst_eff : 32'(ib_i)) *
                              $signed({16'h0, dr_q.vb_stride[a_bnd]})) +
                          a_off;
               csz_q <= f_asz(a_fmt);
@@ -2420,7 +2433,7 @@ module g6lc_apu_rast
             if (wq_ok) begin
               t_wq({32'h0, vsi_q} +
                    {26'h0, rec_idx_w} * 64'(ASTR) +
-                   {29'h0, dr_q.attr[a_q].loc, 4'h0},
+                   {29'h0, dr_q.attr[a_q].loc[2:0], 4'h0},
                    {conv_q[1], conv_q[0]}, 8'hFF);
               st_q <= S_GA_W1;
             end
@@ -2429,15 +2442,15 @@ module g6lc_apu_rast
             if (wq_ok) begin
               t_wq({32'h0, vsi_q} +
                    {26'h0, rec_idx_w} * 64'(ASTR) +
-                   {29'h0, dr_q.attr[a_q].loc, 4'h0} + 64'd8,
+                   {29'h0, dr_q.attr[a_q].loc[2:0], 4'h0} + 64'd8,
                    {conv_q[3], conv_q[2]}, 8'hFF);
-              if (a_q == 3'd7) a_q <= '0;
-              else             a_q <= a_q + 3'd1;
-              st_q <= (a_q == 3'd7) ? S_GA_S8A : S_GA_ATTR;
+              if (a_q == 4'd15) a_q <= '0;
+              else              a_q <= a_q + 4'd1;
+              st_q <= (a_q == 4'd15) ? S_GA_S8A : S_GA_ATTR;
             end
           end
           // slot 8 of the VS-in record = {VertexIndex, InstanceIndex,
-          // 0, 0}; the ShaderCore reads the builtins from here (G2a)
+          // {draw_idx,view_idx}, base_vertex}; the ShaderCore reads builtins
           S_GA_S8A: begin
             if (wq_ok) begin
               t_wq({32'h0, vsi_q} +
@@ -2450,7 +2463,8 @@ module g6lc_apu_rast
             if (wq_ok) begin
               t_wq({32'h0, vsi_q} +
                    {26'h0, rec_idx_w} * 64'(ASTR) + 64'd136,
-                   64'h0, 8'hFF);
+                   {(dr_q.ib_type == 2'd0 ? dr_q.first_vertex : 32'(dr_q.vertex_offset)),
+                    dr_q.draw_idx, dr_q.view_idx}, 8'hFF);
               j_q <= j_q + 6'd1;
               // TP5: only misses reach this state under reuse_en, so
               // mi_q (the packed miss count) advances here; hits advance
@@ -2623,7 +2637,10 @@ module g6lc_apu_rast
               sh_imm_o[3] <= (dr_q.ib_type == 2'd0)
                              ? dr_q.first_vertex + bat_q : '0;
               sh_imm_o[4] <= inst_q;
-              sh_imm_o[5] <= '0; sh_imm_o[6] <= '0; sh_imm_o[7] <= '0;
+              sh_imm_o[5] <= {dr_q.draw_idx, dr_q.view_idx};
+              sh_imm_o[6] <= (dr_q.ib_type == 2'd0)
+                             ? dr_q.first_vertex : 32'(dr_q.vertex_offset);
+              sh_imm_o[7] <= dr_q.first_instance;
               shv_q <= 1'b1;
               if (shv_q && sh_work_ready_i) begin
                 shv_q <= 1'b0;
@@ -4053,13 +4070,18 @@ module g6lc_apu_rast
             rs_q    <= 32'h3F800000;
             fz_q    <= poly_pt_q ? vz_q[l0_w] : vz_q[0];
             help_q  <= 1'b0;
+            lstip_q <= 16'd0;
             st_q    <= S_LN_PIX;
           end
           S_LN_PIX: begin
             if (lx_q < 16'sd0 || ly_q < 16'sd0 ||
                 lx_q < signed'(dr_q.sc_x) || ly_q < signed'(dr_q.sc_y) ||
                 lx_q >= signed'(dr_q.sc_x) + signed'(dr_q.sc_w) ||
-                ly_q >= signed'(dr_q.sc_y) + signed'(dr_q.sc_h))
+                ly_q >= signed'(dr_q.sc_y) + signed'(dr_q.sc_h) ||
+                (!poly_pt_q && dr_q.stip_en &&
+                 !dr_q.stip_pat[4'((lstip_q / (dr_q.stip_fac == 8'd0
+                                               ? 16'd1 : {8'h0, dr_q.stip_fac}))
+                                   & 16'hF)]))
               st_q <= S_LN_STEP;
             else begin
               px_q  <= 16'(lx_q);
@@ -4070,6 +4092,7 @@ module g6lc_apu_rast
             end
           end
           S_LN_STEP: begin
+            lstip_q <= lstip_q + 16'd1;
             if (lx_q == lxe_q && ly_q == lye_q) begin
               if ((poly_ln_q || poly_pt_q) && le_q != 2'd2) begin
                 // A polygon point takes that vertex's attributes.
@@ -4223,7 +4246,8 @@ module g6lc_apu_rast
               // imm[3].0 = the batch's front-facing bit for the
               // FrontFacing builtin; uniform because a facing change
               // flushes the open batch before the new primitive scans
-              sh_imm_o[3] <= {31'h0, bat_front_q}; sh_imm_o[4] <= '0;
+              sh_imm_o[3] <= {31'h0, bat_front_q};
+              sh_imm_o[4] <= {dr_q.draw_idx, dr_q.view_idx};
               // imm[5]/imm[6] = per-record helper-lane mask (bits
               // [223:160] of the dispatch payload — the wave engine
               // suppresses helper side effects: atomics, image writes,
@@ -4565,7 +4589,13 @@ module g6lc_apu_rast
                 fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
                 fp_a_q <= src_q[c_q[1:0]];
                 fp_b_q <= f_fbase(bsf_w, c_q[1:0]);
-                fp_ret_q <= S_BL_M2;
+                // FP10-A: dual-issue dst*df on the merge-idle i_fma2 lane
+                // and bypass S_BL_M2 (df operand = f_fbase(bdf_w) now).
+                fp2_o_q <= 2'd2; fp2_mod_q <= 1'b0;
+                fp2_a_q <= dst_q[c_q[1:0]];
+                fp2_b_q <= f_fbase(bdf_w, c_q[1:0]);
+                fp2_c_q <= '0; fp2_iss_q <= 1'b1;
+                fp_ret_q <= S_BL_OP;
                 t_fpgo();
               end
             end
@@ -4588,7 +4618,12 @@ module g6lc_apu_rast
               df_q <= f_fbase(bdf_w, c_q[1:0]);
               fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
               fp_a_q <= src_q[c_q[1:0]]; fp_b_q <= fp_res_q;
-              fp_ret_q <= S_BL_M2;
+              // FP10-A: dual-issue dst*df on i_fma2, bypass S_BL_M2.
+              fp2_o_q <= 2'd2; fp2_mod_q <= 1'b0;
+              fp2_a_q <= dst_q[c_q[1:0]];
+              fp2_b_q <= f_fbase(bdf_w, c_q[1:0]);
+              fp2_c_q <= '0; fp2_iss_q <= 1'b1;
+              fp_ret_q <= S_BL_OP;
               t_fpgo();
             end
           end
@@ -4600,7 +4635,13 @@ module g6lc_apu_rast
             df_q <= fp_res_q;
             fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
             fp_a_q <= src_q[c_q[1:0]]; fp_b_q <= sf_q;
-            fp_ret_q <= S_BL_M2;
+            // FP10-A: dual-issue dst*df = dst_q[c] * fp_res_q(=df) on i_fma2,
+            // bypass S_BL_M2.  fp_res_q is the dst-factor SUB result sampled
+            // at issue; i_fma2 latches it before FPW overwrites fp_res_q.
+            fp2_o_q <= 2'd2; fp2_mod_q <= 1'b0;
+            fp2_a_q <= dst_q[c_q[1:0]]; fp2_b_q <= fp_res_q;
+            fp2_c_q <= '0; fp2_iss_q <= 1'b1;
+            fp_ret_q <= S_BL_OP;
             t_fpgo();
           end
           S_BL_M2: begin
@@ -4611,14 +4652,16 @@ module g6lc_apu_rast
             t_fpgo();
           end
           S_BL_OP: begin
-            bm2_q <= fp_res_q;
             fp_kind_q <= 2'd0; fp_o_q <= 2'd1;
             fp_a_q <= '0;
             // ADD: b+c; SUBTRACT: s-d; REVERSE_SUBTRACT: d-s
+            // FP10-A: src*sf arrives as fp_res_q (i_fma via FPW), dst*df as
+            // fma2_res (i_fma2 raw output, dual-issued at the src*sf site).
+            // S_BL_M2 is bypassed so bm1_q/bm2_q are no longer produced.
             fp_b_q <= (bop_w == APU_RAST_BO_REVERSE_SUBTRACT)
-                      ? fp_res_q : bm1_q;
+                      ? fma2_res : fp_res_q;
             fp_c_q <= (bop_w == APU_RAST_BO_REVERSE_SUBTRACT)
-                      ? bm1_q : fp_res_q;
+                      ? fp_res_q : fma2_res;
             fp_mod_q <= (bop_w != APU_RAST_BO_ADD);
             fp_ret_q <= S_BL_ST;
             t_fpgo();
@@ -4732,6 +4775,10 @@ module g6lc_apu_rast
             if ((fp_kind_q == 2'd0 && fma_ir) ||
                 (fp_kind_q == 2'd1 && dq_ir) ||
                 (fp_kind_q == 2'd2 && cv_ir)) fp_iss_q <= 1'b0;
+            // FP10-A: release the merge-borrowed i_fma2 lane once it has
+            // accepted dst*df.  fp2_iss_q is only raised by the S_BL_* dual
+            // issue (S_F_V0 drives it outside FPW), so this is inert there.
+            if (fma2_ir) fp2_iss_q <= 1'b0;
             if (fma_ov || dq_ov || cv_ov) begin
               fp_res_q <= fma_ov ? fma_res : dq_ov ? dq_res : cv_res;
               st_q <= fp_ret_q;

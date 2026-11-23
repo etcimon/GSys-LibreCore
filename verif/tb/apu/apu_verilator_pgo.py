@@ -122,6 +122,20 @@ def build_pgo(src, home, jobs):
     use_log = (attempt / 'use.log').read_text(errors='replace')
     if 'PGO-CXX phase=use' not in use_log:
         raise RuntimeError('profile-use compiler invocations not observed')
+    # The configured runtime makefile must compile generated models with the
+    # real compiler, not this build's profile-injecting cxx.sh wrapper: the
+    # wrapper exists only to PGO verilator's own objects.  configure records
+    # CXX=<wrapper> into include/verilated.mk, which then leaks
+    # -fprofile-use/-fprofile-correction (pointed at verilator's own profile,
+    # mismatched to model code) into every non-PGO model build — a
+    # pathological compile on large generated TUs.  Rewrite CXX to the real
+    # compiler; sim-PGO builds override CXX on the make command line anyway.
+    vltmk = build / 'include' / 'verilated.mk'
+    if vltmk.is_file():
+        real_cxx = str(Path(cxx).resolve())
+        text = re.sub(r'(?m)^(CXX\s*=\s*)\S+', r'\g<1>' + real_cxx,
+                      vltmk.read_text(), count=1)
+        vltmk.write_text(text)
     (home / 'bin').mkdir(exist_ok=True)
     shutil.copytree(build / 'include', home / 'include', dirs_exist_ok=True)
     for name in ('verilator_bin', 'verilator', 'verilator_includer'):

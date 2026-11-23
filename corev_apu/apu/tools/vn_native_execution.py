@@ -77,7 +77,9 @@ def load_decoder(native_timeline=False):
     model = generator.Model(profile)
     names = model.read_command_set(generator.TOOLS / 'vn_command_set.txt')
     if native_timeline:
-        names.extend(TIMELINE_COMMANDS)
+        for _cmd in TIMELINE_COMMANDS:
+            if _cmd not in names:
+                names.append(_cmd)
     if model.run(names):
         raise RuntimeError('native decoder profile contains unfit commands')
     model, assembly = golden.build_assembly(model)

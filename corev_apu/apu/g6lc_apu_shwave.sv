@@ -194,7 +194,14 @@ module g6lc_apu_shwave
   // operand regmap/const ids, result type and result row once; later
   // executions of the same pc restore them at W_F1 and stream operand
   // values during W_LD0/W_LD1.  0 = no cache cells, long decode only.
-  parameter int unsigned RowCacheEntries = 1024
+  parameter int unsigned RowCacheEntries = 1024,
+  // TP3a-3d front-end cutover: when the lookahead shadow fully resolves
+  // N+1 (row-cache hit, all operand values prefetched, complete word
+  // capture, verified wave identity, no same-wave RAW), commit the *_l
+  // shadow at W_F0 and skip W_F1/W_LD0/W_LD1, landing at W_PRE.  Verified
+  // cycle-exact-correct on the full shwave suite (~1.3% cycle reduction).
+  // 0 = observational only (serial front-end always).
+  parameter bit          LaCutEn        = 1'b1
 ) (
   input  logic         clk_i,
   input  logic         rst_ni,
@@ -214,7 +221,16 @@ module g6lc_apu_shwave
   // shmod read ports (rd_slot_o selects the slot; 1-cycle latency)
   output logic [2:0]   rd_slot_o,
   output logic [15:0]  prog_addr_o,
+  // TP3a-3f: dedicated lookahead word address for shmod port 1.  = la_addr
+  // during the front-end operand-load window (W_LD0/W_LD1) so port 1
+  // prefetches N+1 while port 0 streams N's operands; = la_addr+1 during
+  // la_ok (the execute pair's word B).  Never consumed by the live path.
+  output logic [15:0]  prog_addr2_o,
   input  logic [31:0]  prog_data_i,
+  // TP3a-3e: second program word at prog_addr2_o (shmod port 1), used only
+  // by the lookahead's operand capture; never consumed by the live
+  // front-end.
+  input  logic [31:0]  prog_data2_i,
   output logic [9:0]   type_id_o,
   input  logic [95:0]  type_data_i,
   output logic [9:0]   const_id_o,
@@ -269,7 +285,7 @@ module g6lc_apu_shwave
     assign perf_o = '0;
     assign busy_o = 1'b0;   assign done_o = 1'b0;
     assign done_pl_o = '0;
-    assign rd_slot_o = '0;  assign prog_addr_o = '0;
+    assign rd_slot_o = '0;  assign prog_addr_o = '0;  assign prog_addr2_o = '0;
     assign type_id_o = '0;  assign const_id_o = '0;
     assign memb_id_o = '0;  assign rm_id_o = '0;
     assign init_id_o = '0;  assign blk_id_o = '0;
@@ -322,6 +338,13 @@ module g6lc_apu_shwave
     logic [RL+RI-1:0]      rf_addr;
     logic [LAN*VEC*32-1:0] rf_wdata, rf_rdata;
     logic [LAN*VEC*4-1:0]  rf_be;
+    // TP3a-3c: RF port-1 operand-prefetch channel (NumPorts(2) bank macros;
+    // port 0 carries the live rf_* access unchanged).  rf1_* is driven by the
+    // lookahead operand prefetch; read data returns on rf1_rdata one cycle
+    // after rf1_req (tc_sram registered rdata), tile-tracked by rf1_rdt_q.
+    logic                  rf1_req, rf1_we;
+    logic [RL+RI-1:0]      rf1_addr;
+    logic [LAN*VEC*32-1:0] rf1_rdata;
     logic                  sc_req, sc_we;
     logic [SBA-1:0]        sc_addr;
     logic [31:0]           sc_wdata, sc_rdata;
@@ -359,12 +382,12 @@ module g6lc_apu_shwave
       logic [15:0]        rsz;
       logic [15:0]        rlw;
       logic [9:0]         rty_id;
-      logic [1:0]         nva;       // 0..3 (wider nva never cached)
-      logic [29:0]        vty;       // {s2,s1,s0} x 10b
-      logic [5:0]         otag;      // {s2,s1,s0} x 2b
-      logic [3*RI-1:0]    oidx;      // {s2,s1,s0} x RI
-      logic [11:0]        oaux;      // {s2,s1,s0} x 4b
-      logic [29:0]        oid;       // {s2,s1,s0} x 10b
+      logic [2:0]         nva;       // 0..6 (TP3a-3g: was 0..3)
+      logic [59:0]        vty;       // {s5..s0} x 10b
+      logic [11:0]        otag;      // {s5..s0} x 2b
+      logic [6*RI-1:0]    oidx;      // {s5..s0} x RI
+      logic [23:0]        oaux;      // {s5..s0} x 4b
+      logic [59:0]        oid;       // {s5..s0} x 10b
       logic [RI-1:0]      wreg;
     } rc_row_t;
     localparam int unsigned RCW = $bits(rc_row_t);
@@ -373,8 +396,8 @@ module g6lc_apu_shwave
     // prog_data_i, so W_F1 sees {valid, tag, fields} together.
     logic                rc_vq;
     logic                fast_q;    // this instruction took a row hit
-    logic [3:0]          oaux_q [3]; // rm_aux per operand slot (row write)
-    logic [9:0]          oid_q  [3]; // operand regmap/const id per slot
+    logic [3:0]          oaux_q [6]; // rm_aux per operand slot (row write)
+    logic [9:0]          oid_q  [6]; // operand regmap/const id per slot
     rc_row_t             rc_row;    // row read this W_F0 (hit view)
     wire                 rc_hit_w;  // rc_vq && tag match && !rc_inval_i
     wire                 rc_f1_fault;   // W_F1 bounds/word-count fault
@@ -385,8 +408,8 @@ module g6lc_apu_shwave
     // arm so the RowCacheEntries=0 arm carries no constant select:
     // rc_kv[k] = operand slot k is in the row (k < nva); rc_l_* = the
     // last operand's slot, id, RF row and aux (meaningful for nva != 0)
-    wire [2:0]           rc_kv;
-    wire [1:0]           rc_l_slot;
+    wire [5:0]           rc_kv;
+    wire [2:0]           rc_l_slot;
     wire [9:0]           rc_l_oid;
     wire [RI-1:0]        rc_l_oidx;
     wire [3:0]           rc_l_oaux;
@@ -501,6 +524,10 @@ module g6lc_apu_shwave
     logic [31:0]  out_base_q;         // imm[2]: output-record base
     logic [31:0]  vbase_q;            // imm[3]: first vertex index
     logic [31:0]  inst_q;             // imm[4]: instance index
+    logic [15:0]  view_idx_q;         // Vulkan 1.1+ multiview gl_ViewIndex
+    logic [15:0]  draw_idx_q;         // Vulkan 1.1+ shaderDrawParameters gl_DrawID
+    logic [31:0]  base_vtx_q;         // Vulkan 1.1+ BaseVertex
+    logic [31:0]  base_inst_q;        // Vulkan 1.1+ BaseInstance
     // G2b: FS waves carry the primitive's front-facing bit in
     // imm[3].0 (vbase is a VS-only field); FrontFacing reads it
     logic         frontf_q;
@@ -532,7 +559,7 @@ module g6lc_apu_shwave
     // F5 descriptor cache: key {idx,binding,set}, value {kind,flags,
     // base,size}; invalidated on every dispatch
     logic [APU_DESC_CACHE-1:0]        dc_v_q;
-    logic [APU_DESC_CACHE-1:0][33:0]  dc_key_q;
+    logic [APU_DESC_CACHE-1:0][34:0]  dc_key_q;
     // 5b: cache value = the full 32-byte record (buffers use w0/w1;
     // image records carry geometry/swizzle/sampler in w2..w6)
     logic [APU_DESC_CACHE-1:0][255:0] dc_val_q;
@@ -1126,13 +1153,17 @@ module g6lc_apu_shwave
         // (gen_sh_opcodes.py); edit the table, not this list.
         // GEN-BEGIN sh_opcodes:result
         1,12,57,60,61,65,66,68,77,78,79,80,81,82,83,84,86,87,88,89,90,91,92,
-        93,94,95,96,97,98,100,103,104,105,106,109,110,111,112,124,126,127,
-        128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,
-        145,146,147,148,149,150,151,152,154,155,156,157,164,165,166,167,168,
-        169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,
-        186,187,188,189,190,191,194,195,196,197,198,199,200,201,202,203,204,
-        205,207,208,209,210,211,212,213,214,215,227,229,230,232,233,234,235,
-        236,237,238,239,240,241,242,245,16'd400,16'd5381:
+        93,94,95,96,97,98,100,103,104,105,106,109,110,111,112,113,114,117,
+        120,124,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,
+        141,142,143,144,145,146,147,148,149,150,151,152,154,155,156,157,164,
+        165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,
+        182,183,184,185,186,187,188,189,190,191,194,195,196,197,198,199,200,
+        201,202,203,204,205,207,208,209,210,211,212,213,214,215,227,229,230,
+        232,233,234,235,236,237,238,239,240,241,242,245,16'd333,16'd334,
+        16'd335,16'd336,16'd337,16'd338,16'd339,16'd340,16'd341,16'd342,
+        16'd343,16'd344,16'd345,16'd346,16'd347,16'd348,16'd349,16'd351,
+        16'd353,16'd354,16'd356,16'd357,16'd359,16'd360,16'd361,16'd362,
+        16'd363,16'd364,16'd400,16'd4431,16'd5381,16'd5630:
         // GEN-END
           f_has_rty = 1'b1;
         default: f_has_rty = 1'b0;
@@ -1166,14 +1197,16 @@ module g6lc_apu_shwave
                                              {2'b0, oq[5][1]} +
                                              {2'b0, oq[5][0]} : 4'd0));
         // GEN-BEGIN sh_opcodes:nva0
-        0,1,54,56,57,59,224,225,245,246,247,248,249,252,253,254,255,
-        16'd4416,16'd5380,16'd5381:
+        0,1,54,56,57,59,224,225,245,246,247,248,249,252,253,254,255,16'd333,
+        16'd4416,16'd5380,16'd5381,16'd5631:
         // GEN-END
                  f_nva = 3'd0;
         // GEN-BEGIN sh_opcodes:nva1
-        61,65,66,68,81,83,84,109,110,111,112,124,126,127,154,155,156,157,
-        168,200,204,205,207,208,209,210,211,212,213,214,215,227,250,251,
-        16'd400:
+        61,65,66,68,81,83,84,109,110,111,112,113,114,117,120,124,126,127,
+        154,155,156,157,168,200,204,205,207,208,209,210,211,212,213,214,215,
+        227,250,251,16'd334,16'd335,16'd336,16'd338,16'd339,16'd340,16'd342,
+        16'd343,16'd344,16'd349,16'd351,16'd353,16'd354,16'd356,16'd357,
+        16'd359,16'd360,16'd361,16'd362,16'd363,16'd364,16'd400:
         // GEN-END
                  f_nva = 3'd1;
         // GEN-BEGIN sh_opcodes:nva3
@@ -1186,6 +1219,23 @@ module g6lc_apu_shwave
                  f_nva = 3'd4;
         default: f_nva = 3'd2;
       endcase
+    endfunction
+    // TP3a-3b pick_nq: combinational replica of t_sched's round-robin wave
+    // pick, evaluated on the CURRENT wfin_q/wbar_q (i.e. before the
+    // instruction being decoded at W_F1 takes effect).  Returns the next
+    // eligible wave index, or -1 when every live wave is finished/parked
+    // (workgroup ending).  Used only to aim the observational lookahead
+    // la_base_q at the predicted-next instruction; it does NOT steer the
+    // live scheduler.
+    function automatic int f_pick_nq();
+      int pick, w;
+      pick = -1;
+      for (int i = 1; i <= MaxWaves; i++) begin
+        w = (32'(wave_q) + i) % MaxWaves;
+        if (pick < 0 && w < 32'(nwaves_q) && !wfin_q[w] && !wbar_q[w])
+          pick = w;
+      end
+      return pick;
     endfunction
     function automatic logic [31:0] f_opid(input logic [15:0] o,
                                            input logic [2:0] k,
@@ -1259,7 +1309,10 @@ module g6lc_apu_shwave
       if (nv > 3'd0) m = f_opidx(o, 3'd0);
       if (nv > 3'd1 && f_opidx(o, 3'd1) > m) m = f_opidx(o, 3'd1);
       if (nv > 3'd2 && f_opidx(o, 3'd2) > m) m = f_opidx(o, 3'd2);
-      f_rowok = (nv <= 3'd3) && (wc >= 16'd3) &&
+      if (nv > 3'd3 && f_opidx(o, 3'd3) > m) m = f_opidx(o, 3'd3);
+      if (nv > 3'd4 && f_opidx(o, 3'd4) > m) m = f_opidx(o, 3'd4);
+      if (nv > 3'd5 && f_opidx(o, 3'd5) > m) m = f_opidx(o, 3'd5);
+      f_rowok = (nv <= 3'd6) && (wc >= 16'd3) &&
                 (16'(m) < wc - 16'd1);
     endfunction
     // builtin value: lane l, builtin bi, vector component c
@@ -1310,6 +1363,20 @@ module g6lc_apu_shwave
                                           ? {31'h0, hlp_w[l] |
                                                     dead_q[wave_q][l]}
                                           : 0;
+          // Vulkan 1.1-1.4 subgroup, draw-parameter, and multiview builtins
+          APU_SH_BI_SUBGROUPSIZE:  f_bi = (c == 0) ? 32'(LAN) : 0;
+          APU_SH_BI_NUMSUBGROUPS:  f_bi = (c == 0) ? 32'(nwaves_q) : 0;
+          APU_SH_BI_SUBGROUPID:    f_bi = (c == 0) ? 32'(wave_q) : 0;
+          APU_SH_BI_SUBGROUPLID:   f_bi = (c == 0) ? 32'(l) : 0;
+          APU_SH_BI_SGEQMASK:      f_bi = (c == 0) ? (32'h1 << l) : 0;
+          APU_SH_BI_SGGEMASK:      f_bi = (c == 0) ? (32'hFF & (32'hFFFF_FFFF << l)) : 0;
+          APU_SH_BI_SGGTMASK:      f_bi = (c == 0) ? (32'hFF & (32'hFFFF_FFFE << l)) : 0;
+          APU_SH_BI_SGLEMASK:      f_bi = (c == 0) ? ((32'h2 << l) - 32'h1) : 0;
+          APU_SH_BI_SGLTMASK:      f_bi = (c == 0) ? ((32'h1 << l) - 32'h1) : 0;
+          APU_SH_BI_BASEVERTEX:    f_bi = (c == 0) ? base_vtx_q : 0;
+          APU_SH_BI_BASEINSTANCE:  f_bi = (c == 0) ? base_inst_q : 0;
+          APU_SH_BI_DRAWINDEX:     f_bi = (c == 0) ? {16'h0, draw_idx_q} : 0;
+          APU_SH_BI_VIEWINDEX:     f_bi = (c == 0) ? {16'h0, view_idx_q} : 0;
           default: f_bi = 0;
         endcase
       end
@@ -1322,13 +1389,13 @@ module g6lc_apu_shwave
       f_brow = '0;
       if (s < 4'(APU_DESC_SETS))
         for (int b = 0; b < APU_DESC_BND; b++)
-          if (desc_i.boff[s[1:0]][b].count != 16'h0 &&
-              desc_i.boff[s[1:0]][b].binding == bd)
-            f_brow = {1'b1, desc_i.boff[s[1:0]][b]};
+          if (desc_i.boff[s[2:0]][b].count != 16'h0 &&
+              desc_i.boff[s[2:0]][b].binding == bd)
+            f_brow = {1'b1, desc_i.boff[s[2:0]][b]};
     endfunction
-    // record cache: {set[1:0],binding,idx} -> {hit, record[255:0]};
+    // record cache: {set[2:0],binding,idx} -> {hit, record[255:0]};
     // invalidated at dispatch
-    function automatic logic [256:0] f_dhit(input logic [1:0] s,
+    function automatic logic [256:0] f_dhit(input logic [2:0] s,
                                             input logic [15:0] bd,
                                             input logic [15:0] i);
       f_dhit = '0;
@@ -1339,7 +1406,7 @@ module g6lc_apu_shwave
     endfunction
     // dynamic-offset table index: row.dynbase + element index,
     // saturating at the APU_DESC_DYN window
-    function automatic logic [31:0] f_doff(input logic [1:0] s,
+    function automatic logic [31:0] f_doff(input logic [2:0] s,
                                            input apu_sh_bindrow_t r,
                                            input logic [15:0] i);
       logic [31:0] di;
@@ -1467,6 +1534,11 @@ module g6lc_apu_shwave
             f_twrap = {1'b0, i < 0 ? 16'h0
                        : i >= $signed({16'h0, n})
                          ? n - 16'd1 : 16'(i)};
+          end
+          3'd4: begin                       // MIRROR_CLAMP_TO_EDGE (Vulkan 1.2/1.4)
+            mm = (i < 0) ? -i - 32'sd1 : i;
+            f_twrap = {1'b0, mm >= $signed({16'h0, n})
+                       ? n - 16'd1 : 16'(mm)};
           end
           default: begin                    // CLAMP_TO_BORDER
             f_twrap = (i < 0 || i >= $signed({16'h0, n}))
@@ -2387,11 +2459,17 @@ module g6lc_apu_shwave
     logic [RF_TW-1:0]                      rf_rdt_q;
     logic [VEC*32-1:0]                     rf_rda [LAN*RF_NT];
     wire [RF_TW-1:0]                       rf_tile_w = rf_addr[RF_AW-1 -: RF_TW];
+    // TP3a-3c port-1 mirror of the port-0 tile/rdt/gather plumbing: port 1
+    // has its own in-flight tile tracker (rf1_rdt_q) because its address
+    // field is independent of port 0's rf_addr.
+    wire [RF_TW-1:0]                       rf1_tile_w = rf1_addr[RF_AW-1 -: RF_TW];
+    logic [RF_TW-1:0]                      rf1_rdt_q;
+    logic [VEC*32-1:0]                     rf1_rda [LAN*RF_NT];
     // TP3a-2: every bank macro is now NumPorts(2).  Port 0 carries the
     // existing single rf_* access unchanged; port 1 is the dedicated
-    // operand-prefetch port and is tied idle here until TP3a-3 drives
-    // next-wave reads, so this is a bit-identical refactor (the RF is
-    // the envelope-sanctioned dual-port exception).  req_i/we_i are the
+    // operand-prefetch port driven by the lookahead (TP3a-3c), so this is
+    // a bit-identical refactor for port 0 (the RF is the envelope-sanctioned
+    // dual-port exception).  req_i/we_i are the
     // packed port vectors; addr_i/wdata_i/be_i/rdata_o are the
     // per-port element arrays (same shape as g6lc_ai_cmd_fifo).
     for (genvar l = 0; l < LAN; l++) begin : g_rfl
@@ -2400,10 +2478,12 @@ module g6lc_apu_shwave
         logic [1:0][RF_LW-1:0]  q_addr;
         logic [1:0][VEC*32-1:0] q_wdata, q_rdata;
         logic [1:0][VEC*4-1:0]  q_be;
-        assign q_req   = {1'b0, rf_req && ((RF_NT == 1) || (rf_tile_w == rf_tile_t'(t)))};
-        assign q_we    = {1'b0, rf_we  && ((RF_NT == 1) || (rf_tile_w == rf_tile_t'(t)))};
+        assign q_req   = {rf1_req && ((RF_NT == 1) || (rf1_tile_w == rf_tile_t'(t))),
+                          rf_req && ((RF_NT == 1) || (rf_tile_w == rf_tile_t'(t)))};
+        assign q_we    = {rf1_we  && ((RF_NT == 1) || (rf1_tile_w == rf_tile_t'(t))),
+                          rf_we  && ((RF_NT == 1) || (rf_tile_w == rf_tile_t'(t)))};
         assign q_addr[0]   = rf_addr[RF_LW-1:0];
-        assign q_addr[1]   = '0;
+        assign q_addr[1]   = rf1_addr[RF_LW-1:0];
         assign q_wdata[0]  = rf_wdata[l*(VEC*32) +: (VEC*32)];
         assign q_wdata[1]  = '0;
         assign q_be[0]     = rf_be[l*(VEC*4) +: (VEC*4)];
@@ -2413,16 +2493,24 @@ module g6lc_apu_shwave
           .clk_i, .rst_ni,
           .req_i(q_req), .we_i(q_we), .addr_i(q_addr),
           .wdata_i(q_wdata), .be_i(q_be), .rdata_o(q_rdata));
-        assign rf_rda[l*RF_NT + t] = q_rdata[0];
+        assign rf_rda[l*RF_NT + t]  = q_rdata[0];
+        assign rf1_rda[l*RF_NT + t] = q_rdata[1];
       end
     end
     always_comb begin
-      for (int l = 0; l < LAN; l++)
-        rf_rdata[l*(VEC*32) +: (VEC*32)] = rf_rda[l*RF_NT + rf_rdt_q];
+      for (int l = 0; l < LAN; l++) begin
+        rf_rdata[l*(VEC*32) +: (VEC*32)]  = rf_rda[l*RF_NT + rf_rdt_q];
+        rf1_rdata[l*(VEC*32) +: (VEC*32)] = rf1_rda[l*RF_NT + rf1_rdt_q];
+      end
     end
     always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) rf_rdt_q <= '0;
-      else if (rf_req && !rf_we) rf_rdt_q <= rf_tile_w;
+      if (!rst_ni) begin
+        rf_rdt_q  <= '0;
+        rf1_rdt_q <= '0;
+      end else begin
+        if (rf_req && !rf_we)  rf_rdt_q  <= rf_tile_w;
+        if (rf1_req && !rf1_we) rf1_rdt_q <= rf1_tile_w;
+      end
     end
     // SP3: one 32-bit bank per lane — bank l holds lane l's scratch
     // at in-bank address wave*SCW + word.  TP3a: each lane bank is now
@@ -2504,11 +2592,21 @@ module g6lc_apu_shwave
     wire [5:0] rc_is_k = (st_q == W_LD0) ? 6'd0 : vk_q + 6'd1;
     wire       rc_is_v = fast_q && (st_q == W_LD0 || st_q == W_LD1) &&
                          (rc_is_k < 6'(nva_q));
-    wire [2:0] rc_ik   = (rc_is_k < 6'd3) ? 3'(rc_is_k) : 3'd0;
+    wire [2:0] rc_ik   = (rc_is_k < 6'd6) ? 3'(rc_is_k) : 3'd0;
     wire       rc_cap_v = (st_q == W_LD1) && fast_q &&
                           (vk_q < 6'(nva_q));
-    wire [2:0] rc_jk   = (vk_q < 6'd3) ? 3'(vk_q) : 3'd0;
-    assign rc_idx     = RCIWA'(pc_q[wave_q] & 32'(RowCacheEntries - 1));
+    wire [2:0] rc_jk   = (vk_q < 6'd6) ? 3'(vk_q) : 3'd0;
+    // TP3a-3b lookahead rc-port borrow signals — declared here (before the
+    // rc_idx mux) because slang requires declaration-before-use; driven by
+    // assigns in the la_ block below.
+    logic             la_rc_ok;
+    logic [RCIWA-1:0] la_rc_idx;
+    logic             la_rc_req;
+    // TP3a-3b: while la_rc_req is high (a disjoint-state lookahead read
+    // window), the single rc port fetches N+1's row at la_base_q instead of
+    // the live wave's pc; otherwise it serves the live W_F0/W_RW1 path.
+    assign rc_idx     = la_rc_req ? la_rc_idx
+                                 : RCIWA'(pc_q[wave_q] & 32'(RowCacheEntries - 1));
     assign rc_f1_fault = (prog_data_i[31:16] == 0) ||
                          (prog_data_i[31:16] > 16'(OPB) + 1) ||
                          (32'(pc_q[wave_q]) + prog_data_i[31:16] >
@@ -2530,8 +2628,11 @@ module g6lc_apu_shwave
       assign rc_vld_w = rcv_q[rc_idx];
 
       always_comb begin
+        // TP3a-3b: la_rc_req borrows the port in states disjoint from the
+        // live readers (W_F0/W_RW1) to prefetch N+1's decoded row.
         rc_req = (st_q == W_F0) ||
-                 ((st_q == W_RW1) && f_rowok(opc_q, wc_q, nva_q));
+                 ((st_q == W_RW1) && f_rowok(opc_q, wc_q, nva_q)) ||
+                 la_rc_req;
         rc_we  = (st_q == W_RW1) && f_rowok(opc_q, wc_q, nva_q);
         // the row is exactly what the long decode walk leaves behind
         row_w.tag     = {slot_q, pc_q[wave_q][15:RCIDXW]};
@@ -2543,12 +2644,17 @@ module g6lc_apu_shwave
         row_w.rsz     = rsz_q;
         row_w.rlw     = rlw_q;
         row_w.rty_id  = ops_q[0][9:0];
-        row_w.nva     = nva_q[1:0];
-        row_w.vty     = {vty_q[2], vty_q[1], vty_q[0]};
-        row_w.otag    = {otag_q[2], otag_q[1], otag_q[0]};
-        row_w.oidx    = {oidx_q[2], oidx_q[1], oidx_q[0]};
-        row_w.oaux    = {oaux_q[2], oaux_q[1], oaux_q[0]};
-        row_w.oid     = {oid_q[2],  oid_q[1],  oid_q[0]};
+        row_w.nva     = nva_q[2:0];
+        row_w.vty     = {vty_q[5], vty_q[4], vty_q[3],
+                         vty_q[2], vty_q[1], vty_q[0]};
+        row_w.otag    = {otag_q[5], otag_q[4], otag_q[3],
+                         otag_q[2], otag_q[1], otag_q[0]};
+        row_w.oidx    = {oidx_q[5], oidx_q[4], oidx_q[3],
+                         oidx_q[2], oidx_q[1], oidx_q[0]};
+        row_w.oaux    = {oaux_q[5], oaux_q[4], oaux_q[3],
+                         oaux_q[2], oaux_q[1], oaux_q[0]};
+        row_w.oid     = {oid_q[5],  oid_q[4],  oid_q[3],
+                         oid_q[2],  oid_q[1],  oid_q[0]};
         row_w.wreg    = rm_idx[RI-1:0];   // value latched into wreg_q now
         row_w_flat    = row_w;
       end
@@ -2567,9 +2673,10 @@ module g6lc_apu_shwave
           .wdata_i(wdata_b), .be_i('1), .rdata_o(rdata_b));
       end
       assign rc_row  = rc_row_t'(rc_flat_r);
-      assign rc_kv     = {rc_row.nva > 2'd2, rc_row.nva > 2'd1,
-                          rc_row.nva > 2'd0};
-      assign rc_l_slot = (rc_row.nva == 2'd0) ? 2'd0 : rc_row.nva - 2'd1;
+      assign rc_kv     = {rc_row.nva > 3'd5, rc_row.nva > 3'd4,
+                          rc_row.nva > 3'd3, rc_row.nva > 3'd2,
+                          rc_row.nva > 3'd1, rc_row.nva > 3'd0};
+      assign rc_l_slot = (rc_row.nva == 3'd0) ? 3'd0 : rc_row.nva - 3'd1;
       assign rc_l_oid  = rc_row.oid[rc_l_slot*10 +: 10];
       assign rc_l_oidx = rc_row.oidx[rc_l_slot*RI +: RI];
       assign rc_l_oaux = rc_row.oaux[rc_l_slot*4 +: 4];
@@ -2596,6 +2703,321 @@ module g6lc_apu_shwave
       assign rc_l_oaux = '0;
       assign rc_hit_w = 1'b0;
     end
+
+    // ---- TP3a-3a observational lookahead fetch --------------------------
+    // prog_data_i is captured only in W_F1/W_LD1, and those states are
+    // reachable only from the addr-present states {W_F0,W_LD0,W_LD1};
+    // every other state's prog_addr_o is don't-care for the live fetch.
+    // We borrow the port in those windows to prefetch the predicted next
+    // instruction's words into a FIFO.  Observational: the FIFO fills but
+    // decode still runs the serial path, so the suite stays cycle-exact;
+    // it becomes the 3b/3c/3d prefetch buffer.  la_base_q is the same-wave
+    // successor pc_q[wave_q]+wc_q loaded at W_F1 (the pick_nq wave-
+    // interleave refinement lands in 3b/3d).
+    // TP3a-3a2: deepen the FIFO to hold a COMPLETE next instruction —
+    // instr word + up to OPB=32 operand words contiguous at la_base+0..wc-1
+    // needs LA_DEPTH>=33, LA_SPAN>=6.  LA_DEPTH=64 (pow2 so la_wp_q wraps
+    // cleanly) gives margin; still observational — decode does not consume
+    // it yet.  The parse stage (la_ncap_q/la_wc_l/la_opc_l/la_full_w)
+    // validates that a whole instruction is actually captured per window,
+    // which is the fetch-side precondition 3b/3c need.
+    localparam int unsigned LA_DEPTH = 64;
+    localparam int unsigned LA_SPAN  = 6;    // la_idx_q: 0..63 word offset
+    logic             la_ok;
+    // TP3a-3f front-end lookahead: W_LD0/W_LD1 are the only la_ok=0 states
+    // inside the lookahead window (post-W_F1, pre-execute); port 1 is free
+    // there (port 0 streams N's operands), so it prefetches N+1 at 1 word/
+    // cycle.  la_fe_v_q is la_fe_ok delayed one cycle (SRAM read latency),
+    // gating the single-word prog_data2_i capture exactly like la_v_q does
+    // for the execute pair.
+    logic             la_fe_ok;
+    logic             la_fe_v_q;
+    logic [15:0]      la_base_q;
+    logic [LA_SPAN-1:0] la_idx_q;
+    logic [15:0]      la_addr;
+    logic             la_v_q;               // la_addr was driven last cycle
+    logic [31:0]      la_fifo [LA_DEPTH];
+    logic [$clog2(LA_DEPTH)-1:0] la_wp_q;
+    logic [15:0]      la_fill_q;            // saturating captured-word count
+    // observational instruction parse: la_ncap_q counts words pushed since
+    // the last W_F1; the FIRST push is the instruction word (la_base+0), so
+    // its [31:16]/[15:0] give wc/opc; la_full_w = captured >= wc words.
+    logic [6:0]       la_ncap_q;
+    logic [15:0]      la_wc_l, la_opc_l;
+    logic             la_full_p_q;         // la_full_w delayed (edge detect)
+    logic [15:0]      la_fc_q;             // complete-instruction captures
+    logic [15:0]      la_mxwc_q;           // deepest valid wc seen
+    wire              la_full_w;
+    assign la_ok   = (st_q != W_F0) && (st_q != W_F1) &&
+                     (st_q != W_LD0) && (st_q != W_LD1);
+    assign la_fe_ok = (st_q == W_LD0) || (st_q == W_LD1);
+    assign la_addr = la_base_q + {10'h0, la_idx_q};
+    // wc is bounded by OPB+1 (the live path faults above that); guard the
+    // comparison so a garbage instr word can't fake a "complete" capture.
+    assign la_full_w = (la_wc_l >= 16'd1) && (la_wc_l <= 16'(OPB) + 16'd1) &&
+                       (16'(la_ncap_q) >= la_wc_l);
+
+    // ---- TP3a-3b shadow decode (row-cache-hit lookahead, observational) --
+    // Decode N+1's row-cache row into a *_l shadow set while N executes, so
+    // 3d can later cut over at W_NEXT.  OBSERVATIONAL this pass: *_l is
+    // populated and checked but decode still runs the serial *_q path, so
+    // the suite stays cycle-exact; +la_dbg reports hit/miss + a live-vs-
+    // shadow agreement check.  Same-wave targets only (la_base_q is the
+    // same-wave successor), so the tag compare reuses slot_q; wave-
+    // interleave pick_nq is deferred to 3d.
+    //
+    // rc-port borrow: the row-cache SRAM has ONE read port shared with the
+    // live path (rc_req fires only at W_F0 and W_RW1).  la_rc_ok is the
+    // complement {W_F0,W_F1,W_RW1}-free window — W_LD0/W_LD1 are INCLUDED
+    // here (unlike la_ok) because the rc port is idle while operands
+    // stream.  la_rc_req and live rc_req are therefore disjoint-state and
+    // can never collide; rc_idx muxes to la_base_q&mask only while
+    // la_rc_req is high, and rc_row/rc_vld_w then reflect N+1's row, which
+    // we capture one cycle later into rc_row_l/rc_vld_l (registered SRAM
+    // output stays stable across the address mux moving on).
+    localparam int unsigned LA_D_IDLE = 2'd0;
+    localparam int unsigned LA_D_REQ  = 2'd1;
+    localparam int unsigned LA_D_CAP  = 2'd2;
+    localparam int unsigned LA_D_EVAL = 2'd3;
+    logic [1:0]       la_d_q;
+    logic             la_rc_v_q;             // la_rc_req was high last cycle
+    rc_row_t          rc_row_l;              // captured N+1 row (hit view)
+    logic             rc_vld_l;              // captured N+1 valid bit
+    // *_l shadow decode state — mirrors exactly what the W_F1 row-cache
+    // hit restore writes into *_q (operand VALUES va/ocst/ops are 3c).
+    logic             fast_l;
+    logic [2:0]       nva_l;
+    logic [RI-1:0]    wreg_l;
+    logic [3:0]       rkind_l;
+    logic [2:0]       rcomps_l, rcols_l;
+    logic [9:0]       relem_l, rty_id_l;
+    logic [15:0]      rsz_l, rlw_l;
+    logic             rty_v_l;
+    logic [4:0]       ncomp_l;
+    logic [9:0]       vty_l  [3];
+    logic [1:0]       otag_l [3];
+    logic [RI-1:0]    oidx_l [3];
+    logic [3:0]       oaux_l [3];
+    logic [9:0]       oid_l  [3];
+    logic [9:0]       res_id_l;
+    logic [2:0]       res_slot_l;
+    logic [RI-1:0]    ridx_l;
+    logic [3:0]       raux_l;
+    // ops_l: shadow of ops_q operand words.  The instruction word is
+    // la_fifo/la_ncap_q==0; operand word k (= ops_q[k]) is the push at
+    // la_ncap_q==k+1, i.e. prog word la_base+k+1.  Populated as the
+    // lookahead stream delivers each operand; validity for cutover is
+    // gated later on la_ncap_q covering la_wc_l (all wc words pushed).
+    logic [31:0]      ops_l [OPB];
+    // va_l/va_l_v: shadow of va_q operand VALUES for the 3 fast-path
+    // operand slots, filled by RF port-1 reads issued while la_l_vld.
+    // Only register operands (otag_l!=APU_SH_RT_CONST) are fetched here;
+    // constant operands need the shmod const port → ocst_l (deferred).
+    // la_rf_k scans operands 0..2, la_rf_p is the in-flight operand index
+    // (issued last cycle, data on rf1_rdata now), la_rf_pv marks that a
+    // port-1 read was issued last cycle.
+    vt_t             va_l [3];
+    logic            va_l_v [3];
+    logic [2:0]      la_rf_k, la_rf_p;
+    logic            la_rf_pv;
+    logic [15:0]     la_vc_q;              // operand-value captures (obs)
+    logic [RL-1:0]   la_wave;               // wave that will run N+1
+    // ocst_l: shadow of ocst_q constant operand rows for the 3 fast-path
+    // slots.  const operands can't use RF port-1 — they need the shmod
+    // const port (const_id_o→const_data_i).  Three consecutive const-free
+    // states {W_NEXT,W_F0,W_F1} give one safe const_id_o injection each
+    // (const_data_i lands in W_F0/W_F1/W_LD0 — none capture const_data_i),
+    // covering up to 3 const operands.  la_cst_k scans operand slots
+    // 0..2 across those windows; la_cst_p is the in-flight operand index.
+    logic [511:0]    ocst_l [3];
+    logic            ocst_l_v [3];
+    logic [2:0]      la_cst_k, la_cst_p;
+    logic            la_cst_pv;
+    logic [15:0]     la_cc_q;              // const captures (obs)
+    logic             la_l_vld;              // *_l holds a valid N+1 decode
+    logic             la_l_hit;              // last eval was a row-cache hit
+    wire              la_hit_w;              // comb hit predicate on rc_row_l
+    // observational coverage for the shadow decode: la_hc_q counts EVALs
+    // that resolved to a row-cache hit; la_agree_q counts W_F1s where the
+    // lookahead target (la_base_q, still the pre-update value) equals the
+    // pc now being decoded AND *_l was valid — i.e. the shadow decode
+    // actually described this live instruction.
+    logic [15:0]      la_hc_q, la_agree_q;
+    logic [15:0]      la_dc_q;              // total shadow EVALs (obs)
+    logic [15:0]      la_co_q;              // cutover-ready hits @W_F0 (obs)
+    logic [15:0]      la_fw_q;              // actual cutovers fired (obs)
+    // la_blk_*: which la_fire safety gate blocked a la_cut_ok candidate at
+    // W_F0 (diagnostic — tells us the dominant limiter on fw/co).
+    logic [15:0]      la_blk_full_q, la_blk_same_q, la_blk_wave_q, la_blk_pc_q;
+    // `same` sub-causes (diagnostic): swn = N wrote >2 distinct dests
+    // (la_wn_q saturated 3 → la_sw_safe count fail); sov = a register
+    // operand of N+1 overlaps a tracked N write-dest (genuine RAW).
+    logic [15:0]      la_blk_swn_q, la_blk_sov_q;
+    logic [RL-1:0]    la_execw_q;           // wave that ran instr N (RAW gate)
+    logic [RL-1:0]    la_waveq_q;           // la_wave used for va_l reads
+    // TP3a-3d same-wave RAW closure: la_wd0/la_wd1 hold the DISTINCT RF
+    // register indices the just-executed instruction N wrote (captured from
+    // the actual rf_addr[RI-1:0] on each rf_we commit); la_wn_q counts them
+    // (3 = >2 distinct → can't verify all → block same-wave).  Reset at each
+    // W_F1 (and at a cutover, which skips W_F1) so it always describes the
+    // single most-recent instruction.  At a same-wave N+1 W_F0 the cutover
+    // is allowed iff no register operand oidx_l[k] equals a captured dest —
+    // an exact overlap check, no derived-index computation needed because
+    // hit-path operands use base oidx (va_l already proved that).
+    logic [RI-1:0]    la_wd0_q, la_wd1_q;
+    logic [1:0]       la_wn_q;
+    // pick_nq: predicted next wave (f_pick_nq replica of t_sched); -1 when
+    // no wave is eligible.  Drives la_base_q's wave-interleave target.
+    int               pick_nq;
+    // la_rc_ok: the row-cache read port is live only at W_F0 (issue) and
+    // W_RW1 (read+write); W_F1 consumes the already-returned row.  Every
+    // other state — including W_LD0/W_LD1 where prog is busy but rc is
+    // idle — is safe to borrow for the N+1 row read.
+    assign la_rc_ok  = (st_q != W_F0) && (st_q != W_F1) && (st_q != W_RW1);
+    assign la_rc_idx = RCIWA'(la_base_q & 32'(RowCacheEntries - 1));
+    assign la_rc_req = (RowCacheEntries != 0) && (la_d_q == LA_D_REQ) &&
+                       la_rc_ok;
+    // same-wave N+1 hit predicate on the captured row: tag is {slot_q, pc
+    // [15:RCIDXW]} and slot_q is correct because la_base_q is same-wave.
+    assign la_hit_w  = rc_vld_l &&
+                       (rc_row_l.tag == {slot_q, la_base_q[15:RCIDXW]}) &&
+                       !rc_inval_i;
+    // hit-view of the captured N+1 row — mirrors rc_kv/rc_l_* but sourced
+    // from rc_row_l so the *_l restore sees the lookahead row, not live.
+    wire [5:0]           rc_kv_l;
+    wire [2:0]           rc_l_slot_l;
+    wire [9:0]           rc_l_oid_l;
+    wire [RI-1:0]        rc_l_oidx_l;
+    wire [3:0]           rc_l_oaux_l;
+    assign rc_kv_l     = {rc_row_l.nva > 3'd5, rc_row_l.nva > 3'd4,
+                          rc_row_l.nva > 3'd3, rc_row_l.nva > 3'd2,
+                          rc_row_l.nva > 3'd1, rc_row_l.nva > 3'd0};
+    assign rc_l_slot_l = (rc_row_l.nva == 3'd0) ? 3'd0 : rc_row_l.nva - 3'd1;
+    assign rc_l_oid_l  = rc_row_l.oid[rc_l_slot_l*10 +: 10];
+    assign rc_l_oidx_l = rc_row_l.oidx[rc_l_slot_l*RI +: RI];
+    assign rc_l_oaux_l = rc_row_l.oaux[rc_l_slot_l*4 +: 4];
+    // pick_nq is a pure combinational replica of the live scheduler pick —
+    // it steers ONLY the observational la_base_q target, never wave_q/st_q.
+    always_comb pick_nq = f_pick_nq();
+    // TP3a-3c: la_wave = the wave that will execute N+1 — pick_nq's wave for
+    // a different-wave pick, else the same-wave fallback wave_q.  RF port-1
+    // issues a read for operand la_rf_k this cycle when it is a register
+    // operand within nva_l; rf1_rdata returns it next cycle for the
+    // va_l[la_rf_p] capture.  rf1_we stays 0 — prefetch is read-only.
+    // la_rf_ik saturates the array index (otag_l/oidx_l are [3]) exactly
+    // like the live rc_ik guard.
+    wire [2:0] la_rf_ik = (la_rf_k < 3'd3) ? la_rf_k : 3'd0;
+    assign la_wave  = (pick_nq >= 0) ? pick_nq[RL-1:0] : wave_q;
+    assign rf1_req  = la_l_vld && (la_rf_k < 3'd3) &&
+                      (la_rf_k < 3'(nva_l)) &&
+                      (otag_l[la_rf_ik] != APU_SH_RT_CONST);
+    // rf1_addr uses la_waveq_q — the FROZEN wave latched at LA_D_EVAL — not
+    // comb la_wave.  pick_nq can move mid-execute on terminator/barrier N
+    // (wfin/wbar update), which would make successive operand reads hit
+    // different waves' RF rows; freezing gives one verifiable wave that
+    // la_fire checks == wave_q before committing va_l.
+    assign rf1_addr = {la_waveq_q, oidx_l[la_rf_ik]};
+    assign rf1_we   = 1'b0;
+
+    // ---- ocst_l const-operand prefetch (shmod const port borrow) -----------
+    // const operands can't use RF port-1 — they need const_id_o→const_data_i.
+    // Three consecutive const-free states {W_NEXT,W_F0,W_F1} each give one
+    // safe const_id_o injection: const_data_i returns the following cycle
+    // into W_F0/W_F1/W_LD0/W_PRE/W_TY0A/W_EOW — none capture const_data_i —
+    // so live's res_id_q const read (don't-care in those windows) is not
+    // disturbed and ocst_l captures the lookahead const row.  la_cst_k scans
+    // operand slots 0..2 across the windows (one per cycle); register slots
+    // simply consume a window without issuing.
+    // W_WB/W_WB2/W_NEXT are the execute-tail writeback states: fixed
+    // const-free successors (W_WB2/W_NEXT/W_F0/W_EOW), const_id_o is the
+    // don't-care res_id_q default, and const_data_i lands in non-capture
+    // states — so they are safe borrow windows too.  Including them lets
+    // const operands prefetch during N's execute TAIL (la_l_vld already
+    // describes N+1), ready before N+1's front-end — which is what a
+    // front-end-skipping cutover needs.  la_cst_k still caps at 3 slots.
+    wire la_cst_win   = (st_q == W_WB) || (st_q == W_WB2) ||
+                        (st_q == W_NEXT) || (st_q == W_F0) ||
+                        (st_q == W_F1);
+    wire [2:0] la_cst_ik = (la_cst_k < 3'd3) ? la_cst_k : 3'd0;
+    wire la_cst_issue = la_l_vld && la_cst_win && (la_cst_k < 3'd3) &&
+                        (la_cst_k < 3'(nva_l)) &&
+                        (otag_l[la_cst_ik] == APU_SH_RT_CONST);
+
+    // ---- 3d cutover-ready detector (OBSERVATIONAL) -------------------------
+    // Measures how often a front-end-skipping cutover COULD fire at W_F0:
+    // shadow describes the instr being fetched (la_base_q==pc_q[wave_q]),
+    // it's a row-cache hit, and every operand value is prefetched
+    // (va_l_v for register slots, ocst_l_v for const slots).  RAW/WAW and
+    // terminator/fault gating are NOT modeled here — this is the raw
+    // operand-readiness ceiling; la_co_q counts the firings.
+    wire la_op0 = (0 < 32'(nva_l)) ?
+                  ((otag_l[0] == APU_SH_RT_CONST) ? ocst_l_v[0] : va_l_v[0])
+                  : 1'b1;
+    wire la_op1 = (1 < 32'(nva_l)) ?
+                  ((otag_l[1] == APU_SH_RT_CONST) ? ocst_l_v[1] : va_l_v[1])
+                  : 1'b1;
+    wire la_op2 = (2 < 32'(nva_l)) ?
+                  ((otag_l[2] == APU_SH_RT_CONST) ? ocst_l_v[2] : va_l_v[2])
+                  : 1'b1;
+    wire la_ops_rdy = la_op0 & la_op1 & la_op2;
+    // TP3a-3g: nva_l<=3 gate — the lookahead operand model (va_l/ocst_l)
+    // is still [3]-bounded, so a widened row-cache hit with nva>3 must not
+    // cut over (its operands 3-5 values were never prefetched).  Live
+    // path handles all 6; only the cutover is gated.
+    wire la_cut_ok  = la_l_vld && la_l_hit && la_ops_rdy &&
+                      (nva_l <= 3'd3) &&
+                      (la_base_q == pc_q[wave_q]);
+    // la_fire: the ACTUAL cutover predicate, evaluated at W_F0.  Adds two
+    // safety conditions to the raw la_cut_ok ceiling:
+    //  (a) la_full_w — every instruction word incl. all operand words was
+    //      pushed into la_fifo, so ops_l[0..wc-2] is complete (otherwise
+    //      ops_q would commit stale words).
+    //  (b) wave_q != la_execw_q — N+1 runs a DIFFERENT wave than the
+    //      instruction N that just wrote back.  va_l was read via RF
+    //      port-1 DURING N's execute, i.e. before N's writeback committed;
+    //      for a same-wave N+1 that reads a register N wrote, va_l would be
+    //      stale (RAW).  Diff-wave N+1 reads a different RF row → va_l is
+    //      exact.  Same-wave cutover is deferred (needs operand-overlap
+    //      forwarding); it simply falls back to the serial front-end.
+    //  (c) pc bound — replicate rc_f1_fault's third clause with la_wc_l so
+    //      a cutover can't skip a program-memory-overflow fault.  The wc
+    //      range clauses (==0, >OPB+1) are already covered by la_full_w.
+    //  (d) wave match — la_waveq_q is the wave va_l actually read (latched
+    //      at W_NEXT).  la_base_q==pc_q[wave_q] can't distinguish waves
+    //      running the same program at the same pc, so a stale pick_nq on
+    //      terminator/barrier N would pass (c) yet commit another wave's
+    //      operand values.  Require the read wave to equal the wave that
+    //      will actually execute N+1.
+    // TP3a-3d same-wave RAW closure: a same-wave N+1 (wave_q==la_execw_q)
+    // may still cut over when N's write set is fully known and disjoint
+    // from every register operand N+1 reads.  la_wd*/la_wn_q captured N's
+    // distinct write dests during its execute; la_sw_safe is the exact
+    // no-overlap predicate over the va_l-covered register operands
+    // (k<nva_l, otag!=CONST → operand addr is base oidx_l[k]).  la_wn_q==3
+    // (>2 distinct dests) or any oidx_l[k] match → unsafe → serial path.
+    // nva_l==0 / all-const operands have no register reads → trivially safe.
+    wire la_reg0 = (0 < 32'(nva_l)) && (otag_l[0] != APU_SH_RT_CONST);
+    wire la_reg1 = (1 < 32'(nva_l)) && (otag_l[1] != APU_SH_RT_CONST);
+    wire la_reg2 = (2 < 32'(nva_l)) && (otag_l[2] != APU_SH_RT_CONST);
+    wire la_ov0 = la_reg0 &&
+                  (((la_wn_q >= 2'd1) && (oidx_l[0] == la_wd0_q)) ||
+                   ((la_wn_q >= 2'd2) && (oidx_l[0] == la_wd1_q)));
+    wire la_ov1 = la_reg1 &&
+                  (((la_wn_q >= 2'd1) && (oidx_l[1] == la_wd0_q)) ||
+                   ((la_wn_q >= 2'd2) && (oidx_l[1] == la_wd1_q)));
+    wire la_ov2 = la_reg2 &&
+                  (((la_wn_q >= 2'd1) && (oidx_l[2] == la_wd0_q)) ||
+                   ((la_wn_q >= 2'd2) && (oidx_l[2] == la_wd1_q)));
+    wire la_sw_safe = (la_wn_q <= 2'd2) && !la_ov0 && !la_ov1 && !la_ov2;
+    // TP3a-3d cutover gate: LaCutEn is a module parameter (default 1 —
+    // verified correct on the full suite).  -GLaCutEn=0 restores pure
+    // observational behaviour for A/B cycle measurement.  The same-wave
+    // RAW gate is relaxed to (diff-wave) OR (same-wave with proven
+    // disjoint write/read sets via la_sw_safe).
+    wire la_fire = LaCutEn && la_cut_ok && la_full_w &&
+                   ((wave_q != la_execw_q) || la_sw_safe) &&
+                   (la_waveq_q == wave_q) &&
+                   (32'(pc_q[wave_q]) + 32'(la_wc_l) <= 32'(ShaderWords));
 
     // ---- shmod read port addresses ------------------------------------------
     logic [15:0] pa_w;
@@ -2661,9 +3083,21 @@ module g6lc_apu_shwave
     logic [9:0]     cf_jmp;   // declared early: blk_id_o needs it
     logic           cf_jok;
     assign rd_slot_o   = slot_q;
-    assign prog_addr_o = pa_w;
+    // TP3a-3a: borrow the instruction port for lookahead prefetch outside
+    // the live fetch/stream states {W_F0,W_F1,W_LD0,W_LD1}; la_ok is the
+    // exact complement, so prog_data_i can never return a needed live word
+    // while la_addr is driven (see the la_ok note above).
+    assign prog_addr_o = la_ok ? la_addr : pa_w;
+    // TP3a-3f: port 1's dedicated lookahead address.  During la_ok it is the
+    // pair's word B (la_addr+1); during the W_LD0/W_LD1 operand-load window
+    // (la_ok=0, la_fe_ok=1) it is la_addr itself so port 1 streams N+1's
+    // words at 1/cycle while port 0 streams N's operands.  Outside both
+    // windows it holds la_addr (stale but never captured — la_fe_v_q and
+    // la_v_q are both 0 there).
+    assign prog_addr2_o = la_addr + {15'h0, la_ok};
     assign type_id_o   = ty_w;
-    assign const_id_o  = (st_q == W_PH2) ? phv_c[9:0]
+    assign const_id_o  = la_cst_issue ? oid_l[la_cst_ik]
+                       : (st_q == W_PH2) ? phv_c[9:0]
                        : (rc_is_v && otag_q[rc_ik] == APU_SH_RT_CONST)
                          ? oid_q[rc_ik]
                        : res_id_q;
@@ -2707,8 +3141,123 @@ module g6lc_apu_shwave
                int_alu[l][c] = va_q[0][l][c] & va_q[1][l][c];
         200: for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
                int_alu[l][c] = ~va_q[0][l][c];
-        124: for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
-               int_alu[l][c] = va_q[0][l][c];
+        113,114,117,120,124,16'd5630:
+          for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+            int_alu[l][c] = va_q[0][l][c];
+        // Vulkan 1.1-1.4 Subgroup + Clustered + RotateKHR (8-lane wave)
+        16'd333: begin // OpGroupNonUniformElect
+          logic found; found = 1'b0;
+          for (int l = 0; l < LAN; l++) begin
+            if (!found && act_w[l]) begin
+              int_alu[l][0] = 32'h1; found = 1'b1;
+            end else int_alu[l][0] = 32'h0;
+          end
+        end
+        16'd334: begin // OpGroupNonUniformAll
+          logic ok; ok = 1'b1;
+          for (int l = 0; l < LAN; l++)
+            if (act_w[l] && !(|va_q[0][l][0])) ok = 1'b0;
+          for (int l = 0; l < LAN; l++) int_alu[l][0] = {31'h0, ok};
+        end
+        16'd335: begin // OpGroupNonUniformAny
+          logic ok; ok = 1'b0;
+          for (int l = 0; l < LAN; l++)
+            if (act_w[l] && |va_q[0][l][0]) ok = 1'b1;
+          for (int l = 0; l < LAN; l++) int_alu[l][0] = {31'h0, ok};
+        end
+        16'd336: begin // OpGroupNonUniformAllEqual
+          logic first; logic [31:0] refv; logic ok;
+          first = 1'b0; refv = 32'h0; ok = 1'b1;
+          for (int l = 0; l < LAN; l++) if (act_w[l]) begin
+            if (!first) begin refv = va_q[0][l][0]; first = 1'b1; end
+            else if (va_q[0][l][0] != refv) ok = 1'b0;
+          end
+          for (int l = 0; l < LAN; l++) int_alu[l][0] = {31'h0, ok};
+        end
+        16'd337: begin // OpGroupNonUniformBroadcast
+          logic [2:0] src; src = va_q[1][0][0][2:0];
+          for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+            int_alu[l][c] = va_q[0][src][c];
+        end
+        16'd338: begin // OpGroupNonUniformBroadcastFirst
+          logic found; logic [2:0] src; found = 1'b0; src = 3'd0;
+          for (int l = 0; l < LAN; l++) if (!found && act_w[l]) begin
+            src = 3'(l); found = 1'b1;
+          end
+          for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+            int_alu[l][c] = va_q[0][src][c];
+        end
+        16'd339: begin // OpGroupNonUniformBallot
+          logic [31:0] bmask; bmask = 32'h0;
+          for (int l = 0; l < LAN; l++)
+            if (act_w[l] && |va_q[0][l][0]) bmask[l] = 1'b1;
+          for (int l = 0; l < LAN; l++) begin
+            int_alu[l][0] = bmask; int_alu[l][1] = 32'h0;
+            int_alu[l][2] = 32'h0; int_alu[l][3] = 32'h0;
+          end
+        end
+        16'd340: for (int l = 0; l < LAN; l++)
+          int_alu[l][0] = {31'h0, va_q[0][l][0][l]};
+        16'd341: for (int l = 0; l < LAN; l++)
+          int_alu[l][0] = {31'h0, va_q[0][l][va_q[1][l][0][6:5]][va_q[1][l][0][4:0]]};
+        16'd342: for (int l = 0; l < LAN; l++) begin
+          logic [31:0] cnt; cnt = 32'h0;
+          for (int b = 0; b < LAN; b++) cnt = cnt + {31'h0, va_q[0][l][0][b]};
+          int_alu[l][0] = cnt;
+        end
+        16'd343: for (int l = 0; l < LAN; l++) begin
+          logic [31:0] pos; logic fnd; pos = 32'h0; fnd = 1'b0;
+          for (int b = 0; b < LAN; b++) if (!fnd && va_q[0][l][0][b]) begin
+            pos = 32'(b); fnd = 1'b1;
+          end
+          int_alu[l][0] = pos;
+        end
+        16'd344: for (int l = 0; l < LAN; l++) begin
+          logic [31:0] pos; pos = 32'h0;
+          for (int b = 0; b < LAN; b++) if (va_q[0][l][0][b]) pos = 32'(b);
+          int_alu[l][0] = pos;
+        end
+        16'd345: for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+          int_alu[l][c] = va_q[0][va_q[1][l][0][2:0]][c];
+        16'd346: for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+          int_alu[l][c] = va_q[0][3'(l) ^ va_q[1][l][0][2:0]][c];
+        16'd347: for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+          int_alu[l][c] = va_q[0][(l >= int'(va_q[1][l][0][2:0]))
+                                  ? 3'(l - int'(va_q[1][l][0][2:0])) : 3'(l)][c];
+        16'd348: for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+          int_alu[l][c] = va_q[0][(l + int'(va_q[1][l][0][2:0]) < LAN)
+                                  ? 3'(l + int'(va_q[1][l][0][2:0])) : 3'(l)][c];
+        16'd4431: for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+          // OpGroupNonUniformRotateKHR (Vulkan 1.4 mandatory)
+          int_alu[l][c] = va_q[0][3'((l + int'(va_q[1][l][0][2:0])) & 7)][c];
+        16'd349,16'd351,16'd353,16'd354,16'd356,16'd357,
+        16'd359,16'd360,16'd361,16'd362,16'd363,16'd364: begin
+          for (int c = 0; c < VEC; c++) begin
+            logic [31:0] acc;
+            acc = (opc_q == 16'd351) ? 32'd1 :
+                  (opc_q == 16'd353) ? 32'h7FFF_FFFF :
+                  (opc_q == 16'd354 || opc_q == 16'd359) ? 32'hFFFF_FFFF :
+                  (opc_q == 16'd356) ? 32'h8000_0000 :
+                  (opc_q == 16'd362) ? 32'd1 : 32'h0;
+            for (int l = 0; l < LAN; l++) if (act_w[l]) begin
+              unique case (opc_q)
+                16'd349: acc = acc + va_q[0][l][c];
+                16'd351: acc = acc * va_q[0][l][c];
+                16'd353: acc = ($signed(va_q[0][l][c]) < $signed(acc)) ? va_q[0][l][c] : acc;
+                16'd354: acc = (va_q[0][l][c] < acc) ? va_q[0][l][c] : acc;
+                16'd356: acc = ($signed(va_q[0][l][c]) > $signed(acc)) ? va_q[0][l][c] : acc;
+                16'd357: acc = (va_q[0][l][c] > acc) ? va_q[0][l][c] : acc;
+                16'd359: acc = acc & va_q[0][l][c];
+                16'd360: acc = acc | va_q[0][l][c];
+                16'd361: acc = acc ^ va_q[0][l][c];
+                16'd362: acc = {31'h0, (|acc) & (|va_q[0][l][c])};
+                16'd363: acc = {31'h0, (|acc) | (|va_q[0][l][c])};
+                default: acc = {31'h0, (|acc) ^ (|va_q[0][l][c])};
+              endcase
+            end
+            for (int l = 0; l < LAN; l++) int_alu[l][c] = acc;
+          end
+        end
         // SPIR-V numbering (grammar): 172/173 u>/s>, 174/175 u>=/s>=,
         // 176/177 u</s<, 178/179 u<=/s<=
         170: for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
@@ -3949,6 +4498,8 @@ module g6lc_apu_shwave
         gfx_q <= APU_SH_GFX_NONE; gcnt_q <= '0;
         in_base_q <= '0; out_base_q <= '0;
         vbase_q <= '0; inst_q <= '0;
+        view_idx_q <= '0; draw_idx_q <= '0;
+        base_vtx_q <= '0; base_inst_q <= '0;
         frontf_q <= 1'b0; dla_q <= '0; dlb_q <= '0; dva_q <= '0;
         push_n_q <= '0;
         dc_v_q <= '0; dc_vic_q <= '0;
@@ -4028,8 +4579,9 @@ module g6lc_apu_shwave
         moc_q <= '0; mocl_q <= '0;
         nva_q <= '0; vk_q <= '0; res_id_q <= '0; res_slot_q <= '0;
         rc_vq <= 1'b0; fast_q <= 1'b0;
-        oaux_q[0] <= '0; oaux_q[1] <= '0; oaux_q[2] <= '0;
-        oid_q[0]  <= '0; oid_q[1]  <= '0; oid_q[2]  <= '0;
+        for (int k = 0; k < 6; k++) begin
+          oaux_q[k] <= '0; oid_q[k] <= '0;
+        end
         vix_q <= '0; ccp_q <= '0;
         cty_q <= '0; poff_q <= '0; ctag_q <= '0; ck_q <= '0;
         cmstride_q <= '0; cty2_q <= '0;
@@ -4139,6 +4691,12 @@ module g6lc_apu_shwave
             inst_q     <= disp_pl_i.imm[159:128];
             frontf_q   <= disp_pl_i.imm[96];   // imm[3].0 (FS)
             ghelp_q    <= disp_pl_i.imm[223:160];  // imm[5:6] helper mask
+            view_idx_q <= (disp_pl_i.work_id == APU_SH_WORK_FS)
+                          ? disp_pl_i.imm[143:128] : disp_pl_i.imm[175:160];
+            draw_idx_q <= (disp_pl_i.work_id == APU_SH_WORK_FS)
+                          ? disp_pl_i.imm[159:144] : disp_pl_i.imm[191:176];
+            base_vtx_q <= disp_pl_i.imm[223:192];
+            base_inst_q <= disp_pl_i.imm[255:224];
             push_n_q <= push_n_i;
             // F5: desc_i stays live (cmdexec holds it through
             // work_done); the record cache is dispatch-scoped, and
@@ -4257,10 +4815,110 @@ module g6lc_apu_shwave
           // ---------------------------------------------------- fetch --
           W_F0: begin
             wait_q <= '0;
-            // SP1: the row read for this pc was issued this cycle; its
-            // valid bit is registered alongside (invalidation wins).
-            rc_vq <= rc_vld_w && !rc_inval_i;
-            st_q  <= W_F1;
+            if (la_cut_ok) la_co_q <= la_co_q + 16'd1;
+            // attribute a blocked cutover to its first failing safety gate
+            // (diagnostic only; la_fire already implies la_cut_ok).
+            if (LaCutEn && la_cut_ok && !la_fire) begin
+              if (!la_full_w) begin
+                if (la_blk_full_q != 16'hffff) la_blk_full_q <= la_blk_full_q + 16'd1;
+              end else if (wave_q == la_execw_q) begin
+                if (la_blk_same_q != 16'hffff) la_blk_same_q <= la_blk_same_q + 16'd1;
+                // sub-cause split of la_sw_safe failure (diagnostic only):
+                // la_wn_q==3 = N wrote >2 distinct dests (count fail);
+                // else a register operand overlaps a tracked N dest (RAW).
+                if (la_wn_q == 2'd3) begin
+                  if (la_blk_swn_q != 16'hffff) la_blk_swn_q <= la_blk_swn_q + 16'd1;
+                end else if (la_ov0 || la_ov1 || la_ov2) begin
+                  if (la_blk_sov_q != 16'hffff) la_blk_sov_q <= la_blk_sov_q + 16'd1;
+                end
+              end else if (la_waveq_q != wave_q) begin
+                if (la_blk_wave_q != 16'hffff) la_blk_wave_q <= la_blk_wave_q + 16'd1;
+              end else if (32'(pc_q[wave_q]) + 32'(la_wc_l) > 32'(ShaderWords)) begin
+                if (la_blk_pc_q != 16'hffff) la_blk_pc_q <= la_blk_pc_q + 16'd1;
+              end
+            end
+            if (la_fire) begin
+              // ---- TP3a-3d cutover: commit the N+1 shadow and skip the
+              // front-end (W_F1 decode-restore + W_LD0/W_LD1 operand
+              // stream), landing at W_PRE with identical live state.
+              // la_fire guarantees: row-cache hit, correct prediction
+              // (la_base_q==pc_q[wave_q]), all nva_l operand values
+              // prefetched (va_l_v/ocst_l_v), complete word capture
+              // (la_full_w), and diff-wave N+1 (no same-wave RAW).
+              if (la_fw_q != 16'hffff) la_fw_q <= la_fw_q + 16'd1;
+              wc_q  <= la_wc_l;  opc_q <= la_opc_l;
+              fast_q <= 1'b1;    nva_q <= nva_l;   wreg_q <= wreg_l;
+              vk_q  <= '0;
+              // mirror W_F1's hit-restore, sourced from *_l.  The
+              // has_rty/rc_kv_l guards reproduce W_F1's conditional writes
+              // exactly so untouched slots keep live's stale values.
+              if (rc_row_l.has_rty) begin
+                rkind_q <= rkind_l; rcomps_q <= rcomps_l;
+                rcols_q <= rcols_l; relem_q <= relem_l;
+                rsz_q   <= rsz_l;   rlw_q   <= rlw_l;
+                rty_v_q <= 1'b1;    rty_id_q <= rty_id_l;
+                ncomp_q <= ncomp_l;
+              end else begin
+                ncomp_q <= 4'd1;
+              end
+              for (int k = 0; k < 3; k++) begin
+                if (rc_kv_l[k]) begin
+                  vty_q[k]  <= vty_l[k];  otag_q[k] <= otag_l[k];
+                  oidx_q[k] <= oidx_l[k];  oaux_q[k] <= oaux_l[k];
+                  oid_q[k]  <= oid_l[k];
+                end
+              end
+              if (nva_l != 3'd0) begin
+                res_id_q   <= res_id_l;   res_slot_q <= res_slot_l;
+                ridx_q     <= ridx_l;     raux_q     <= raux_l;
+              end
+              // operand words: ops_q[k]=prog word k+1 for k<wc-1; ops_l[k]
+              // captured the same pushes.  Slots >=wc-1 stay stale (live
+              // leaves them too).
+              for (int k = 0; k < OPB; k++)
+                if (16'(k + 1) < la_wc_l) ops_q[k] <= ops_l[k];
+              // operand values: register→va_q (RF port-1 read, exact for
+              // diff-wave), const→ocst_q row + va_q component splat —
+              // identical to W_LD1's rc_cap_v captures.
+              for (int k = 0; k < 3; k++) begin
+                if (k < 32'(nva_l)) begin
+                  if (otag_l[k] == APU_SH_RT_CONST) begin
+                    ocst_q[k] <= ocst_l[k];
+                    for (int l = 0; l < LAN; l++)
+                      for (int c = 0; c < VEC; c++)
+                        va_q[k][l][c] <=
+                          ocst_l[k][32 * ((c < oaux_l[k]) ? c : 0) +: 32];
+                  end else begin
+                    va_q[k] <= va_l[k];
+                  end
+                end
+              end
+              // re-arm the lookahead for N+2 exactly as W_F1 would have
+              // (W_F1 is skipped): retarget la_base_q via pick_nq, restart
+              // the word stream and shadow decode.  prog_data_i[31:16] is
+              // replaced by la_wc_l — the same wc W_F1 would have read.
+              la_base_q <= ((pick_nq >= 0) && (pick_nq != int'(wave_q)))
+                           ? pc_q[pick_nq[RL-1:0]]
+                           : (pc_q[wave_q] + la_wc_l);
+              la_idx_q  <= '0;
+              la_ncap_q <= '0; la_wc_l <= '0; la_opc_l <= '0;
+              if (la_l_vld && (la_base_q == pc_q[wave_q]) &&
+                  (la_agree_q != 16'hffff))
+                la_agree_q <= la_agree_q + 1'b1;
+              la_d_q   <= LA_D_REQ;
+              la_l_vld <= 1'b0;
+              // cutover skips W_F1's per-instruction write-dest reset, so
+              // do it here: la_wd*/la_wn_q must describe ONLY the
+              // instruction now entering execute (this one), not N's stale
+              // set, or the next same-wave check over-counts/over-blocks.
+              la_wn_q  <= 2'd0;
+              st_q <= W_PRE;
+            end else begin
+              // SP1: the row read for this pc was issued this cycle; its
+              // valid bit is registered alongside (invalidation wins).
+              rc_vq <= rc_vld_w && !rc_inval_i;
+              st_q  <= W_F1;
+            end
           end
           W_F1: begin
             wc_q <= prog_data_i[31:16];
@@ -4275,7 +4933,7 @@ module g6lc_apu_shwave
                 // SP1 hit: restore every fact the long decode walk
                 // would leave; operand values stream in W_LD0/W_LD1.
                 fast_q <= 1'b1;
-                nva_q  <= {1'b0, rc_row.nva};
+                nva_q  <= rc_row.nva;
                 wreg_q <= rc_row.wreg;
                 if (rc_row.has_rty) begin
                   rkind_q <= rc_row.rkind; rcomps_q <= rc_row.rcomps;
@@ -4287,7 +4945,7 @@ module g6lc_apu_shwave
                 end else begin
                   ncomp_q <= 4'd1;
                 end
-                for (int k = 0; k < 3; k++) begin
+                for (int k = 0; k < 6; k++) begin
                   if (rc_kv[k]) begin
                     vty_q[k]  <= rc_row.vty[k*10 +: 10];
                     otag_q[k] <= rc_row.otag[k*2 +: 2];
@@ -4296,11 +4954,11 @@ module g6lc_apu_shwave
                     oid_q[k]  <= rc_row.oid[k*10 +: 10];
                   end
                 end
-                if (rc_row.nva != 2'd0) begin
+                if (rc_row.nva != 3'd0) begin
                   // scratch the long loop leaves: last operand's id,
                   // slot, RF row and aux
                   res_id_q   <= rc_l_oid;
-                  res_slot_q <= {1'b0, rc_l_slot};
+                  res_slot_q <= rc_l_slot;
                   ridx_q     <= rc_l_oidx;
                   raux_q     <= rc_l_oaux;
                 end
@@ -4400,7 +5058,7 @@ module g6lc_apu_shwave
             oidx_q[res_slot_q] <= rm_idx[RI-1:0];
             // SP1: row-write operands — id is res_id_q (the f_opid10
             // result for this slot), aux is this operand's rm_aux.
-            if (res_slot_q < 3'd3) begin
+            if (res_slot_q < 3'd6) begin
               oaux_q[res_slot_q] <= rm_aux;
               oid_q[res_slot_q]  <= res_id_q;
             end
@@ -4520,13 +5178,17 @@ module g6lc_apu_shwave
             if (xsub_q != 6'd0) sfu_step();
             else
             unique case (opc_q)
-              // combinational integer/bool/bitcast/select ops
-              124,126,127,128,130,132,164,165,166,167,168,169,170,171,
-              172,173,174,175,176,177,178,179,194,195,196,197,198,199,
-              200: begin
+              // combinational integer/bool/bitcast/select/subgroup/expect ops
+              113,114,117,120,124,126,127,128,130,132,164,165,166,167,168,169,170,171,
+              172,173,174,175,176,177,178,179,194,195,196,197,198,199,200,
+              16'd333,16'd334,16'd335,16'd336,16'd337,16'd338,16'd339,16'd340,
+              16'd341,16'd342,16'd343,16'd344,16'd345,16'd346,16'd347,16'd348,
+              16'd349,16'd351,16'd353,16'd354,16'd356,16'd357,16'd359,16'd360,
+              16'd361,16'd362,16'd363,16'd364,16'd4431,16'd5630: begin
                 wb_q <= int_alu;
                 st_q <= W_WB;
               end
+              16'd5631: st_q <= W_NEXT; // OpAssumeTrueKHR: advisory no-op
               // fpnew fma ops
               // fpnew_fma ADD = ops[1]+ops[2], SUB = ops[1]-ops[2]
               // (operand A is forced to +1.0 internally)
@@ -6361,7 +7023,7 @@ module g6lc_apu_shwave
             logic [$bits(apu_sh_bindrow_t):0] br;
             logic [256:0] hit;
             br  = f_brow(4'(dsc_set_q[3:0]), dsc_bd_q);
-            hit = f_dhit(dsc_set_q[1:0], dsc_bd_q, dsc_idx_q);
+            hit = f_dhit(dsc_set_q[2:0], dsc_bd_q, dsc_idx_q);
             if (!br[$bits(apu_sh_bindrow_t)] ||
                 {16'h0, dsc_idx_q} >= {16'h0, br[40:25]}) begin
               // unbound set / no such binding / idx past the array:
@@ -6377,7 +7039,7 @@ module g6lc_apu_shwave
                 dsc_rec_q <= hit[255:0];
                 if (tx_full_q) tx_rec_q <= hit[255:0];
                 ls_bind_q <= hit[31:0] +
-                             f_doff(dsc_set_q[1:0],
+                             f_doff(dsc_set_q[2:0],
                                     apu_sh_bindrow_t'(br[56:0]),
                                     dsc_idx_q);
                 ls_bsz_q  <= hit[63:32];
@@ -6385,7 +7047,7 @@ module g6lc_apu_shwave
                 st_q <= dret_q;
               end else begin
                 dsc_err_q <= 1'b0;
-                dsc_addr_q <= {32'h0, desc_i.set_base[dsc_set_q[1:0]]} +
+                dsc_addr_q <= {32'h0, desc_i.set_base[dsc_set_q[2:0]]} +
                               ((64'(br[24:5]) + 64'(dsc_idx_q))
                                << 5);
                 st_q <= W_DS1;
@@ -6468,14 +7130,14 @@ module g6lc_apu_shwave
                 // fill the record cache (round-robin victim)
                 dc_v_q[dc_vic_q]   <= 1'b1;
                 dc_key_q[dc_vic_q] <= {dsc_idx_q, dsc_bd_q,
-                                       dsc_set_q[1:0]};
+                                       dsc_set_q[2:0]};
                 dc_val_q[dc_vic_q] <= val;
                 dc_vic_q           <= dc_vic_q == 3'(APU_DESC_CACHE-1)
                                       ? 3'h0 : dc_vic_q + 3'h1;
                 dsc_rec_q <= val;
                 if (tx_full_q) tx_rec_q <= val;
                 ls_bind_q <= val[31:0] +
-                             f_doff(dsc_set_q[1:0], dsc_row_q,
+                             f_doff(dsc_set_q[2:0], dsc_row_q,
                                     dsc_idx_q);
                 ls_bsz_q  <= size;
                 ls_bok_q  <= val[72] && f_buf_kind(kind);
@@ -6513,14 +7175,14 @@ module g6lc_apu_shwave
               // cache the RESOLVED record — +0 now carries the base
               dc_v_q[dc_vic_q]   <= 1'b1;
               dc_key_q[dc_vic_q] <= {dsc_idx_q, dsc_bd_q,
-                                     dsc_set_q[1:0]};
+                                     dsc_set_q[2:0]};
               dc_val_q[dc_vic_q] <= val;
               dc_vic_q           <= dc_vic_q == 3'(APU_DESC_CACHE-1)
                                     ? 3'h0 : dc_vic_q + 3'h1;
               dsc_rec_q <= val;
               if (tx_full_q) tx_rec_q <= val;
               ls_bind_q <= val[31:0] +
-                           f_doff(dsc_set_q[1:0], dsc_row_q,
+                           f_doff(dsc_set_q[2:0], dsc_row_q,
                                   dsc_idx_q);
               ls_bsz_q  <= val[63:32];
               ls_bok_q  <= val[72] && f_buf_kind(val[71:64]);
@@ -8942,6 +9604,11 @@ module g6lc_apu_shwave
           W_NEXT: begin
             pc_q[wave_q] <= pc_q[wave_q] + wc_q;
             insns_q <= insns_q + 1;
+            la_execw_q <= wave_q;   // TP3a-3d: N's wave for the RAW gate —
+                                    // wave_q is still N's here; t_sched's
+                                    // wave_q<=pick lands next cycle (W_F0).
+                                    // (la_waveq_q is frozen earlier at
+                                    //  LA_D_EVAL — the wave va_l reads use.)
             xq_q <= '0;      // ExtInst step counter is per instruction
             xsub_q <= '0; xcall_q <= '0;   // §7d SFU seq is per instr
             ls_agg_q <= 1'b0;              // aggregate LSU mode is too
@@ -8984,6 +9651,359 @@ module g6lc_apu_shwave
         if (mem_we_o && mem_ready_i) lb_v_q <= 1'b0;
       end
     end
+
+    // ---- TP3a-3a lookahead fetch/walk (observational) --------------------
+    // prog_addr_o carries la_addr while la_ok; prog_data_i returns that word
+    // one cycle later, so la_v_q (la_ok delayed) gates the FIFO push.  The
+    // window is exactly the complement of the live fetch/stream states, so
+    // a pushed word is never a needed live capture.  la_base_q latches the
+    // same-wave successor pc_q[wave_q]+wc_q at W_F1 (prog_data_i[31:16] is
+    // the incoming word count); la_idx_q walks la_base_q+0..63 across the
+    // instruction's idle cycles.  Decode is untouched — the FIFO is not
+    // consumed yet (3b/3c/3d).
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        la_base_q <= '0; la_idx_q <= '0; la_v_q <= 1'b0; la_fe_v_q <= 1'b0;
+        la_wp_q   <= '0; la_fill_q <= '0;
+        la_ncap_q <= '0; la_wc_l <= '0; la_opc_l <= '0;
+        la_full_p_q <= 1'b0; la_fc_q <= '0; la_mxwc_q <= '0;
+        la_hc_q <= '0; la_agree_q <= '0; la_vc_q <= '0; la_dc_q <= '0;
+        la_co_q <= '0;
+        // TP3a-3b shadow decode reset
+        la_d_q <= LA_D_IDLE; la_rc_v_q <= 1'b0;
+        rc_row_l <= '0; rc_vld_l <= 1'b0;
+        la_l_vld <= 1'b0; la_l_hit <= 1'b0;
+        la_execw_q <= '0; la_fw_q <= '0; la_waveq_q <= '0;
+        la_wn_q <= 2'd0; la_wd0_q <= '0; la_wd1_q <= '0;
+        la_blk_full_q <= '0; la_blk_same_q <= '0;
+        la_blk_wave_q <= '0; la_blk_pc_q <= '0;
+        la_blk_swn_q <= '0; la_blk_sov_q <= '0;
+        fast_l <= 1'b0; nva_l <= '0; wreg_l <= '0;
+        rkind_l <= '0; rcomps_l <= '0; rcols_l <= '0;
+        relem_l <= '0; rsz_l <= '0; rlw_l <= '0;
+        rty_v_l <= 1'b0; rty_id_l <= '0; ncomp_l <= '0;
+        for (int k = 0; k < 3; k++) begin
+          vty_l[k] <= '0; otag_l[k] <= '0; oidx_l[k] <= '0;
+          oaux_l[k] <= '0; oid_l[k]  <= '0;
+        end
+        res_id_l <= '0; res_slot_l <= '0; ridx_l <= '0; raux_l <= '0;
+        for (int i = 0; i < OPB; i++) ops_l[i] <= '0;
+        la_rf_k <= '0; la_rf_p <= '0; la_rf_pv <= 1'b0;
+        for (int k = 0; k < 3; k++) va_l_v[k] <= 1'b0;
+        for (int k = 0; k < 3; k++) va_l[k] <= '0;
+        la_cst_k <= '0; la_cst_p <= '0; la_cst_pv <= 1'b0;
+        for (int k = 0; k < 3; k++) ocst_l_v[k] <= 1'b0;
+        for (int k = 0; k < 3; k++) ocst_l[k] <= '0;
+        la_cc_q <= '0;
+      end else begin
+        la_v_q   <= la_ok;
+        la_fe_v_q <= la_fe_ok;
+        // TP3a-3c operand prefetch: rf1_req/rf1_addr are COMBINATIONAL
+        // (driven below) so the issue is stable during the cycle, matching
+        // the live rc_is_v path; va_l capture is registered one cycle later.
+        // Scan operands 0..2 while la_l_vld; skip APU_SH_RT_CONST (those go
+        // to ocst_l via the shmod const port — deferred).  la_rf_p tracks
+        // the operand whose read was issued last cycle; la_rf_pv marks that
+        // rf1_rdata now carries its value.
+        if (la_rf_pv) begin
+          va_l[la_rf_p]   <= rf1_rdata;
+          va_l_v[la_rf_p] <= 1'b1;
+          if (la_vc_q != 16'hffff) la_vc_q <= la_vc_q + 1'b1;
+        end
+        la_rf_pv <= 1'b0;
+        if (la_l_vld && (la_rf_k < 3'd3)) begin
+          // advance the scan; issue a port-1 read when this operand is a
+          // register operand within nva_l.  rf1_req/rf1_addr (comb, below)
+          // reflect la_rf_k THIS cycle; the capture lands next cycle via
+          // la_rf_p/la_rf_pv.
+          if ((la_rf_k < 3'(nva_l)) &&
+              (otag_l[la_rf_k] != APU_SH_RT_CONST)) begin
+            la_rf_p  <= la_rf_k;
+            la_rf_pv <= 1'b1;
+          end
+          la_rf_k <= la_rf_k + 3'd1;
+        end else if (!la_l_vld) begin
+          la_rf_k <= '0; la_rf_p <= '0; la_rf_pv <= 1'b0;
+          for (int k = 0; k < 3; k++) va_l_v[k] <= 1'b0;
+        end
+        // TP3a-3c ocst_l const prefetch: la_cst_issue (comb) presents
+        // oid_l[la_cst_k] on const_id_o this cycle; const_data_i returns the
+        // lookahead const row next cycle, captured into ocst_l[la_cst_p].
+        // la_cst_k advances once per safe window {W_NEXT,W_F0,W_F1} so operand
+        // slot k is examined at window k; register slots consume a window
+        // without issuing.  The capture is NOT gated by la_l_vld — it can
+        // drop at W_F1 between issue and capture.
+        if (la_cst_pv) begin
+          ocst_l[la_cst_p]   <= const_data_i;
+          ocst_l_v[la_cst_p] <= 1'b1;
+          if (la_cc_q != 16'hffff) la_cc_q <= la_cc_q + 1'b1;
+        end
+        la_cst_pv <= la_cst_issue;
+        if (la_cst_issue) la_cst_p <= la_cst_k;
+        if (!la_l_vld) begin
+          la_cst_k <= '0; la_cst_p <= '0;
+          // clear ocst_l_v per shadow window like va_l_v — otherwise a
+          // stale valid bit lets la_ops_rdy pass before THIS window's
+          // const read for slot k lands, committing the previous
+          // instruction's ocst_l[k].  Placed after the la_cst_pv capture
+          // so an in-flight capture this cycle still wins (conservative:
+          // a clobbered capture only loses readiness, never corrupts).
+          for (int k = 0; k < 3; k++) ocst_l_v[k] <= 1'b0;
+        end else if (la_cst_win && (la_cst_k < 3'd3)) begin
+          la_cst_k <= la_cst_k + 3'd1;
+        end
+        la_rc_v_q <= la_rc_req;
+        // TP3a-3d same-wave RAW closure: capture the ACTUAL RF write
+        // destination (rf_addr[RI-1:0], the register index — wave bits are
+        // irrelevant since same-wave operands share the wave) on every
+        // rf_we commit.  rf_we is only asserted in execute write states
+        // (front-end decode holds it 0), and la_wn_q resets at W_F1 /
+        // cutover, so this set always describes the single instruction in
+        // execute.  Distinct-dest counting: a repeated write to an
+        // already-seen index (multi-tile / RMW) does not inflate the count;
+        // la_wn_q==3 latches ">2 distinct" so the same-wave check stays
+        // conservative rather than tracking an unbounded write set.
+        if (rf_req && rf_we) begin
+          if (la_wn_q == 2'd0) begin
+            la_wd0_q <= rf_addr[RI-1:0]; la_wn_q <= 2'd1;
+          end else if (la_wn_q == 2'd1) begin
+            if (rf_addr[RI-1:0] != la_wd0_q) begin
+              la_wd1_q <= rf_addr[RI-1:0]; la_wn_q <= 2'd2;
+            end
+          end else if (la_wn_q == 2'd2) begin
+            if ((rf_addr[RI-1:0] != la_wd0_q) &&
+                (rf_addr[RI-1:0] != la_wd1_q))
+              la_wn_q <= 2'd3;
+          end
+        end
+        if (st_q == W_F1) begin
+          // TP3a-3b pick_nq: aim la_base at the predicted-next instruction.
+          // Same-wave pick (or no eligible wave) keeps the same-wave
+          // successor pc_q[wave_q]+wc_q; a different-wave pick targets that
+          // wave's pending instruction pc_q[pick_nq] directly (its pc
+          // already names the next instr — no +wc).  pick_nq uses pre-N
+          // wfin/wbar, so terminator/barrier N is a stale prediction
+          // (observational only — agreement counters measure the residual).
+          la_base_q <= ((pick_nq >= 0) && (pick_nq != int'(wave_q)))
+                       ? pc_q[pick_nq[RL-1:0]]
+                       : (pc_q[wave_q] + prog_data_i[31:16]);
+          la_idx_q  <= '0;
+          // a new instruction's lookahead window opens: the next push is
+          // la_base+0 = the instruction word, so restart the word count and
+          // clear the parsed fields until that word lands.  Race-free:
+          // W_F1's only predecessor is W_F0 (la_ok=0 there), so la_v_q is
+          // always 0 at W_F1 and no push can override these resets.
+          la_ncap_q <= '0; la_wc_l <= '0; la_opc_l <= '0;
+          // TP3a-3b: la_base_q now names N+1 — (re)arm the shadow decode
+          // for it and drop any stale *_l validity until the new eval.
+          // Agreement probe (pre-update values): if the lookahead target
+          // still equals the pc being decoded AND *_l held a valid decode,
+          // the shadow decode described THIS live instruction.
+          if (la_l_vld && (la_base_q == pc_q[wave_q]) &&
+              (la_agree_q != 16'hffff))
+            la_agree_q <= la_agree_q + 1'b1;
+          la_d_q   <= LA_D_REQ;
+          la_l_vld <= 1'b0;
+          // per-instruction write-dest reset: the lookahead window for the
+          // NEXT instruction opens here, so la_wn_q/la_wd* must describe
+          // only the instruction about to execute (its writes latch during
+          // execute, consumed at the following W_F0 same-wave check).
+          la_wn_q  <= 2'd0;
+        end else if (la_ok && (la_idx_q < ((1 << LA_SPAN) - 2))) begin
+          // TP3a-3e: step the fetch pair base by 2 words — prog_data_i
+          // (port 0) and prog_data2_i (port 1, la_addr+1) cover
+          // la_idx_q..la_idx_q+1 each la_ok cycle.  la_idx_q tops out at
+          // LA_SPAN-2 so port 1's la_addr+1 stays inside the LA_SPAN-word
+          // window; it saturates there (keeps re-reading the tail pair,
+          // harmless — ops_l writes are bounded by OPB).
+          la_idx_q <= la_idx_q + 6'd2;
+        end else if (la_fe_ok && (la_idx_q < ((1 << LA_SPAN) - 1))) begin
+          // TP3a-3f: during W_LD0/W_LD1 port 1 alone streams N+1's words at
+          // la_addr (prog_addr2_o = la_addr + la_ok = la_addr here), one per
+          // cycle.  la_idx_q steps by 1 so the front-end stream tiles
+          // seamlessly into the execute pair that follows (la_idx_q is the
+          // unified next-word offset; la_ncap_q tracks the same position on
+          // the capture side via la_fe_v_q/la_v_q).  Guard keeps la_idx_q
+          // < LA_SPAN so port 1's la_addr never leaves the window.
+          la_idx_q <= la_idx_q + 6'd1;
+        end
+        // TP3a-3b shadow decode: capture N+1's row+valid then eval hit.
+        // Asymmetric capture — rc_vld_w is COMBINATIONAL rcv_q[rc_idx], so
+        // it is only N+1's while la_rc_req holds rc_idx=la_base (REQ); the
+        // row data is registered SRAM output, correct one cycle later
+        // (CAP, la_rc_v_q) after rc_idx has already muxed back to live.
+        if (la_rc_req) rc_vld_l <= rc_vld_w;
+        if (la_rc_v_q) rc_row_l <= rc_row;
+        unique case (la_d_q)
+          LA_D_IDLE: ;
+          LA_D_REQ:  if (la_rc_req) la_d_q <= LA_D_CAP;
+          LA_D_CAP:  la_d_q <= LA_D_EVAL;
+          LA_D_EVAL: begin
+            la_d_q   <= LA_D_IDLE;
+            la_l_hit <= la_hit_w;
+            la_l_vld <= la_hit_w;
+            // freeze the operand-read wave for this shadow window: rf1_addr
+            // uses la_waveq_q so every va_l read hits ONE wave's RF row.
+            // la_fire later requires la_waveq_q==wave_q (the wave that will
+            // actually run N+1), closing the stale-pick_nq hole.
+            la_waveq_q <= la_wave;
+            if (la_dc_q != 16'hffff) la_dc_q <= la_dc_q + 1'b1;
+            if (la_hit_w && (la_hc_q != 16'hffff))
+              la_hc_q <= la_hc_q + 1'b1;
+            if (la_hit_w) begin
+              // mirror the W_F1 row-cache-hit restore into *_l exactly.
+              fast_l <= 1'b1;
+              nva_l  <= rc_row_l.nva;
+              wreg_l <= rc_row_l.wreg;
+              if (rc_row_l.has_rty) begin
+                rkind_l <= rc_row_l.rkind; rcomps_l <= rc_row_l.rcomps;
+                rcols_l <= rc_row_l.rcols;
+                relem_l <= rc_row_l.relem; rsz_l <= rc_row_l.rsz;
+                rlw_l   <= rc_row_l.rlw;
+                rty_v_l <= 1'b1; rty_id_l <= rc_row_l.rty_id;
+                ncomp_l <= 4'(f_nc(rc_row_l.rcomps));
+              end else begin
+                ncomp_l <= 4'd1;
+              end
+              for (int k = 0; k < 3; k++) begin
+                if (rc_kv_l[k]) begin
+                  vty_l[k]  <= rc_row_l.vty[k*10 +: 10];
+                  otag_l[k] <= rc_row_l.otag[k*2 +: 2];
+                  oidx_l[k] <= rc_row_l.oidx[k*RI +: RI];
+                  oaux_l[k] <= rc_row_l.oaux[k*4 +: 4];
+                  oid_l[k]  <= rc_row_l.oid[k*10 +: 10];
+                end
+              end
+              if (rc_row_l.nva != 3'd0) begin
+                res_id_l   <= rc_l_oid_l;
+                res_slot_l <= rc_l_slot_l;
+                ridx_l     <= rc_l_oidx_l;
+                raux_l     <= rc_l_oaux_l;
+              end
+            end
+          end
+        endcase
+        if (la_v_q) begin
+          // TP3a-3e: prog_data_i/prog_data2_i are the 2-word pair at
+          // la_addr = la_base+la_idx_q (la_idx_q steps by 2, so the pair
+          // covers la_idx_q..la_idx_q+1).  prog_data_i is push-ordinal
+          // la_ncap_q and prog_data2_i ordinal la_ncap_q+1; ordinal 0 is
+          // the instruction word and ordinal p>=1 is operand word
+          // ops_l[p-1] (= prog word la_base+p).  ops_l[k] is consumed only
+          // for k+1<la_wc_l, so capturing within OPB bounds unconditionally
+          // is safe — la_wc_l is not yet valid during the first pair's
+          // word B.  la_ncap_q counts words (+=2/pair) and saturates so a
+          // long execute window can never wrap it back to a small value.
+          la_fifo[la_wp_q]        <= prog_data_i;
+          la_fifo[la_wp_q + 6'd1] <= prog_data2_i;
+          la_wp_q   <= la_wp_q + 6'd2;
+          la_fill_q <= (la_fill_q > 16'hfffd) ? 16'hffff
+                                              : la_fill_q + 16'd2;
+          if (la_ncap_q == 7'd0) begin
+            la_wc_l  <= prog_data_i[31:16];
+            la_opc_l <= prog_data_i[15:0];
+          end else if ((la_ncap_q - 7'd1) < 7'(OPB)) begin
+            // word A: operand index la_ncap_q-1 (odd slots)
+            ops_l[la_ncap_q - 7'd1] <= prog_data_i;
+          end
+          // word B: operand index la_ncap_q (even slots); ordinal
+          // la_ncap_q+1 >= 1 always, so this is always an operand word.
+          if (la_ncap_q < 7'(OPB)) ops_l[la_ncap_q] <= prog_data2_i;
+          if (la_ncap_q <= 7'h7d) la_ncap_q <= la_ncap_q + 7'd2;
+          else                    la_ncap_q <= 7'h7f;
+        end else if (la_fe_v_q) begin
+          // TP3a-3f: front-end single-word capture.  During W_LD0/W_LD1
+          // prog_addr2_o = la_addr so prog_data2_i is N+1's word at ordinal
+          // la_ncap_q (la_idx_q advanced +1 on la_fe_ok, keeping la_ncap_q
+          // and la_idx_q on the same stream position).  It maps exactly
+          // like pair word A: ordinal 0 = instruction word, ordinal p>=1 =
+          // operand word ops_l[p-1].  la_v_q and la_fe_v_q are the delayed
+          // la_ok/la_fe_ok and are never both 1, so this never double-pushes.
+          la_fifo[la_wp_q] <= prog_data2_i;
+          la_wp_q   <= la_wp_q + 6'd1;
+          la_fill_q <= (la_fill_q > 16'hfffe) ? 16'hffff
+                                              : la_fill_q + 16'd1;
+          if (la_ncap_q == 7'd0) begin
+            la_wc_l  <= prog_data2_i[31:16];
+            la_opc_l <= prog_data2_i[15:0];
+          end else if ((la_ncap_q - 7'd1) < 7'(OPB)) begin
+            ops_l[la_ncap_q - 7'd1] <= prog_data2_i;
+          end
+          if (la_ncap_q != 7'h7f) la_ncap_q <= la_ncap_q + 7'd1;
+        end
+        // observational coverage: count each completed-instruction capture
+        // (rising edge of la_full_w) and track the deepest valid wc seen —
+        // proves multi-operand streams are actually being prefetched.
+        la_full_p_q <= la_full_w;
+        if (la_full_w && !la_full_p_q && la_fc_q != 16'hffff)
+          la_fc_q <= la_fc_q + 1'b1;
+        if ((la_wc_l >= 16'd1) && (la_wc_l <= 16'(OPB) + 16'd1) &&
+            (la_wc_l > la_mxwc_q))
+          la_mxwc_q <= la_wc_l;
+      end
+    end
+
+    // pragma translate_off
+    // TP3a-3a observability: +la_dbg dumps the lookahead fill/walk state at
+    // each workgroup end so the prefetch window's coverage is measurable.
+    // Sim-only; synthesised away.
+    logic la_dbg_on;
+    initial la_dbg_on = $test$plusargs("la_dbg");
+    always @(posedge clk_i) begin
+      if (la_dbg_on && st_q == W_DONE)
+        $display("LA_DBG fill=%0d wp=%0d base=%04x idx=%0d ncap=%0d wc=%0d la_opc=%04x full=%0d fc=%0d mxwc=%0d | d=%0d l_vld=%0d l_hit=%0d rtag=%x rnva=%0d hc=%0d agree=%0d dc=%0d co=%0d fw=%0d ops0=%08x ops1=%08x | rfk=%0d vav=%b vc=%0d va00=%08x va01=%08x | cstk=%0d ccv=%b cc=%0d oc00=%08x oc01=%08x",
+                 la_fill_q, la_wp_q, la_base_q, la_idx_q, la_ncap_q,
+                 la_wc_l, la_opc_l, la_full_w, la_fc_q, la_mxwc_q,
+                 la_d_q, la_l_vld, la_l_hit, rc_row_l.tag, rc_row_l.nva,
+                 la_hc_q, la_agree_q, la_dc_q, la_co_q, la_fw_q, ops_l[0], ops_l[1],
+                 la_rf_k, {va_l_v[2], va_l_v[1], va_l_v[0]}, la_vc_q,
+                 va_l[0][0][0], va_l[0][0][1],
+                 la_cst_k, {ocst_l_v[2], ocst_l_v[1], ocst_l_v[0]}, la_cc_q,
+                 ocst_l[0][0], ocst_l[1][0]);
+      if (la_dbg_on && st_q == W_DONE)
+        $display("LA_BLK full=%0d same=%0d wave=%0d pc=%0d (co=%0d fw=%0d) same_swn=%0d same_sov=%0d",
+                 la_blk_full_q, la_blk_same_q, la_blk_wave_q, la_blk_pc_q,
+                 la_co_q, la_fw_q, la_blk_swn_q, la_blk_sov_q);
+    end
+
+    // TP3a-LSU observability: +lsu_dbg dumps the W_LS0 access-class cycle
+    // split at each workgroup end.  W_LS0 is the per-(lane,comp) access
+    // decode; SP3 vectorized only plain Function/Private scratch
+    // (ls_vec_w), so this split shows how much decode is still lane-serial
+    // device-mem / record / atomic / aggregate.  Diagnostic-only; the
+    // counters are plain flops under translate_off and never touch the
+    // functional path.
+    logic lsu_dbg_on;
+    initial lsu_dbg_on = $test$plusargs("lsu_dbg");
+    logic [31:0] lsu_vec_q, lsu_atom_q, lsu_aggm_q, lsu_rec_q;
+    logic [31:0] lsu_wg_q,   lsu_dev_q,  lsu_scr_q,  lsu_oth_q;
+    logic [31:0] lsu_tot_q;
+    always @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        lsu_vec_q <= '0; lsu_atom_q <= '0; lsu_aggm_q <= '0;
+        lsu_rec_q <= '0; lsu_wg_q <= '0;   lsu_dev_q <= '0;
+        lsu_scr_q <= '0; lsu_oth_q <= '0;  lsu_tot_q <= '0;
+      end else if (st_q == W_LS0) begin
+        lsu_tot_q <= lsu_tot_q + 32'd1;
+        if (lsu_tot_q != 32'hffff_ffff) begin
+          if      (ls_vec_w)                      lsu_vec_q  <= lsu_vec_q  + 32'd1;
+          else if (ls_atom_q)                     lsu_atom_q <= lsu_atom_q + 32'd1;
+          else if (ls_agg_q || ls_mat_q)          lsu_aggm_q <= lsu_aggm_q + 32'd1;
+          else if (ls_rec_q)                      lsu_rec_q  <= lsu_rec_q  + 32'd1;
+          else if (ls_tg_w[3:0] == APU_SH_SC_WORKGROUP) lsu_wg_q <= lsu_wg_q + 32'd1;
+          else if (ls_tg_w[3:0] == APU_SH_SC_UNIFORM  ||
+                   ls_tg_w[3:0] == APU_SH_SC_SBUF)     lsu_dev_q <= lsu_dev_q + 32'd1;
+          else if (ls_tg_w[3:0] == APU_SH_SC_FUNCTION ||
+                   ls_tg_w[3:0] == APU_SH_SC_PRIVATE)  lsu_scr_q <= lsu_scr_q + 32'd1;
+          else                                      lsu_oth_q <= lsu_oth_q + 32'd1;
+        end
+      end
+      if (lsu_dbg_on && st_q == W_DONE)
+        $display("LSU_DBG tot=%0d vec=%0d atom=%0d aggm=%0d rec=%0d wg=%0d dev=%0d scr=%0d oth=%0d",
+                 lsu_tot_q, lsu_vec_q, lsu_atom_q, lsu_aggm_q, lsu_rec_q,
+                 lsu_wg_q, lsu_dev_q, lsu_scr_q, lsu_oth_q);
+    end
+    // pragma translate_on
   end
 endmodule
 
@@ -9025,7 +10045,16 @@ module g6lc_apu_shwave_fixture
   output apu_sh_done_t done_pl_o,
   output logic [2:0]   rd_slot_o,
   output logic [15:0]  prog_addr_o,
+  // TP3a-3f: dedicated lookahead word address for shmod port 1.  = la_addr
+  // during the front-end operand-load window (W_LD0/W_LD1) so port 1
+  // prefetches N+1 while port 0 streams N's operands; = la_addr+1 during
+  // la_ok (the execute pair's word B).  Never consumed by the live path.
+  output logic [15:0]  prog_addr2_o,
   input  logic [31:0]  prog_data_i,
+  // TP3a-3e: second program word at prog_addr2_o (shmod port 1), used only
+  // by the lookahead's operand capture; never consumed by the live
+  // front-end.
+  input  logic [31:0]  prog_data2_i,
   output logic [9:0]   type_id_o,
   input  logic [95:0]  type_data_i,
   output logic [9:0]   const_id_o,

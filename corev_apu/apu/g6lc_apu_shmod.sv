@@ -74,7 +74,15 @@ module g6lc_apu_shmod
   // wave/TB read ports (1-cycle SRAM latency; !busy_o only)
   input  logic [2:0]   rd_slot_i,
   input  logic [15:0]  prog_addr_i,
+  // TP3a-3f: dedicated lookahead word address for port 1.  During la_ok it
+  // is prog_addr_i+1 (the execute pair's word B); during the W_LD0/W_LD1
+  // operand-load window it is the front-end lookahead address so port 1
+  // streams N+1 at 1 word/cycle while port 0 streams N's operands.
+  input  logic [15:0]  prog_addr2_i,
   output logic [31:0]  prog_data_o,
+  // TP3a-3e: second program word at prog_addr2_i, read-only.  Feeds the
+  // shwave lookahead's operand-word capture (la_full_w).
+  output logic [31:0]  prog_data2_o,
   input  logic [9:0]   type_id_i,
   output logic [95:0]  type_data_o,
   input  logic [9:0]   const_id_i,
@@ -105,7 +113,8 @@ module g6lc_apu_shmod
   if (!Enable) begin : gen_off
     assign busy_o = 1'b0;      assign done_o = 1'b0;
     assign done_pl_o = '0;
-    assign prog_data_o = '0;   assign type_data_o = '0;
+    assign prog_data_o = '0;   assign prog_data2_o = '0;
+    assign type_data_o = '0;
     assign const_data_o = '0;  assign memb_data_o = '0;
     assign decor_data_o = '0;  assign var_data_o = '0;
     assign rm_data_o = '0;     assign init_data_o = '0;
@@ -138,7 +147,7 @@ module g6lc_apu_shmod
     // ---- table SRAM port signals ---------------------------------------
     logic                  pr_req, pr_we;
     logic [PW-1:0]         pr_addr;
-    logic [31:0]           pr_wdata, pr_rdata;
+    logic [31:0]           pr_wdata, pr_rdata, pr2_rdata;
     logic                  ty_req, ty_we;
     logic [IW+SW-1:0]      ty_addr;
     logic [95:0]           ty_wdata, ty_rdata;
@@ -321,14 +330,18 @@ module g6lc_apu_shmod
         0,1,3,4,5,6,7,8,10,11,12,14,15,16,17,19,20,21,22,23,24,25,26,27,28,
         29,30,32,33,41,42,43,44,46,48,49,50,51,52,54,55,56,57,59,60,61,62,
         65,66,68,71,72,77,78,79,80,81,82,83,84,86,87,88,89,90,91,92,93,94,
-        95,96,97,98,99,100,103,104,105,106,109,110,111,112,124,126,127,128,
-        129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,
-        146,147,148,149,150,151,152,154,155,156,157,164,165,166,167,168,169,
-        170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,
-        187,188,189,190,191,194,195,196,197,198,199,200,201,202,203,204,205,
-        207,208,209,210,211,212,213,214,215,224,225,227,228,229,230,232,233,
-        234,235,236,237,238,239,240,241,242,245,246,247,248,249,250,251,252,
-        253,254,255,16'd400,16'd4416,16'd5380,16'd5381:
+        95,96,97,98,99,100,103,104,105,106,109,110,111,112,113,114,117,120,
+        124,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,
+        142,143,144,145,146,147,148,149,150,151,152,154,155,156,157,164,165,
+        166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,
+        183,184,185,186,187,188,189,190,191,194,195,196,197,198,199,200,201,
+        202,203,204,205,207,208,209,210,211,212,213,214,215,224,225,227,228,
+        229,230,232,233,234,235,236,237,238,239,240,241,242,245,246,247,248,
+        249,250,251,252,253,254,255,16'd333,16'd334,16'd335,16'd336,16'd337,
+        16'd338,16'd339,16'd340,16'd341,16'd342,16'd343,16'd344,16'd345,
+        16'd346,16'd347,16'd348,16'd349,16'd351,16'd353,16'd354,16'd356,
+        16'd357,16'd359,16'd360,16'd361,16'd362,16'd363,16'd364,16'd400,
+        16'd4416,16'd4431,16'd5380,16'd5381,16'd5630,16'd5631:
         // GEN-END
           is_accepted = 1'b1;
         default: is_accepted = 1'b0;
@@ -340,13 +353,17 @@ module g6lc_apu_shmod
         // (gen_sh_opcodes.py); edit the table, not this list.
         // GEN-BEGIN sh_opcodes:result_shmod
         1,60,61,65,66,68,77,78,79,80,81,82,83,84,86,87,88,89,90,91,92,93,94,
-        95,96,97,98,100,103,104,105,106,109,110,111,112,124,126,127,128,129,
-        130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,
-        147,148,149,150,151,152,154,155,156,157,164,165,166,167,168,169,170,
-        171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,
-        188,189,190,191,194,195,196,197,198,199,200,201,202,203,204,205,207,
-        208,209,210,211,212,213,214,215,227,229,230,232,233,234,235,236,237,
-        238,239,240,241,242,245,16'd400:
+        95,96,97,98,100,103,104,105,106,109,110,111,112,113,114,117,120,124,
+        126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,
+        143,144,145,146,147,148,149,150,151,152,154,155,156,157,164,165,166,
+        167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,
+        184,185,186,187,188,189,190,191,194,195,196,197,198,199,200,201,202,
+        203,204,205,207,208,209,210,211,212,213,214,215,227,229,230,232,233,
+        234,235,236,237,238,239,240,241,242,245,16'd333,16'd334,16'd335,
+        16'd336,16'd337,16'd338,16'd339,16'd340,16'd341,16'd342,16'd343,
+        16'd344,16'd345,16'd346,16'd347,16'd348,16'd349,16'd351,16'd353,
+        16'd354,16'd356,16'd357,16'd359,16'd360,16'd361,16'd362,16'd363,
+        16'd364,16'd400,16'd4431,16'd5630:
         // GEN-END
           has_result = 1'b1;
         default: has_result = 1'b0;
@@ -432,10 +449,25 @@ module g6lc_apu_shmod
     // checked per variable in S_VRB (compute keeps 24..29 only)
     function automatic logic is_bi_ok(input logic [15:0] b);
       unique case (b)
-        // G3a-i: 22 = FragDepth (FS Output → record slot 8 word 0);
-        // 23 = HelperInvocation (FS Input → f_bi hlp|dead per lane)
-        0,1,3,4,15,17,22,23,24,25,26,27,28,29,42,43: is_bi_ok = 1'b1;
+        0,1,3,4,15,17,22,23,24,25,26,27,28,29,
+        36,38,40,41,42,43,
+        16'd4416,16'd4417,16'd4418,16'd4419,16'd4420,
+        16'd4424,16'd4425,16'd4426,16'd4440: is_bi_ok = 1'b1;
         default: is_bi_ok = 1'b0;
+      endcase
+    endfunction
+    function automatic logic [7:0] f_bi_pack(input logic [15:0] b);
+      unique case (b)
+        16'd4416: f_bi_pack = 8'd64;
+        16'd4417: f_bi_pack = 8'd65;
+        16'd4418: f_bi_pack = 8'd66;
+        16'd4419: f_bi_pack = 8'd67;
+        16'd4420: f_bi_pack = 8'd68;
+        16'd4424: f_bi_pack = 8'd69;
+        16'd4425: f_bi_pack = 8'd70;
+        16'd4426: f_bi_pack = 8'd71;
+        16'd4440: f_bi_pack = 8'd72;
+        default:  f_bi_pack = b[7:0];
       endcase
     endfunction
     // gl_PerVertex member builtins (member-level OpMemberDecorate)
@@ -674,7 +706,7 @@ module g6lc_apu_shmod
                                 ops_q[2][7:0]};
                 11: de_wdata = {de_rdata[63:32],
                                 de_rdata[31:24] | APU_SH_DF_BI,
-                                ops_q[2][7:0], de_rdata[15:0]};
+                                f_bi_pack(ops_q[2][15:0]), de_rdata[15:0]};
                 6:  de_wdata = {ops_q[2], de_rdata[31:24], drc_nb,
                                 de_rdata[15:0]};
                 // Location: value rides word1 (shares the ArrayStride
@@ -985,22 +1017,54 @@ module g6lc_apu_shmod
     localparam int unsigned PR_NT = (PR_AW > PR_LW) ? (1 << (PR_AW - PR_LW)) : 1;
     localparam int unsigned PR_TW = (PR_NT > 1) ? (PR_AW - PR_LW) : 1;
     typedef logic [PR_TW-1:0]              pr_tile_t;
-    logic [PR_TW-1:0]                      pr_rdt_q;
-    logic [31:0]                           pr_rda [PR_NT];
-    wire [PR_TW-1:0]                       pr_tile_w = pr_addr[PR_AW-1 -: PR_TW];
+    logic [PR_TW-1:0]                      pr_rdt_q, pr2_rdt_q;
+    logic [31:0]                           pr_rda [PR_NT], pr2_rda [PR_NT];
+    wire [PR_TW-1:0]                       pr_tile_w  = pr_addr[PR_AW-1 -: PR_TW];
+    // TP3a-3e/3f: read-only second program word for the shwave lookahead's
+    // operand capture (la_full_w).  Port 1 is forced read-only (we2=0) and
+    // shares port 0's read condition, so it can never disturb the live
+    // fetch/commit schedule; port 0 is bit-identical to the previous
+    // NumPorts(1) connection.  TP3a-3f gives port 1 a dedicated address
+    // prog_addr2_i (same slot via rd_slot_i) instead of pr_addr+1: during
+    // la_ok it carries prog_addr_i+1 (the execute pair's word B), and during
+    // the W_LD0/W_LD1 operand-load window it carries the front-end
+    // lookahead address so port 1 streams N+1 at 1 word/cycle while port 0
+    // streams N's operands.  pr2_* decodes its own tile independently —
+    // prog_addr2_i may address a different tile than pr_addr.
+    wire [PW-1:0]                          pr2_addr   = {rd_slot_i, prog_addr2_i[LSW-1:0]};
+    wire [PR_TW-1:0]                       pr2_tile_w = pr2_addr[PR_AW-1 -: PR_TW];
+    wire                                    pr2_req    = pr_req && !pr_we;
     for (genvar t = 0; t < PR_NT; t++) begin : g_prt
-      tc_sram #(.NumWords(1 << PR_LW), .DataWidth(32), .NumPorts(1),
+      logic [1:0]            q_req, q_we;
+      logic [1:0][PR_LW-1:0] q_addr;
+      logic [1:0][31:0]      q_wdata, q_rdata;
+      logic [1:0][3:0]       q_be;
+      assign q_req = {pr2_req && ((PR_NT == 1) || (pr2_tile_w == pr_tile_t'(t))),
+                      pr_req  && ((PR_NT == 1) || (pr_tile_w  == pr_tile_t'(t)))};
+      assign q_we  = {1'b0,
+                      pr_we   && ((PR_NT == 1) || (pr_tile_w  == pr_tile_t'(t)))};
+      assign q_addr[0]  = pr_addr[PR_LW-1:0];
+      assign q_addr[1]  = pr2_addr[PR_LW-1:0];
+      assign q_wdata[0] = pr_wdata;  assign q_wdata[1] = '0;
+      assign q_be[0]    = 4'hF;      assign q_be[1]    = '0;
+      tc_sram #(.NumWords(1 << PR_LW), .DataWidth(32), .NumPorts(2),
                 .SimInit("none")) i_prog (
         .clk_i, .rst_ni,
-        .req_i(pr_req && ((PR_NT == 1) || (pr_tile_w == pr_tile_t'(t)))),
-        .we_i (pr_we  && ((PR_NT == 1) || (pr_tile_w == pr_tile_t'(t)))),
-        .addr_i(pr_addr[PR_LW-1:0]),
-        .wdata_i(pr_wdata), .be_i(4'hF), .rdata_o(pr_rda[t]));
+        .req_i(q_req), .we_i(q_we), .addr_i(q_addr),
+        .wdata_i(q_wdata), .be_i(q_be), .rdata_o(q_rdata));
+      assign pr_rda[t]  = q_rdata[0];
+      assign pr2_rda[t] = q_rdata[1];
     end
-    assign pr_rdata = pr_rda[pr_rdt_q];
+    assign pr_rdata  = pr_rda[pr_rdt_q];
+    assign pr2_rdata = pr2_rda[pr2_rdt_q];
     always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) pr_rdt_q <= '0;
-      else if (pr_req && !pr_we) pr_rdt_q <= pr_tile_w;
+      if (!rst_ni) begin
+        pr_rdt_q  <= '0;
+        pr2_rdt_q <= '0;
+      end else if (pr_req && !pr_we) begin
+        pr_rdt_q  <= pr_tile_w;
+        pr2_rdt_q <= pr2_tile_w;
+      end
     end
     // TP3a: the ShaderIds-indexed decode tables are 8192 rows deep,
     // over the 4096 SRAM envelope.  Each is re-banked as ID_NT depth
@@ -1190,6 +1254,7 @@ module g6lc_apu_shmod
       .wdata_i(en_wdata), .be_i('1), .rdata_o(en_rdata));
 
     assign prog_data_o  = pr_rdata;
+    assign prog_data2_o = pr2_rdata;
     assign type_data_o  = ty_rdata;
     assign const_data_o = co_rdata;
     assign memb_data_o  = mb_rdata;
@@ -1412,12 +1477,23 @@ module g6lc_apu_shmod
                 // Uniform/StorageTexelBuffer (5304/5305) arrays are all
                 // admitted.  InputAttachment (5303) and the NonUniform
                 // variants (5306-5312) stay refused.
-                if (ops_q[0] != 32'd1 && ops_q[0] != 32'd46 &&
-                    ops_q[0] != 32'd47 && ops_q[0] != 32'd49 &&
-                    ops_q[0] != 32'd50 &&
-                    ops_q[0] != 32'd51 && ops_q[0] != 32'd5379 &&
-                    !(ops_q[0] >= 32'd28 && ops_q[0] <= 32'd31) &&
-                    ops_q[0] != 32'd5304 && ops_q[0] != 32'd5305) begin
+                if (!(ops_q[0] == 32'd1 || ops_q[0] == 32'd22 ||
+                      ops_q[0] == 32'd25 || ops_q[0] == 32'd34 ||
+                      ops_q[0] == 32'd39 || ops_q[0] == 32'd40 ||
+                      ops_q[0] == 32'd46 || ops_q[0] == 32'd47 ||
+                      ops_q[0] == 32'd49 || ops_q[0] == 32'd50 ||
+                      ops_q[0] == 32'd51 || ops_q[0] == 32'd53 ||
+                      (ops_q[0] >= 32'd28 && ops_q[0] <= 32'd31) ||
+                      (ops_q[0] >= 32'd61 && ops_q[0] <= 32'd67) ||
+                      ops_q[0] == 32'd4427 || ops_q[0] == 32'd4429 ||
+                      ops_q[0] == 32'd4433 || ops_q[0] == 32'd4434 ||
+                      ops_q[0] == 32'd4441 || ops_q[0] == 32'd4442 ||
+                      ops_q[0] == 32'd4448 || ops_q[0] == 32'd4449 ||
+                      ops_q[0] == 32'd5301 || ops_q[0] == 32'd5304 ||
+                      ops_q[0] == 32'd5305 || ops_q[0] == 32'd5345 ||
+                      ops_q[0] == 32'd5346 || ops_q[0] == 32'd5347 ||
+                      ops_q[0] == 32'd5379 || ops_q[0] == 32'd5629 ||
+                      ops_q[0] == 32'd6026)) begin
                   fl_code_q <= APU_SH_FAULT_CAP; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
                 end else begin
@@ -1425,7 +1501,8 @@ module g6lc_apu_shmod
                 end
               end
               14: begin
-                if (ops_q[0] != 0 || ops_q[1] != 1) begin
+                if (!((ops_q[0] == 32'd0 || ops_q[0] == 32'd5348) &&
+                      (ops_q[1] == 32'd1 || ops_q[1] == 32'd3))) begin
                   fl_code_q <= APU_SH_FAULT_MEMMODEL;
                   fl_opc_q <= opc_q; fl_word_q <= at_q;
                   fail_q <= 1'b1; st_q <= S_DONE;
@@ -1467,9 +1544,9 @@ module g6lc_apu_shmod
                   fail_q <= 1'b1; st_q <= S_DONE;
                 end else if (ops_q[2] == 32'h0 || ops_q[3] == 32'h0 ||
                              ops_q[4] == 32'h0 ||
-                             ops_q[2] > 32'd128 || ops_q[3] > 32'd128 ||
+                             ops_q[2] > 32'd256 || ops_q[3] > 32'd256 ||
                              ops_q[4] > 32'd64 ||
-                             ops_q[2] * ops_q[3] * ops_q[4] > 32'd128) begin
+                             ops_q[2] * ops_q[3] * ops_q[4] > 32'd256) begin
                   fl_code_q <= APU_SH_FAULT_LOCALSIZE;
                   fl_opc_q <= opc_q; fl_word_q <= at_q;
                   fail_q <= 1'b1; st_q <= S_DONE;
@@ -1886,9 +1963,9 @@ module g6lc_apu_shmod
                     // governs decode) so any defined SPIR-V value
                     // (<=41) is accepted
                     if (ops_q[1] >= 32'(ShaderIds) ||
-                        !(ops_q[2] == 32'd1 ||
-                          (ops_q[2] == 32'd5 && ops_q[3] == 32'd0 &&
-                           ops_q[4] == 32'd0)) ||
+                        !(ops_q[2] <= 32'd3 ||
+                          ((ops_q[2] == 32'd5 || ops_q[2] == 32'd6) &&
+                           ops_q[3] == 32'd0 && ops_q[4] == 32'd0)) ||
                         ops_q[3] > 32'd1 ||
                         ops_q[4] > 32'd1 || ops_q[5] != 32'd0 ||
                         (ops_q[6] != 32'd1 && ops_q[6] != 32'd2) ||
@@ -1946,7 +2023,8 @@ module g6lc_apu_shmod
               end
               19,20,21,22: begin
                 if (ph_q == 0) begin
-                  if ((opc_q == 21 || opc_q == 22) && ops_q[1] != 32) begin
+                  if ((opc_q == 21 && !(ops_q[1] == 32'd8 || ops_q[1] == 32'd16 || ops_q[1] == 32'd32)) ||
+                      (opc_q == 22 && ops_q[1] != 32'd32)) begin
                     fl_code_q <= APU_SH_FAULT_TYPE; fl_opc_q <= opc_q;
                     fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
                   end else ph_q <= 1;
@@ -2246,11 +2324,11 @@ module g6lc_apu_shmod
                     if (crow_q[31:0] == 32'h0 ||
                         crow_q[63:32] == 32'h0 ||
                         crow_q[95:64] == 32'h0 ||
-                        crow_q[31:0] > 32'd128 ||
-                        crow_q[63:32] > 32'd128 ||
+                        crow_q[31:0] > 32'd256 ||
+                        crow_q[63:32] > 32'd256 ||
                         crow_q[95:64] > 32'd64 ||
                         crow_q[31:0] * crow_q[63:32] *
-                        crow_q[95:64] > 32'd128) begin
+                        crow_q[95:64] > 32'd256) begin
                       fl_code_q <= APU_SH_FAULT_LOCALSIZE;
                       fl_opc_q <= opc_q; fl_word_q <= at_q;
                       fail_q <= 1'b1; st_q <= S_DONE;
@@ -2653,7 +2731,15 @@ module g6lc_apu_shmod_fixture
   input  logic [2:0]   retire_slot_i,
   input  logic [2:0]   rd_slot_i,
   input  logic [15:0]  prog_addr_i,
+  // TP3a-3f: dedicated lookahead word address for port 1.  During la_ok it
+  // is prog_addr_i+1 (the execute pair's word B); during the W_LD0/W_LD1
+  // operand-load window it is the front-end lookahead address so port 1
+  // streams N+1 at 1 word/cycle while port 0 streams N's operands.
+  input  logic [15:0]  prog_addr2_i,
   output logic [31:0]  prog_data_o,
+  // TP3a-3e: second program word at prog_addr2_i, read-only.  Feeds the
+  // shwave lookahead's operand-word capture (la_full_w).
+  output logic [31:0]  prog_data2_o,
   input  logic [9:0]   type_id_i,
   output logic [95:0]  type_data_o,
   input  logic [9:0]   const_id_i,

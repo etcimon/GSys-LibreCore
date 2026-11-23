@@ -71,15 +71,15 @@ class DynamicTests(unittest.TestCase):
     def test_nonfinite_dimensions_depth_and_bounds_fail(self):
         for values in ((float('nan'), 0, 8, 4, 0, 1),
                        (0, 0, float('inf'), 4, 0, 1), (0, 0, 0, 4, 0, 1),
-                       (0, 0, 8, -4, 0, 1), (0, 0, 4097, 4, 0, 1),
-                       (8190, 0, 8, 4, 0, 1), (0, 0, 8, 4, -1, 1),
+                       (0, 0, 8, -4, 0, 1), (0, 0, 8193, 4, 0, 1),
+                       (16382, 0, 8, 4, 0, 1), (0, 0, 8, 4, -1, 1),
                        (0, 0, 8, 4, 0, 2)):
             with self.subTest(values=values):
                 self.refuses('viewport', values)
 
     def test_scissor_negative_and_overflowing_ranges_fail(self):
-        for values in ((-1, 0, 8, 4), (0, -1, 8, 4), (0, 0, 4097, 4),
-                       (4090, 0, 8, 4), (0, 4090, 8, 8)):
+        for values in ((-1, 0, 8, 4), (0, -1, 8, 4), (0, 0, 8193, 4),
+                       (8190, 0, 8, 4), (0, 8190, 8, 8)):
             with self.subTest(values=values):
                 self.refuses('scissor', values)
 

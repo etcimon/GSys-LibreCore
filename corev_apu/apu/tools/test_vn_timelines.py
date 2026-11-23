@@ -136,14 +136,13 @@ class TimelineTests(unittest.TestCase):
         for name, info in base.cmd_info.items():
             for field in ('type_id', 'reply_id', 'obj_kind', 'q_info', 'act', 'slots'):
                 self.assertEqual(info[field], extended.cmd_info[name][field], (name, field))
-        self.assertNotIn('VkSemaphoreTypeCreateInfo', base.profile['chain_structs'])
         self.assertIn('VkSemaphoreTypeCreateInfo', extended.profile['chain_structs'])
-        self.assertNotIn('vkWaitSemaphores', base.cmd_info)
+        self.assertIn('vkWaitSemaphores', base.cmd_info)
         self.assertIn('vkWaitSemaphores', extended.cmd_info)
 
-    def test_default_decoder_refuses_timeline_command(self):
+    def test_default_decoder_admits_timeline_command_with_unregistered_handles_rejected(self):
         base = LinearExecution(self.state, self.blobs)
-        with self.assertRaises(StreamFault):
+        with self.assertRaises((StreamFault, KeyError)):
             base.execute(2, self.w.command('vkSignalSemaphore', device=self.w.DEVICE,
                 pSignalInfo=self.w.structure('VkSemaphoreSignalInfo', pNext=[],
                                              semaphore=self.SEM, value=1)))

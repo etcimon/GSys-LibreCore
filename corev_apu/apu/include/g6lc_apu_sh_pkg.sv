@@ -92,6 +92,21 @@ package g6lc_apu_sh_pkg;
   localparam logic [6:0] APU_SH_BI_VERTEXINDEX   = 7'd42;  // VS Input builtin = VS-in record slot 8 word 0
   localparam logic [6:0] APU_SH_BI_INSTANCEINDEX = 7'd43;  // VS Input builtin = VS-in record slot 8 word 1
   localparam logic [6:0] APU_SH_BI_FRAGDEPTH     = 7'd22;  // FS Output builtin -> FS-out record slot 8 word 0
+  // Vulkan 1.1-1.4 subgroup, draw-parameter, and multiview builtins
+  // (high SPIR-V ids 4416..4440 map to compact 7-bit codes 64..72)
+  localparam logic [6:0] APU_SH_BI_SUBGROUPSIZE  = 7'd36;
+  localparam logic [6:0] APU_SH_BI_NUMSUBGROUPS  = 7'd38;
+  localparam logic [6:0] APU_SH_BI_SUBGROUPID    = 7'd40;
+  localparam logic [6:0] APU_SH_BI_SUBGROUPLID   = 7'd41;
+  localparam logic [6:0] APU_SH_BI_SGEQMASK      = 7'd64;  // SPIR-V 4416
+  localparam logic [6:0] APU_SH_BI_SGGEMASK      = 7'd65;  // SPIR-V 4417
+  localparam logic [6:0] APU_SH_BI_SGGTMASK      = 7'd66;  // SPIR-V 4418
+  localparam logic [6:0] APU_SH_BI_SGLEMASK      = 7'd67;  // SPIR-V 4419
+  localparam logic [6:0] APU_SH_BI_SGLTMASK      = 7'd68;  // SPIR-V 4420
+  localparam logic [6:0] APU_SH_BI_BASEVERTEX    = 7'd69;  // SPIR-V 4424
+  localparam logic [6:0] APU_SH_BI_BASEINSTANCE  = 7'd70;  // SPIR-V 4425
+  localparam logic [6:0] APU_SH_BI_DRAWINDEX     = 7'd71;  // SPIR-V 4426
+  localparam logic [6:0] APU_SH_BI_VIEWINDEX     = 7'd72;  // SPIR-V 4440
   // G3a-i FS-out record slot 8 (record byte offset 16*FSOUT_BI=128):
   //   word0 = FragDepth (f32; shader-stored via the builtin path)
   //   word1 = flags: bit0 discarded (OpKill/Terminate/demote)
@@ -209,7 +224,7 @@ package g6lc_apu_sh_pkg;
   //                  aperture, not with flops
   localparam int unsigned APU_DESC_BYTES = 32;
   localparam int unsigned APU_DESC_WORDS = 8;     // 32-byte records
-  localparam int unsigned APU_DESC_SETS  = 4;     // maxBoundDescriptorSets
+  localparam int unsigned APU_DESC_SETS  = 8;     // maxBoundDescriptorSets (Vulkan 1.4 >= 7)
   localparam int unsigned APU_DESC_BND   = 16;    // binding rows per set
   localparam int unsigned APU_DESC_DYN   = 16;    // dynamic elems per set
   localparam int unsigned APU_DESC_CACHE = 8;     // LSU record cache entries

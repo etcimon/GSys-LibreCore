@@ -159,7 +159,7 @@ module g6lc_apu_cmdexec
     assign xf_o            = '0;
     assign rd_o            = '0;
     assign disp_slot_o     = '0;
-    assign desc_o          = '0;
+    assign desc_o          = '{default: '0};
     assign push_n_o        = '0;
     assign push_o          = '0;
     assign done_seq_o      = '0;
@@ -463,7 +463,7 @@ module g6lc_apu_cmdexec
     state_e              pbr_ret_q;
     logic [31:0]         gp_mh_q [2];   // draw stage module handles
     logic [31:0]         gp_mc_q [2];   // draw stage {chunk,words}
-    logic [1:0]          ds_set_q;      // set index 0..3
+    logic [2:0]          ds_set_q;      // set index 0..7 (Vulkan 1.4)
     logic [15:0]         ds_pl_q;       // pipeline-layout slot
     logic [15:0]         ds_plg_q;      // pipeline-layout generation
     logic [31:0]         ds_plpay_q;    // pipeline-layout pay base
@@ -525,8 +525,31 @@ module g6lc_apu_cmdexec
     logic [31:0]         xf_xoff_q;       // operand extra offset
     logic [4:0]          dr_bq;           // vb binding resolve cursor
     logic [15:0]         dr_vbmask_q;     // valid binding bits (pipe w1..16)
-    logic [5:0]          dr_pi_q;         // pipeline ObjPay read cursor
+    logic [6:0]          dr_pi_q;         // pipeline ObjPay read cursor (0..69)
     logic                dr_bcdyn_q;      // w25: BLEND_CONSTANTS dynamic
+    logic [23:0]         dr_dynmask_q;    // w61: Vulkan 1.0/1.3/1.4 dynamic mask
+    // Vulkan 1.0/1.3/1.4 command-buffer dynamic state shadows
+    logic [1:0]          dyn_cull_q;
+    logic                dyn_ff_q;
+    logic [7:0]          dyn_top_q;
+    logic                dyn_dte_q, dyn_dwr_q, dyn_dbn_q, dyn_sten_q;
+    logic [2:0]          dyn_dcmp_q;
+    logic                dyn_rsd_q, dyn_dbe_q, dyn_re_q;
+    logic [31:0]         dyn_dbc_q, dyn_dbk_q, dyn_dbs_q;
+    logic [31:0]         dyn_dbmin_q, dyn_dbmax_q;
+    logic [7:0]          dyn_sfm_q, dyn_sfw_q, dyn_sfr_q;
+    logic [7:0]          dyn_sbm_q, dyn_sbw_q, dyn_sbr_q;
+    logic [2:0]          dyn_sff_q, dyn_sfp_q, dyn_sfd_q, dyn_sfc_q;
+    logic [2:0]          dyn_sbf_q, dyn_sbp_q, dyn_sbd_q, dyn_sbc_q;
+    logic [7:0]          dyn_stip_fac_q;
+    logic [15:0]         dyn_stip_pat_q;
+    logic [15:0][15:0]   dyn_vb_stride_q;
+    logic [15:0]         dyn_vb_stride_v_q;
+    logic [31:0]         view_mask_q;     // multiview active viewMask
+    logic [15:0]         view_cur_q;      // current view index
+    logic [15:0]         draw_idx_q;      // current draw index
+    logic                dyn_rend_q;      // active dynamic rendering pass
+    logic [7:0][3:0]     loc_map_q;       // 1.4 local-read attachment location map
     // w25[17:16] static-state flags + w34..43 baked viewport/scissor:
     // when set they override the streamed SetViewport/SetScissor
     // shadows at the end of the ObjPay walk
@@ -567,17 +590,31 @@ module g6lc_apu_cmdexec
     wire work_is_xfer = rec_q.ctype ==
                         32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) ||
                         rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_2_EXT) ||
+                        rec_q.ctype ==
                         32'(APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT) ||
                         rec_q.ctype ==
                         32'(APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT) ||
                         rec_q.ctype ==
                         32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT) ||
                         rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_2_EXT) ||
+                        rec_q.ctype ==
                         32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT) ||
+                        rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_2_EXT) ||
                         rec_q.ctype ==
                         32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT) ||
                         rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_2_EXT) ||
+                        rec_q.ctype ==
                         32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT) ||
+                        rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_2_EXT) ||
+                        rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_EXT) ||
+                        rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_2_EXT) ||
                         rec_q.ctype ==
                         32'(APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT) ||
                         rec_q.ctype ==
@@ -586,15 +623,12 @@ module g6lc_apu_cmdexec
     // sequentially: {srcBuffer,dstImage}, {srcImage,dstBuffer},
     // {srcImage,dstImage}, {image} — operand n rides handle[n].
     wire [1:0] xf_hsel = xf_opnd_q;
-    // operand n is an image for every image-class type except the
-    // B2I buffer (op 0) and the I2B buffer (op 1); the BeginRP
-    // attachment resolve (xf_for_q == IMG) is always an image
-    // T1: vkCmdBlitImage resolves its two image operands like
-    // vkCmdCopyImage (src -> img0, dst -> img1) and issues APU_XFER_OP_BLIT
     wire xf_i2i_rec = rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT) ||
-                      rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT);
-    // vkCmdClearDepthStencilImage: single image operand (handle[0]),
-    // like the colour clear; the depth/stencil/rangeCount ride rec.imm
+                      rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_2_EXT) ||
+                      rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT) ||
+                      rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_2_EXT) ||
+                      rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_EXT) ||
+                      rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_2_EXT);
     wire xf_dsclr_rec =
         rec_q.ctype ==
         32'(APU_VN_TYPE_VK_CMD_CLEAR_DEPTH_STENCIL_IMAGE_EXT);
@@ -604,39 +638,73 @@ module g6lc_apu_cmdexec
          ((rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT)) ||
           xf_dsclr_rec ||
           xf_i2i_rec ||
-          (rec_q.ctype ==
-              32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT)
+          ((rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT) ||
+            rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_2_EXT))
            && xf_opnd_q == 2'd1) ||
-          (rec_q.ctype ==
-              32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT)
+          ((rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT) ||
+            rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_2_EXT))
            && xf_opnd_q == 2'd0)));
     // image-desc slot: I2I's second operand lands in img1
     wire xf_img_sel = xf_i2i_rec && xf_opnd_q == 2'd1;
     // two-operand records revisit the walk once (record mode only)
-    wire xf_two_ops = xf_for_q == 2'd0 && rec_q.ctype ==
-                      32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) ||
-                      rec_q.ctype ==
-                      32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT) ||
-                      rec_q.ctype ==
-                      32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT) ||
-                      xf_i2i_rec;
+    wire xf_two_ops = xf_for_q == 2'd0 && (
+                      rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) ||
+                      rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_2_EXT) ||
+                      rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT) ||
+                      rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_2_EXT) ||
+                      rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT) ||
+                      rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_2_EXT) ||
+                      xf_i2i_rec);
 
     // ---- record classification --------------------------------------
     function automatic apu_cmdexec_cls_e rec_cls(logic [31:0] t);
       case (t)
         APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT,
         APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT,
+        APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_2_EXT,
+        APU_VN_TYPE_VK_CMD_PUSH_DESCRIPTOR_SET_EXT,
+        APU_VN_TYPE_VK_CMD_PUSH_DESCRIPTOR_SET_2_EXT,
         APU_VN_TYPE_VK_CMD_BIND_VERTEX_BUFFERS_EXT,
+        APU_VN_TYPE_VK_CMD_BIND_VERTEX_BUFFERS_2_EXT,
         APU_VN_TYPE_VK_CMD_BIND_INDEX_BUFFER_EXT,
+        APU_VN_TYPE_VK_CMD_BIND_INDEX_BUFFER_2_EXT,
         APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT,
+        APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_2_EXT,
         APU_VN_TYPE_VK_CMD_SET_VIEWPORT_EXT,
+        APU_VN_TYPE_VK_CMD_SET_VIEWPORT_WITH_COUNT_EXT,
         APU_VN_TYPE_VK_CMD_SET_SCISSOR_EXT,
+        APU_VN_TYPE_VK_CMD_SET_SCISSOR_WITH_COUNT_EXT,
         APU_VN_TYPE_VK_CMD_SET_BLEND_CONSTANTS_EXT,
+        APU_VN_TYPE_VK_CMD_SET_LINE_WIDTH_EXT,
+        APU_VN_TYPE_VK_CMD_SET_DEPTH_BIAS_EXT,
+        APU_VN_TYPE_VK_CMD_SET_DEPTH_BOUNDS_EXT,
+        APU_VN_TYPE_VK_CMD_SET_STENCIL_COMPARE_MASK_EXT,
+        APU_VN_TYPE_VK_CMD_SET_STENCIL_WRITE_MASK_EXT,
+        APU_VN_TYPE_VK_CMD_SET_STENCIL_REFERENCE_EXT,
+        APU_VN_TYPE_VK_CMD_SET_CULL_MODE_EXT,
+        APU_VN_TYPE_VK_CMD_SET_FRONT_FACE_EXT,
+        APU_VN_TYPE_VK_CMD_SET_PRIMITIVE_TOPOLOGY_EXT,
+        APU_VN_TYPE_VK_CMD_SET_DEPTH_TEST_ENABLE_EXT,
+        APU_VN_TYPE_VK_CMD_SET_DEPTH_WRITE_ENABLE_EXT,
+        APU_VN_TYPE_VK_CMD_SET_DEPTH_COMPARE_OP_EXT,
+        APU_VN_TYPE_VK_CMD_SET_DEPTH_BOUNDS_TEST_ENABLE_EXT,
+        APU_VN_TYPE_VK_CMD_SET_STENCIL_TEST_ENABLE_EXT,
+        APU_VN_TYPE_VK_CMD_SET_STENCIL_OP_EXT,
+        APU_VN_TYPE_VK_CMD_SET_RASTERIZER_DISCARD_ENABLE_EXT,
+        APU_VN_TYPE_VK_CMD_SET_DEPTH_BIAS_ENABLE_EXT,
+        APU_VN_TYPE_VK_CMD_SET_PRIMITIVE_RESTART_ENABLE_EXT,
+        APU_VN_TYPE_VK_CMD_SET_LINE_STIPPLE_EXT,
+        APU_VN_TYPE_VK_CMD_SET_DEVICE_MASK_EXT,
         APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT,
         APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_2_EXT,
         APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_EXT,
+        APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_2_EXT,
         APU_VN_TYPE_VK_CMD_END_RENDER_PASS_EXT,
         APU_VN_TYPE_VK_CMD_END_RENDER_PASS_2_EXT,
+        APU_VN_TYPE_VK_CMD_BEGIN_RENDERING_EXT,
+        APU_VN_TYPE_VK_CMD_END_RENDERING_EXT,
+        APU_VN_TYPE_VK_CMD_SET_RENDERING_ATTACHMENT_LOCATIONS_EXT,
+        APU_VN_TYPE_VK_CMD_SET_RENDERING_INPUT_ATTACHMENT_INDICES_EXT,
         APU_VN_TYPE_VK_CMD_RESET_QUERY_POOL_EXT,
         APU_VN_TYPE_VK_CMD_BEGIN_QUERY_EXT,
         APU_VN_TYPE_VK_CMD_END_QUERY_EXT,
@@ -647,30 +715,41 @@ module g6lc_apu_cmdexec
         APU_VN_TYPE_VK_CMD_COPY_QUERY_POOL_RESULTS_EXT:
           return APU_CMDEXEC_CLS_STATE;
         APU_VN_TYPE_VK_CMD_PIPELINE_BARRIER_EXT,
-        // §5a G3b-iii: event records ride the drain — the action
-        // (set/reset/wait) runs after outstanding work retires
+        APU_VN_TYPE_VK_CMD_PIPELINE_BARRIER_2_EXT,
+        // §5a G3b-iii + sync2: event records ride the drain
         APU_VN_TYPE_VK_CMD_SET_EVENT_EXT,
+        APU_VN_TYPE_VK_CMD_SET_EVENT_2_EXT,
         APU_VN_TYPE_VK_CMD_RESET_EVENT_EXT,
-        APU_VN_TYPE_VK_CMD_WAIT_EVENTS_EXT:
+        APU_VN_TYPE_VK_CMD_RESET_EVENT_2_EXT,
+        APU_VN_TYPE_VK_CMD_WAIT_EVENTS_EXT,
+        APU_VN_TYPE_VK_CMD_WAIT_EVENTS_2_EXT:
           return APU_CMDEXEC_CLS_BARRIER;
         APU_VN_TYPE_VK_CMD_DRAW_EXT,
         APU_VN_TYPE_VK_CMD_DRAW_INDEXED_EXT,
         APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_EXT,
         APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT,
+        APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_COUNT_EXT,
+        APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_COUNT_EXT,
         APU_VN_TYPE_VK_CMD_DISPATCH_EXT,
         APU_VN_TYPE_VK_CMD_DISPATCH_INDIRECT_EXT,
         APU_VN_TYPE_VK_CMD_DISPATCH_BASE_EXT,
         APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT,
+        APU_VN_TYPE_VK_CMD_COPY_BUFFER_2_EXT,
         APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT,
+        APU_VN_TYPE_VK_CMD_COPY_IMAGE_2_EXT,
         APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT,
+        APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_2_EXT,
         APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT,
+        APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_2_EXT,
         APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT,
+        APU_VN_TYPE_VK_CMD_BLIT_IMAGE_2_EXT,
         APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT,
         APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT,
         APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT,
         APU_VN_TYPE_VK_CMD_CLEAR_DEPTH_STENCIL_IMAGE_EXT,
         APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT,
         APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_EXT,
+        APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_2_EXT,
         APU_VN_TYPE_VK_CMD_EXECUTE_COMMANDS_EXT:
           return APU_CMDEXEC_CLS_WORK;
         default: return APU_CMDEXEC_CLS_NOP;
@@ -698,42 +777,36 @@ module g6lc_apu_cmdexec
     // §12.3 C/5a: assembled Xfer descriptor — valid with work_o for
     // XFER-class records (the engine replays the U64 operands out of
     // the record's payload arena at pay_base = imm[7])
-    assign xf_o = '{op: rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT)
+    assign xf_o = '{op: (rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) ||
+                         rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_2_EXT))
                         ? APU_XFER_OP_COPY :
                     rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT)
                         ? APU_XFER_OP_FILL :
                     rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT)
                         ? APU_XFER_OP_UPDATE :
-                    rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT)
+                    (rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT) ||
+                     rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_2_EXT))
                         ? APU_XFER_OP_B2I :
-                    rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT)
+                    (rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT) ||
+                     rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_2_EXT))
                         ? APU_XFER_OP_I2B :
-                    rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT)
+                    (rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT) ||
+                     rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_2_EXT) ||
+                     rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_EXT) ||
+                     rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_2_EXT))
                         ? APU_XFER_OP_I2I :
-                    rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT)
+                    (rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT) ||
+                     rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_2_EXT))
                         ? APU_XFER_OP_BLIT : APU_XFER_OP_CLEARI,
-                   // §5a G3b-iii: payloads are PayMem-resident — the
-                   // absolute word address stamped into imm[7] at
-                   // record time; the engine streams it over its own
-                   // ObjPay client (PAYREAD is retired)
                    pay_base: rec_q.imm[7],
-                   // region/range count rides imm[2] (CopyImage),
-                   // imm[1] (B2I/I2B/CLEAR behind imageLayout) or
-                   // imm[0] (CopyBuffer)
-                   // CopyImage and BlitImage: regionCount in imm[2],
-                   // behind both image layouts
                    regions:  xf_dsclr_rec
                              ? rec_q.imm[3][15:0]
                              : xf_i2i_rec
                                ? rec_q.imm[2][15:0]
-                               : rec_q.ctype ==
-                                 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) ||
-                                 rec_q.ctype ==
-                                 32'(APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT) ||
-                                 rec_q.ctype ==
-                                 32'(APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT)
+                               : (rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) ||
+                                  rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_2_EXT) ||
+                                  rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT) ||
+                                  rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT))
                                  ? rec_q.imm[0][15:0] : rec_q.imm[1][15:0],
                    // depth-stencil clear carries its value in rec.imm:
                    // depth=imm[1], stencil=imm[2], and dst_size[0]=1
@@ -755,10 +828,11 @@ module g6lc_apu_cmdexec
     wire rec_is_draw =
         rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT) ||
         rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_EXT) ||
-        // §5a G3b-iii: resolved indirect draws assemble identically —
-        // the operand words were fetched into ind_w_q first
+        // §5a G3b-iii + Vulkan 1.2 drawIndirectCount
         rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_EXT) ||
-        rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT);
+        rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT) ||
+        rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_COUNT_EXT) ||
+        rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_COUNT_EXT);
     // fetched indirect-command word w (the operand can start on the
     // second half of an aligned aperture beat).  The word arriving on
     // this cycle's response beat must read through — the ind_w_q
@@ -1164,21 +1238,25 @@ module g6lc_apu_cmdexec
         // for attachments 4..7 at w57..60 (w26..29 carry 0..3).
         StDrPay: begin
           op_req_valid_o = 1'b1;
-          if      (dr_pi_q == 6'd0)
+          if      (dr_pi_q == 7'd0)
             op_req_o = '{op: APU_OBJPAY_OP_READN,
                          addr: rd_gpay_q + 32'd0,  words: 32'd16,
                          default: '0};
-          else if (dr_pi_q == 6'd16)
+          else if (dr_pi_q == 7'd16)
             op_req_o = '{op: APU_OBJPAY_OP_READN,
                          addr: rd_gpay_q + 32'd16, words: 32'd16,
                          default: '0};
-          else if (dr_pi_q == 6'd32)
+          else if (dr_pi_q == 7'd32)
             op_req_o = '{op: APU_OBJPAY_OP_READN,
                          addr: rd_gpay_q + 32'd32, words: 32'd12,
                          default: '0};
-          else
+          else if (dr_pi_q == 7'd48)
             op_req_o = '{op: APU_OBJPAY_OP_READN,
                          addr: rd_gpay_q + 32'd48, words: 32'd13,
+                         default: '0};
+          else
+            op_req_o = '{op: APU_OBJPAY_OP_READN,
+                         addr: rd_gpay_q + 32'd61, words: 32'd9,
                          default: '0};
         end
         // the internal render-pass CLEAR rides the work port with the
@@ -1418,7 +1496,22 @@ module g6lc_apu_cmdexec
         rd_q        <= '0;
         xf_for_q    <= '0; xf_xoff_q <= '0;
         dr_bq       <= '0; dr_vbmask_q <= '0; dr_pi_q <= '0;
-        dr_bcdyn_q  <= 1'b0;
+        dr_bcdyn_q  <= 1'b0; dr_dynmask_q <= '0;
+        dyn_cull_q  <= '0; dyn_ff_q <= 1'b0; dyn_top_q <= 8'd3;
+        dyn_dte_q   <= 1'b0; dyn_dwr_q <= 1'b0; dyn_dbn_q <= 1'b0;
+        dyn_sten_q  <= 1'b0; dyn_dcmp_q <= '0;
+        dyn_rsd_q   <= 1'b0; dyn_dbe_q <= 1'b0; dyn_re_q <= 1'b0;
+        dyn_dbc_q   <= '0; dyn_dbk_q <= '0; dyn_dbs_q <= '0;
+        dyn_dbmin_q <= '0; dyn_dbmax_q <= 32'h3F80_0000;
+        dyn_sfm_q   <= 8'hFF; dyn_sfw_q <= 8'hFF; dyn_sfr_q <= 8'h0;
+        dyn_sbm_q   <= 8'hFF; dyn_sbw_q <= 8'hFF; dyn_sbr_q <= 8'h0;
+        dyn_sff_q   <= '0; dyn_sfp_q <= '0; dyn_sfd_q <= '0; dyn_sfc_q <= '0;
+        dyn_sbf_q   <= '0; dyn_sbp_q <= '0; dyn_sbd_q <= '0; dyn_sbc_q <= '0;
+        dyn_stip_fac_q <= 8'd1; dyn_stip_pat_q <= 16'hFFFF;
+        dyn_vb_stride_q <= '0; dyn_vb_stride_v_q <= '0;
+        view_mask_q <= '0; view_cur_q <= '0; draw_idx_q <= '0;
+        dyn_rend_q  <= 1'b0;
+        for (int i = 0; i < 8; i++) loc_map_q[i] <= 4'(i);
         dr_vpsta_q  <= 1'b0; dr_scsta_q <= 1'b0;
         dr_vp_q     <= '0; dr_sc_q <= '0;
         rd_gpay_q   <= '0;
@@ -1635,6 +1728,22 @@ module g6lc_apu_cmdexec
                 da_q        <= '0; da_valid_q <= 1'b0;
                 bconst_q    <= '0;
                 push_sh_q   <= '0; push_max_q <= '0;
+                dr_dynmask_q <= '0;
+                dyn_cull_q  <= '0; dyn_ff_q <= 1'b0; dyn_top_q <= 8'd3;
+                dyn_dte_q   <= 1'b0; dyn_dwr_q <= 1'b0; dyn_dbn_q <= 1'b0;
+                dyn_sten_q  <= 1'b0; dyn_dcmp_q <= '0;
+                dyn_rsd_q   <= 1'b0; dyn_dbe_q <= 1'b0; dyn_re_q <= 1'b0;
+                dyn_dbc_q   <= '0; dyn_dbk_q <= '0; dyn_dbs_q <= '0;
+                dyn_dbmin_q <= '0; dyn_dbmax_q <= 32'h3F80_0000;
+                dyn_sfm_q   <= 8'hFF; dyn_sfw_q <= 8'hFF; dyn_sfr_q <= 8'h0;
+                dyn_sbm_q   <= 8'hFF; dyn_sbw_q <= 8'hFF; dyn_sbr_q <= 8'h0;
+                dyn_sff_q   <= '0; dyn_sfp_q <= '0; dyn_sfd_q <= '0; dyn_sfc_q <= '0;
+                dyn_sbf_q   <= '0; dyn_sbp_q <= '0; dyn_sbd_q <= '0; dyn_sbc_q <= '0;
+                dyn_stip_fac_q <= 8'd1; dyn_stip_pat_q <= 16'hFFFF;
+                dyn_vb_stride_q <= '0; dyn_vb_stride_v_q <= '0;
+                view_mask_q <= '0; view_cur_q <= '0; draw_idx_q <= '0;
+                dyn_rend_q  <= 1'b0;
+                for (int i = 0; i < 8; i++) loc_map_q[i] <= 4'(i);
               end
               rec_n_q <= cr_cpl_i.count[15:0];
               rec_i_q <= '0;
@@ -1767,7 +1876,7 @@ module g6lc_apu_cmdexec
                 // words — consumed per set in call order
                 if (pay_i_q < {pay_nset_q, 1'b0}) begin
                   if (pay_i_q[0] == 1'b0) begin
-                    snap_q.dset[2'(rec_q.imm[1] +
+                    snap_q.dset[3'(rec_q.imm[1] +
                                     {25'h0, pay_i_q[6:1]})] <=
                         op_cpl_i.rdata;
                   end else begin
@@ -1775,34 +1884,31 @@ module g6lc_apu_cmdexec
                         op_cpl_i.rdata[4:0];
                   end
                 end else begin
-                  // dynamic-offset word: ordinal w maps to the w-th
-                  // dynamic element across the call's sets in order —
-                  // sets with ndyn=0 consume no words
                   begin
                     logic [6:0] w;
                     logic [4:0] c1, c2, c3;
-                    logic [1:0] bs;
+                    logic [2:0] bs;
                     logic [4:0] bk;
                     w  = pay_i_q - {1'b0, pay_nset_q, 1'b0};
                     c1 = pay_dnb_q[0];
                     c2 = c1 + pay_dnb_q[1];
                     c3 = c2 + pay_dnb_q[2];
                     if (w < {2'h0, c1}) begin
-                      bs = 2'd0; bk = 5'(w);
+                      bs = 3'd0; bk = 5'(w);
                     end else if (w < {2'h0, c2}) begin
-                      bs = 2'd1; bk = 5'(w - {2'h0, c1});
+                      bs = 3'd1; bk = 5'(w - {2'h0, c1});
                     end else if (w < {2'h0, c3}) begin
-                      bs = 2'd2; bk = 5'(w - {2'h0, c2});
+                      bs = 3'd2; bk = 5'(w - {2'h0, c2});
                     end else begin
-                      bs = 2'd3; bk = 5'(w - {2'h0, c3});
+                      bs = 3'd3; bk = 5'(w - {2'h0, c3});
                     end
-                    if ({1'b0, bs} < {1'b0, pay_nset_q} && bk < 5'd16)
-                      snap_q.dyn[2'(rec_q.imm[1] + {30'h0, bs})]
+                    if ({2'b0, bs} < pay_nset_q && bk < 5'd16)
+                      snap_q.dyn[3'(rec_q.imm[1] + {29'h0, bs})]
                               [bk[3:0]] <= op_cpl_i.rdata;
                   end
                 end
               end else begin
-                snap_q.dset[2'(rec_q.imm[1] + {24'h0, pay_i_q})] <=
+                snap_q.dset[3'(rec_q.imm[1] + {24'h0, pay_i_q})] <=
                     op_cpl_i.rdata;
               end
               pay_i_q <= pay_i_q + 7'd1;
@@ -1832,7 +1938,8 @@ module g6lc_apu_cmdexec
 `endif
 // pragma translate_on
                   end
-                  APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT: begin
+                  APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT,
+                  APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_2_EXT: begin
                     // §7b/F5: arena stream = {hnd×nset, ndyn×nset,
                     // dyn words}.  firstSet..firstSet+count-1 land in
                     // snap.dset; each set's dynamic offsets refill
@@ -1843,23 +1950,24 @@ module g6lc_apu_cmdexec
                     pay_bind_q <= 1'b1;
                     pay_dnb_q  <= '0;
                     pay_nset_q <=
-                      5'(rec_q.imm[1] < 32'd4
-                         ? (rec_q.imm[2] < 32'd4 - rec_q.imm[1]
-                            ? rec_q.imm[2] : 32'd4 - rec_q.imm[1])
+                      5'(rec_q.imm[1] < 32'd8
+                         ? (rec_q.imm[2] < 32'd8 - rec_q.imm[1]
+                            ? rec_q.imm[2] : 32'd8 - rec_q.imm[1])
                          : 32'd0);
                     pay_n_q    <=
-                      7'(2 * (rec_q.imm[1] < 32'd4
-                              ? (rec_q.imm[2] < 32'd4 - rec_q.imm[1]
-                                 ? rec_q.imm[2] : 32'd4 - rec_q.imm[1])
+                      7'(2 * (rec_q.imm[1] < 32'd8
+                              ? (rec_q.imm[2] < 32'd8 - rec_q.imm[1]
+                                 ? rec_q.imm[2] : 32'd8 - rec_q.imm[1])
                               : 32'd0) +
                           (rec_q.imm[3] > 32'd64 ? 32'd64
                                                  : rec_q.imm[3]));
-                    for (int i = 0; i < 4; i++)
-                      if (rec_q.imm[1] + 32'(i) < 32'd4 &&
+                    for (int i = 0; i < 8; i++)
+                      if (rec_q.imm[1] + 32'(i) < 32'd8 &&
                           32'(i) < rec_q.imm[2])
-                        snap_q.dyn[2'(rec_q.imm[1] + 32'(i))] <= '0;
+                        snap_q.dyn[3'(rec_q.imm[1] + 32'(i))] <= '0;
                   end
-                  APU_VN_TYPE_VK_CMD_BIND_VERTEX_BUFFERS_EXT: begin
+                  APU_VN_TYPE_VK_CMD_BIND_VERTEX_BUFFERS_EXT,
+                  APU_VN_TYPE_VK_CMD_BIND_VERTEX_BUFFERS_2_EXT: begin
                     snap_q.vtx <= rec_q.handle[0];
                     // G1c: arena = [bindingCount resolved handles]
                     // [bindingCount u64 offsets]; walk all of it
@@ -1869,43 +1977,40 @@ module g6lc_apu_cmdexec
                     pay_nset_q <= 5'(rec_q.imm[1]);
                     pay_n_q    <= 7'(rec_q.imm[1] * 32'd3);
                   end
-                  APU_VN_TYPE_VK_CMD_BIND_INDEX_BUFFER_EXT: begin
+                  APU_VN_TYPE_VK_CMD_BIND_INDEX_BUFFER_EXT,
+                  APU_VN_TYPE_VK_CMD_BIND_INDEX_BUFFER_2_EXT: begin
                     snap_q.ibo <= rec_q.handle[0];
                     ib_hnd_q   <= rec_q.handle[0];
-                    // the u64 offset is a kept payload word pair on the
-                    // record arena — walk it through the pay path
-                    // (ib_off takes the lo word; < 4 GiB)
                     pay_ib_q   <= 1'b1;
                     pay_ret_q  <= StNextBuf;
                     pay_i_q    <= '0;
                     pay_n_q    <= 7'd2;
-                    // VkIndexType: 0 UINT16, 1 UINT32 -> rd coding 1/2
-                    ib_type_q  <= 2'(rec_q.imm[0][1:0]) + 2'd1;
+                    // VkIndexType: 0 UINT16->1, 1 UINT32->2,
+                    // 1000265000 UINT8 (Vulkan 1.4)->3
+                    ib_type_q  <= (rec_q.imm[0] == 32'd1000265000)
+                                  ? 2'd3 : (2'(rec_q.imm[0][1:0]) + 2'd1);
                   end
-                  APU_VN_TYPE_VK_CMD_SET_VIEWPORT_EXT: begin
+                  APU_VN_TYPE_VK_CMD_SET_VIEWPORT_EXT,
+                  APU_VN_TYPE_VK_CMD_SET_VIEWPORT_WITH_COUNT_EXT: begin
                     snap_q.vp  <= rec_q.imm[0];
-                    // G1c: viewport words stream through the arena
-                    // (6 per viewport; maxViewports = 1)
                     pay_vp_q   <= 1'b1;
                     pay_ret_q  <= StNextBuf;
                     pay_i_q    <= '0;
                     pay_n_q    <= 7'd6;
                   end
-                  APU_VN_TYPE_VK_CMD_SET_SCISSOR_EXT: begin
+                  APU_VN_TYPE_VK_CMD_SET_SCISSOR_EXT,
+                  APU_VN_TYPE_VK_CMD_SET_SCISSOR_WITH_COUNT_EXT: begin
                     snap_q.sc  <= rec_q.imm[0];
                     pay_sc_q   <= 1'b1;
                     pay_ret_q  <= StNextBuf;
                     pay_i_q    <= '0;
                     pay_n_q    <= 7'd4;
                   end
-                  APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT: begin
+                  APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT,
+                  APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_2_EXT: begin
                     snap_q.push      <= rec_q.imm[0][15:0];
-                    // imm[7] = payload arena base (forced by cmdrec)
                     snap_q.push_base <= rec_q.imm[7][15:0];
                     snap_q.push_len  <= rec_q.imm[2][15:0];
-                    // §7b/5a-ii: merge the arena words into the push
-                    // shadow at the imm[1] byte offset (word units),
-                    // clamped to the 64-word shadow (256 B)
                     pay_i_q    <= '0;
                     pay_push_q <= 1'b1;
                     pay_bind_q <= 1'b0;
@@ -1918,12 +2023,93 @@ module g6lc_apu_cmdexec
                                     : 7'(rec_q.imm[2] >> 2);
                   end
                   APU_VN_TYPE_VK_CMD_SET_BLEND_CONSTANTS_EXT: begin
-                    // G2a: four f32 words sit at the record's arena
-                    // base (imm[7]); they land in bconst_q
                     pay_bc_q  <= 1'b1;
                     pay_i_q   <= '0;
                     pay_n_q   <= 7'd4;
                     pay_ret_q <= StNextBuf;
+                  end
+                  // Vulkan 1.0 + 1.3 + 1.4 dynamic state setters
+                  APU_VN_TYPE_VK_CMD_SET_LINE_WIDTH_EXT: ;
+                  APU_VN_TYPE_VK_CMD_SET_DEPTH_BIAS_EXT: begin
+                    dyn_dbc_q <= rec_q.imm[0];
+                    dyn_dbk_q <= rec_q.imm[1];
+                    dyn_dbs_q <= rec_q.imm[2];
+                  end
+                  APU_VN_TYPE_VK_CMD_SET_DEPTH_BOUNDS_EXT: begin
+                    dyn_dbmin_q <= rec_q.imm[0];
+                    dyn_dbmax_q <= rec_q.imm[1];
+                  end
+                  APU_VN_TYPE_VK_CMD_SET_STENCIL_COMPARE_MASK_EXT: begin
+                    if (rec_q.imm[0][0]) dyn_sfm_q <= rec_q.imm[1][7:0];
+                    if (rec_q.imm[0][1]) dyn_sbm_q <= rec_q.imm[1][7:0];
+                  end
+                  APU_VN_TYPE_VK_CMD_SET_STENCIL_WRITE_MASK_EXT: begin
+                    if (rec_q.imm[0][0]) dyn_sfw_q <= rec_q.imm[1][7:0];
+                    if (rec_q.imm[0][1]) dyn_sbw_q <= rec_q.imm[1][7:0];
+                  end
+                  APU_VN_TYPE_VK_CMD_SET_STENCIL_REFERENCE_EXT: begin
+                    if (rec_q.imm[0][0]) dyn_sfr_q <= rec_q.imm[1][7:0];
+                    if (rec_q.imm[0][1]) dyn_sbr_q <= rec_q.imm[1][7:0];
+                  end
+                  APU_VN_TYPE_VK_CMD_SET_CULL_MODE_EXT:
+                    dyn_cull_q <= rec_q.imm[0][1:0];
+                  APU_VN_TYPE_VK_CMD_SET_FRONT_FACE_EXT:
+                    dyn_ff_q   <= rec_q.imm[0][0];
+                  APU_VN_TYPE_VK_CMD_SET_PRIMITIVE_TOPOLOGY_EXT:
+                    dyn_top_q  <= rec_q.imm[0][7:0];
+                  APU_VN_TYPE_VK_CMD_SET_DEPTH_TEST_ENABLE_EXT:
+                    dyn_dte_q  <= rec_q.imm[0][0];
+                  APU_VN_TYPE_VK_CMD_SET_DEPTH_WRITE_ENABLE_EXT:
+                    dyn_dwr_q  <= rec_q.imm[0][0];
+                  APU_VN_TYPE_VK_CMD_SET_DEPTH_COMPARE_OP_EXT:
+                    dyn_dcmp_q <= rec_q.imm[0][2:0];
+                  APU_VN_TYPE_VK_CMD_SET_DEPTH_BOUNDS_TEST_ENABLE_EXT:
+                    dyn_dbn_q  <= rec_q.imm[0][0];
+                  APU_VN_TYPE_VK_CMD_SET_STENCIL_TEST_ENABLE_EXT:
+                    dyn_sten_q <= rec_q.imm[0][0];
+                  APU_VN_TYPE_VK_CMD_SET_STENCIL_OP_EXT: begin
+                    if (rec_q.imm[0][0]) begin
+                      dyn_sff_q <= rec_q.imm[1][2:0];
+                      dyn_sfp_q <= rec_q.imm[2][2:0];
+                      dyn_sfd_q <= rec_q.imm[3][2:0];
+                      dyn_sfc_q <= rec_q.imm[4][2:0];
+                    end
+                    if (rec_q.imm[0][1]) begin
+                      dyn_sbf_q <= rec_q.imm[1][2:0];
+                      dyn_sbp_q <= rec_q.imm[2][2:0];
+                      dyn_sbd_q <= rec_q.imm[3][2:0];
+                      dyn_sbc_q <= rec_q.imm[4][2:0];
+                    end
+                  end
+                  APU_VN_TYPE_VK_CMD_SET_RASTERIZER_DISCARD_ENABLE_EXT:
+                    dyn_rsd_q <= rec_q.imm[0][0];
+                  APU_VN_TYPE_VK_CMD_SET_DEPTH_BIAS_ENABLE_EXT:
+                    dyn_dbe_q <= rec_q.imm[0][0];
+                  APU_VN_TYPE_VK_CMD_SET_PRIMITIVE_RESTART_ENABLE_EXT:
+                    dyn_re_q  <= rec_q.imm[0][0];
+                  APU_VN_TYPE_VK_CMD_SET_LINE_STIPPLE_EXT: begin
+                    dyn_stip_fac_q <= rec_q.imm[0][7:0];
+                    dyn_stip_pat_q <= rec_q.imm[1][15:0];
+                  end
+                  APU_VN_TYPE_VK_CMD_SET_DEVICE_MASK_EXT,
+                  APU_VN_TYPE_VK_CMD_PUSH_DESCRIPTOR_SET_EXT,
+                  APU_VN_TYPE_VK_CMD_PUSH_DESCRIPTOR_SET_2_EXT,
+                  APU_VN_TYPE_VK_CMD_SET_RENDERING_ATTACHMENT_LOCATIONS_EXT,
+                  APU_VN_TYPE_VK_CMD_SET_RENDERING_INPUT_ATTACHMENT_INDICES_EXT: ;
+                  APU_VN_TYPE_VK_CMD_BEGIN_RENDERING_EXT: begin
+                    // Vulkan 1.3 dynamicRendering: enters active
+                    // rendering pass with viewMask from VkRenderingInfo
+                    snap_q.rp_active <= 1'b1;
+                    snap_q.subpass   <= '0;
+                    dyn_rend_q       <= 1'b1;
+                    view_mask_q      <= rec_q.imm[6];
+                    view_cur_q       <= '0;
+                    for (int i = 0; i < 8; i++) loc_map_q[i] <= 4'(i);
+                  end
+                  APU_VN_TYPE_VK_CMD_END_RENDERING_EXT: begin
+                    snap_q.rp_active <= 1'b0;
+                    dyn_rend_q       <= 1'b0;
+                    view_mask_q      <= '0;
                   end
                   APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT,
                   APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_2_EXT: begin
@@ -1948,7 +2134,8 @@ module g6lc_apu_cmdexec
                                  7'(rec_q.imm[4] > 32'd10
                                     ? 32'd40 : rec_q.imm[4] << 2);
                   end
-                  APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_EXT: begin
+                  APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_EXT,
+                  APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_2_EXT: begin
                     // bounded multi-subpass: advance only inside an
                     // active pass with a following subpass, then
                     // re-snapshot ca/da from the parsed per-subpass
@@ -2095,25 +2282,25 @@ module g6lc_apu_cmdexec
                      rec_q.ctype ==
                          APU_VN_TYPE_VK_CMD_END_QUERY_INDEXED_EXT_EXT)
                     ? (rec_q.handle[0] == 32'h0 ? StUnpReq : StQryLk)
-                    : ((rec_q.ctype ==
-                         APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT &&
-                     rec_q.imm[1] < 32'd4 && rec_q.imm[2] != 32'h0) ||
-                    (rec_q.ctype ==
-                         APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT &&
+                    : (((rec_q.ctype == APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT ||
+                         rec_q.ctype == APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_2_EXT) &&
+                     rec_q.imm[1] < 32'd8 && rec_q.imm[2] != 32'h0) ||
+                    ((rec_q.ctype == APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT ||
+                      rec_q.ctype == APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_2_EXT) &&
                      rec_q.imm[1] < 32'd256 && rec_q.imm[2] >= 32'd4) ||
-                    (rec_q.ctype ==
-                         APU_VN_TYPE_VK_CMD_BIND_VERTEX_BUFFERS_EXT &&
+                    ((rec_q.ctype == APU_VN_TYPE_VK_CMD_BIND_VERTEX_BUFFERS_EXT ||
+                      rec_q.ctype == APU_VN_TYPE_VK_CMD_BIND_VERTEX_BUFFERS_2_EXT) &&
                      rec_q.imm[1] != 32'h0) ||
-                    // BindIndexBuffer always walks its 2-word u64
-                    // offset out of the record arena
-                    rec_q.ctype ==
-                        APU_VN_TYPE_VK_CMD_BIND_INDEX_BUFFER_EXT ||
-                    (rec_q.ctype ==
-                         APU_VN_TYPE_VK_CMD_SET_VIEWPORT_EXT &&
-                     rec_q.imm[0] == 32'h0 && rec_q.imm[1] != 32'h0) ||
-                    (rec_q.ctype ==
-                         APU_VN_TYPE_VK_CMD_SET_SCISSOR_EXT &&
-                     rec_q.imm[0] == 32'h0 && rec_q.imm[1] != 32'h0) ||
+                    rec_q.ctype == APU_VN_TYPE_VK_CMD_BIND_INDEX_BUFFER_EXT ||
+                    rec_q.ctype == APU_VN_TYPE_VK_CMD_BIND_INDEX_BUFFER_2_EXT ||
+                    ((rec_q.ctype == APU_VN_TYPE_VK_CMD_SET_VIEWPORT_EXT &&
+                      rec_q.imm[0] == 32'h0 && rec_q.imm[1] != 32'h0) ||
+                     (rec_q.ctype == APU_VN_TYPE_VK_CMD_SET_VIEWPORT_WITH_COUNT_EXT &&
+                      rec_q.imm[0] != 32'h0)) ||
+                    ((rec_q.ctype == APU_VN_TYPE_VK_CMD_SET_SCISSOR_EXT &&
+                      rec_q.imm[0] == 32'h0 && rec_q.imm[1] != 32'h0) ||
+                     (rec_q.ctype == APU_VN_TYPE_VK_CMD_SET_SCISSOR_WITH_COUNT_EXT &&
+                      rec_q.imm[0] != 32'h0)) ||
                     rec_q.ctype ==
                         APU_VN_TYPE_VK_CMD_SET_BLEND_CONSTANTS_EXT ||
                     rec_q.ctype ==
@@ -2126,9 +2313,6 @@ module g6lc_apu_cmdexec
                             32'(APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_2_EXT))
                        && (rec_q.handle[0] == 32'h0 ||
                            rec_q.handle[1] == 32'h0)
-                       // a null rp/fb record handle (record-time
-                       // resolve miss) loses the submission like a
-                       // dead pipeline
                        ? StUnpReq : StPayReq)
                     : StNextBuf);
               end
@@ -2167,11 +2351,11 @@ module g6lc_apu_cmdexec
                 end else if (rec_q.ctype ==
                     32'(APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_EXT) ||
                     rec_q.ctype ==
-                    32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT)) begin
-                  // §5a G3b-iii: same guards as a direct draw, then
-                  // the operand fetch.  drawCount (imm[0]) is clamped
-                  // to <= 1 — 0 is a no-op, >1 honours only the first
-                  // command
+                    32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT) ||
+                    rec_q.ctype ==
+                    32'(APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_COUNT_EXT) ||
+                    rec_q.ctype ==
+                    32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_COUNT_EXT)) begin
                   if (snap_q.pipeline == 32'h0 ||
                       (ca_valid_q == 8'h0 && !da_valid_q)) begin
                     lost_q  <= 1'b1;
@@ -2180,8 +2364,10 @@ module g6lc_apu_cmdexec
                     state_q <= StNextBuf;
                   end else begin
                     ind_q     <= 1'b1;
-                    ind_idx_q <= rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT);
+                    ind_idx_q <= (rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT) ||
+                        rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_COUNT_EXT));
                     xf_for_q  <= 2'd0;
                     xf_opnd_q <= 2'd0;
                     state_q   <= StXfBufReq;
@@ -2275,16 +2461,16 @@ module g6lc_apu_cmdexec
                 end
               end
               APU_CMDEXEC_CLS_BARRIER: begin
-                // §5a G3b-iii: the drain's post-action — 0 plain
-                // barrier, 1 SetEvent, 2 ResetEvent, 3 WaitEvents
+                // §5a G3b-iii + sync2: 0 plain barrier, 1 SetEvent(2),
+                // 2 ResetEvent(2), 3 WaitEvents(2)
                 bar_act_q <=
-                    rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_SET_EVENT_EXT)   ? 2'd1 :
-                    rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_RESET_EVENT_EXT) ? 2'd2 :
-                    rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_WAIT_EVENTS_EXT) ? 2'd3 :
-                                                                2'd0;
+                    (rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_SET_EVENT_EXT) ||
+                     rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_SET_EVENT_2_EXT))   ? 2'd1 :
+                    (rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_RESET_EVENT_EXT) ||
+                     rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_RESET_EVENT_2_EXT)) ? 2'd2 :
+                    (rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_WAIT_EVENTS_EXT) ||
+                     rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_WAIT_EVENTS_2_EXT)) ? 2'd3 :
+                                                                               2'd0;
                 state_q   <= StDrain;
               end
               default:                  state_q <= StNextBuf;
@@ -2626,26 +2812,25 @@ module g6lc_apu_cmdexec
               state_q    <= StDsSetCk;
             end
           end
-          // sets 0..3: skip the unbound and the set indices the
-          // pipeline layout does not declare (setLayoutCount cap is
-          // the payload's word count: ids need 2 + 2*s + 1 words)
+          // sets 0..7: skip the unbound and the set indices the
+          // pipeline layout does not declare
           StDsSetCk: begin
             if (snap_q.dset[ds_set_q] == 32'h0 ||
                 {16'h0, ds_plw_q} <
                     32'd4 + (32'(ds_set_q) << 1)) begin
-              if (ds_set_q == 2'd3)
+              if (ds_set_q == 3'd7)
                 state_q <= rec_is_draw ? StDrPay : StDsIssue;
-              else                  ds_set_q <= ds_set_q + 2'd1;
+              else                  ds_set_q <= ds_set_q + 3'd1;
             end else begin
               state_q <= StDsSlRd;
             end
           end
           // advance after a resolved/skipped set
           StDsSetCkN: begin
-            if (ds_set_q == 2'd3) begin
+            if (ds_set_q == 3'd7) begin
               state_q <= rec_is_draw ? StDrPay : StDsIssue;
             end else begin
-              ds_set_q <= ds_set_q + 2'd1;
+              ds_set_q <= ds_set_q + 3'd1;
               state_q  <= StDsSetCk;
             end
           end
@@ -2926,7 +3111,9 @@ module g6lc_apu_cmdexec
                   // draw arm; the pipeline/attachment guard already
                   // ran before the fetch
                   APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_EXT,
-                  APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT: begin
+                  APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT,
+                  APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_COUNT_EXT,
+                  APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_COUNT_EXT: begin
                     desc_q  <= '0;
                     rd_q.op          <= APU_RAST_OP_DRAW;
                     rd_q.ca          <= ca_q;
@@ -3511,7 +3698,7 @@ module g6lc_apu_cmdexec
               state_q <= StUnpReq;
             end else begin
               case (dr_pi_q)
-                6'd0: begin
+                7'd0: begin
                   rd_q.fs_in_mask <= op_cpl_i.rdata[31:24];
                   rd_q.topology   <= op_cpl_i.rdata[23:16];
                   rd_q.restart    <= op_cpl_i.rdata[6];
@@ -3520,9 +3707,9 @@ module g6lc_apu_cmdexec
                   rd_q.fs_fdepth  <= op_cpl_i.rdata[5];
                   rd_q.fs_late    <= op_cpl_i.rdata[4];
                 end
-                6'd1, 6'd2, 6'd3, 6'd4, 6'd5, 6'd6, 6'd7, 6'd8,
-                6'd9, 6'd10, 6'd11, 6'd12, 6'd13, 6'd14, 6'd15,
-                6'd16: begin
+                7'd1, 7'd2, 7'd3, 7'd4, 7'd5, 7'd6, 7'd7, 7'd8,
+                7'd9, 7'd10, 7'd11, 7'd12, 7'd13, 7'd14, 7'd15,
+                7'd16: begin
                   // key by the description's Vk binding number — rast
                   // selects vb_* with attr.binding, not the table index.
                   // Invalid entries carry binding 0 — they must not
@@ -3543,20 +3730,20 @@ module g6lc_apu_cmdexec
 `endif
 // pragma translate_on
                 end
-                6'd17, 6'd18, 6'd19, 6'd20,
-                6'd21, 6'd22, 6'd23, 6'd24: begin
-                  rd_q.attr[3'(dr_pi_q - 6'd17)].valid   <=
+                7'd17, 7'd18, 7'd19, 7'd20,
+                7'd21, 7'd22, 7'd23, 7'd24: begin
+                  rd_q.attr[4'(dr_pi_q - 7'd17)].valid   <=
                       op_cpl_i.rdata[31];
-                  rd_q.attr[3'(dr_pi_q - 6'd17)].loc     <=
-                      op_cpl_i.rdata[26:24];
-                  rd_q.attr[3'(dr_pi_q - 6'd17)].binding <=
+                  rd_q.attr[4'(dr_pi_q - 7'd17)].loc     <=
+                      op_cpl_i.rdata[27:24];
+                  rd_q.attr[4'(dr_pi_q - 7'd17)].binding <=
                       op_cpl_i.rdata[23:20];
-                  rd_q.attr[3'(dr_pi_q - 6'd17)].fmt     <=
+                  rd_q.attr[4'(dr_pi_q - 7'd17)].fmt     <=
                       op_cpl_i.rdata[19:12];
-                  rd_q.attr[3'(dr_pi_q - 6'd17)].offset  <=
+                  rd_q.attr[4'(dr_pi_q - 7'd17)].offset  <=
                       op_cpl_i.rdata[11:0];
                 end
-                6'd25: begin
+                7'd25: begin
                   // G2a: depth state + dynamic-blend-constants flag +
                   // w25[17:16] static-viewport/scissor flags
                   rd_q.depth_test  <= op_cpl_i.rdata[0];
@@ -3577,65 +3764,70 @@ module g6lc_apu_cmdexec
                   dr_vpsta_q       <= op_cpl_i.rdata[16];
                   dr_scsta_q       <= op_cpl_i.rdata[17];
                 end
-                6'd26, 6'd27, 6'd28, 6'd29: begin
+                7'd26, 7'd27, 7'd28, 7'd29: begin
                   // per-attachment blend state, apu_rast_blend_t layout
-                  rd_q.blend[2'(dr_pi_q - 6'd26)] <=
+                  rd_q.blend[2'(dr_pi_q - 7'd26)] <=
                       apu_rast_blend_t'(op_cpl_i.rdata);
                 end
-                6'd30, 6'd31, 6'd32, 6'd33: begin
+                7'd30, 7'd31, 7'd32, 7'd33: begin
                   // w30..33: static blendConstants (dynamic ones are
                   // overlaid from bconst_q at the walk's end)
                   if (!dr_bcdyn_q)
-                    rd_q.blend_const[2'(dr_pi_q - 6'd30)] <=
+                    rd_q.blend_const[2'(dr_pi_q - 7'd30)] <=
                         op_cpl_i.rdata;
                 end
-                6'd34, 6'd35, 6'd36, 6'd37, 6'd38, 6'd39:
+                7'd34, 7'd35, 7'd36, 7'd37, 7'd38, 7'd39:
                   // w34..39: baked static VkViewport f32[6]
-                  dr_vp_q[3'(dr_pi_q - 6'd34)] <= op_cpl_i.rdata;
-                6'd48: rd_q.depth_bias_const <= op_cpl_i.rdata;
-                6'd49: rd_q.depth_bias_clamp <= op_cpl_i.rdata;
-                6'd50: rd_q.depth_bias_slope <= op_cpl_i.rdata;
-                6'd51: begin
+                  dr_vp_q[3'(dr_pi_q - 7'd34)] <= op_cpl_i.rdata;
+                7'd48: rd_q.depth_bias_const <= op_cpl_i.rdata;
+                7'd49: rd_q.depth_bias_clamp <= op_cpl_i.rdata;
+                7'd50: rd_q.depth_bias_slope <= op_cpl_i.rdata;
+                7'd51: begin
                   rd_q.stencil_cmp_mask <= op_cpl_i.rdata[7:0];
                   rd_q.stencil_wr_mask  <= op_cpl_i.rdata[15:8];
                   rd_q.stencil_ref      <= op_cpl_i.rdata[23:16];
                 end
-                6'd52: begin
+                7'd52: begin
                   rd_q.stencil_fail  <= op_cpl_i.rdata[2:0];
                   rd_q.stencil_dfail <= op_cpl_i.rdata[5:3];
                   rd_q.stencil_pass  <= op_cpl_i.rdata[8:6];
                   rd_q.stencil_cmp   <= op_cpl_i.rdata[11:9];
                 end
-                6'd53: begin
+                7'd53: begin
                   rd_q.stencil_cmp_mask_b <= op_cpl_i.rdata[7:0];
                   rd_q.stencil_wr_mask_b  <= op_cpl_i.rdata[15:8];
                   rd_q.stencil_ref_b      <= op_cpl_i.rdata[23:16];
                 end
-                6'd54: begin
+                7'd54: begin
                   rd_q.stencil_fail_b  <= op_cpl_i.rdata[2:0];
                   rd_q.stencil_dfail_b <= op_cpl_i.rdata[5:3];
                   rd_q.stencil_pass_b  <= op_cpl_i.rdata[8:6];
                   rd_q.stencil_cmp_b   <= op_cpl_i.rdata[11:9];
                 end
-                6'd55: rd_q.depth_bounds_min <= op_cpl_i.rdata;
-                6'd56: rd_q.depth_bounds_max <= op_cpl_i.rdata;
-                6'd57, 6'd58, 6'd59, 6'd60: begin
-                  // 8-colour-attachment extension: appended tail words
-                  // carry colour blend states for attachments 4..7
-                  // (w26..29 carry attachments 0..3); same
-                  // apu_rast_blend_t packing
-                  rd_q.blend[dr_pi_q - 6'd53] <=
+                7'd55: rd_q.depth_bounds_min <= op_cpl_i.rdata;
+                7'd56: rd_q.depth_bounds_max <= op_cpl_i.rdata;
+                7'd57, 7'd58, 7'd59, 7'd60: begin
+                  rd_q.blend[3'(dr_pi_q - 7'd53)] <=
                       apu_rast_blend_t'(op_cpl_i.rdata);
+                end
+                7'd61: begin
+                  // P4 Vulkan 1.0/1.3/1.4 per-field dynamic state mask
+                  dr_dynmask_q <= op_cpl_i.rdata[23:0];
+                end
+                7'd62, 7'd63, 7'd64, 7'd65,
+                7'd66, 7'd67, 7'd68, 7'd69: begin
+                  rd_q.attr[4'(dr_pi_q - 7'd54)].valid   <= op_cpl_i.rdata[31];
+                  rd_q.attr[4'(dr_pi_q - 7'd54)].loc     <= op_cpl_i.rdata[27:24];
+                  rd_q.attr[4'(dr_pi_q - 7'd54)].binding <= op_cpl_i.rdata[23:20];
+                  rd_q.attr[4'(dr_pi_q - 7'd54)].fmt     <= op_cpl_i.rdata[19:12];
+                  rd_q.attr[4'(dr_pi_q - 7'd54)].offset  <= op_cpl_i.rdata[11:0];
                 end
                 default:
                   // w40..43: baked static VkRect2D i32[4]
-                  dr_sc_q[2'(dr_pi_q - 6'd40)] <= op_cpl_i.rdata;
+                  dr_sc_q[2'(dr_pi_q - 7'd40)] <= op_cpl_i.rdata;
               endcase
-              if (dr_pi_q == 6'd43) begin
+              if (dr_pi_q == 7'd43) begin
                 if (dr_bcdyn_q) rd_q.blend_const <= bconst_q;
-                // static-state override: the pipeline baked viewport /
-                // scissor at create time (no matching dynamic state),
-                // so its ObjPay words replace the streamed shadows
                 if (dr_vpsta_q)
                   rd_q.vp <= '{x: dr_vp_q[0], y: dr_vp_q[1],
                                w: dr_vp_q[2], h: dr_vp_q[3],
@@ -3644,25 +3836,72 @@ module g6lc_apu_cmdexec
                   rd_q.sc_x <= dr_sc_q[0][15:0];
                   rd_q.sc_y <= dr_sc_q[1][15:0];
                   rd_q.sc_w <= dr_sc_q[2][15:0];
-                  // w43 lands this same completion — bypass the just-
-                  // written dr_sc_q[3] which still reads its old value
                   rd_q.sc_h <= op_cpl_i.rdata[15:0];
                 end
                 dr_bq   <= '0;
-                dr_pi_q <= 6'd48;
+                dr_pi_q <= 7'd48;
                 state_q <= StDrPay;
-              end else if (dr_pi_q == 6'd60) begin
+              end else if (dr_pi_q == 7'd60) begin
+                dr_pi_q <= 7'd61;
+                state_q <= StDrPay;
+              end else if (dr_pi_q == 7'd69) begin
+                // P4 dynamic-state shadow overlay per dr_dynmask_q
+                if (dr_dynmask_q[3]) begin
+                  rd_q.depth_bias_const <= dyn_dbc_q;
+                  rd_q.depth_bias_clamp <= dyn_dbk_q;
+                  rd_q.depth_bias_slope <= dyn_dbs_q;
+                end
+                if (dr_dynmask_q[5]) begin
+                  rd_q.depth_bounds_min <= dyn_dbmin_q;
+                  rd_q.depth_bounds_max <= dyn_dbmax_q;
+                end
+                if (dr_dynmask_q[6]) begin
+                  rd_q.stencil_cmp_mask   <= dyn_sfm_q;
+                  rd_q.stencil_cmp_mask_b <= dyn_sbm_q;
+                end
+                if (dr_dynmask_q[7]) begin
+                  rd_q.stencil_wr_mask   <= dyn_sfw_q;
+                  rd_q.stencil_wr_mask_b <= dyn_sbw_q;
+                end
+                if (dr_dynmask_q[8]) begin
+                  rd_q.stencil_ref   <= dyn_sfr_q;
+                  rd_q.stencil_ref_b <= dyn_sbr_q;
+                end
+                if (dr_dynmask_q[9])  rd_q.cull          <= dyn_cull_q;
+                if (dr_dynmask_q[10]) rd_q.front_ccw     <= dyn_ff_q;
+                if (dr_dynmask_q[11]) rd_q.topology      <= dyn_top_q;
+                if (dr_dynmask_q[13]) rd_q.depth_test    <= dyn_dte_q;
+                if (dr_dynmask_q[14]) rd_q.depth_write   <= dyn_dwr_q;
+                if (dr_dynmask_q[15]) rd_q.depth_op      <= dyn_dcmp_q;
+                if (dr_dynmask_q[16]) rd_q.depth_bounds_en <= dyn_dbn_q;
+                if (dr_dynmask_q[17]) rd_q.stencil_en    <= dyn_sten_q;
+                if (dr_dynmask_q[18]) begin
+                  rd_q.stencil_fail    <= dyn_sff_q;
+                  rd_q.stencil_pass    <= dyn_sfp_q;
+                  rd_q.stencil_dfail   <= dyn_sfd_q;
+                  rd_q.stencil_cmp     <= dyn_sfc_q;
+                  rd_q.stencil_fail_b  <= dyn_sbf_q;
+                  rd_q.stencil_pass_b  <= dyn_sbp_q;
+                  rd_q.stencil_dfail_b <= dyn_sbd_q;
+                  rd_q.stencil_cmp_b   <= dyn_sbc_q;
+                end
+                if (dr_dynmask_q[19]) rd_q.rast_discard  <= dyn_rsd_q;
+                if (dr_dynmask_q[20]) rd_q.depth_bias_en <= dyn_dbe_q;
+                if (dr_dynmask_q[21]) rd_q.restart       <= dyn_re_q;
+                if (dr_dynmask_q[22]) begin
+                  rd_q.stip_en  <= 1'b1;
+                  rd_q.stip_fac <= dyn_stip_fac_q;
+                  rd_q.stip_pat <= dyn_stip_pat_q;
+                end
+                rd_q.view_idx <= view_cur_q;
+                rd_q.draw_idx <= draw_idx_q;
                 state_q <= StDrVbN;
-              end else if (dr_pi_q == 6'd15 ||
-                           dr_pi_q == 6'd31) begin
-                // READN burst boundary: w15/w31 close the {0..15} and
-                // {16..31} bursts; dr_pi_q+1 is already the next
-                // burst's first word (16/32) so re-issue in StDrPay
-                dr_pi_q <= dr_pi_q + 6'd1;
+              end else if (dr_pi_q == 7'd15 ||
+                           dr_pi_q == 7'd31) begin
+                dr_pi_q <= dr_pi_q + 7'd1;
                 state_q <= StDrPay;
               end else begin
-                // mid-burst beat: stay in StDrPayCpl for the next word
-                dr_pi_q <= dr_pi_q + 6'd1;
+                dr_pi_q <= dr_pi_q + 7'd1;
                 state_q <= StDrPayCpl;
               end
             end

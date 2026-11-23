@@ -487,6 +487,9 @@ def twrap(i, n, m):
         return (0, r)
     if m == 2:
         return (0, 0 if i < 0 else (n - 1 if i >= n else i))
+    if m == 4:
+        mm = -i - 1 if i < 0 else i
+        return (0, n - 1 if mm >= n else mm)
     if i < 0 or i >= n:
         return (1, 0)
     return (0, i)
@@ -593,7 +596,7 @@ class Model:
         self.push = words[p:p + self.np]
         p += self.np
         # dynamic-offset section: n entries {set, ord, off} -> dyn[s][o]
-        self.dyn = [[0] * 16 for _ in range(4)]
+        self.dyn = [[0] * 16 for _ in range(8)]
         nd = words[p]
         p += 1
         for _ in range(nd):
@@ -2643,8 +2646,31 @@ class Model:
             wb[ops[4] & 3] = va[0][0]
             self.setres(rid, wb, ncomp)
             return pc + wc
-        if opc == 124:                        # Bitcast
+        if opc in (113, 114, 117, 120, 124, 5630):  # U/SConvert, PtrCast, Bitcast, ExpectKHR
             self.setres(rid, va[0], ncomp)
+            return pc + wc
+        if opc == 5631:                        # AssumeTrueKHR (advisory no-op)
+            return pc + wc
+        if opc in (333, 334, 335, 336, 337, 338, 339, 340, 341, 342, 343, 344,
+                   345, 346, 347, 348, 349, 351, 353, 354, 356, 357,
+                   359, 360, 361, 362, 363, 364, 4431):
+            # Single-invocation model fallback for subgroup ops (lane 0 active)
+            if opc == 333:
+                self.setres(rid, [1], 1)
+            elif opc in (334, 335, 336):
+                self.setres(rid, [1 if va[0][0] else 0], 1)
+            elif opc == 339:
+                self.setres(rid, [1 if va[0][0] else 0, 0, 0, 0], 4)
+            elif opc == 340:
+                self.setres(rid, [va[0][0] & 1], 1)
+            elif opc == 342:
+                self.setres(rid, [bin(va[0][0] & 0xFF).count('1')], 1)
+            elif opc in (343, 344):
+                m = va[0][0] & 0xFF
+                bits = [b for b in range(8) if (m >> b) & 1]
+                self.setres(rid, [bits[0] if (bits and opc == 343) else (bits[-1] if bits else 0)], 1)
+            else:
+                self.setres(rid, va[0], ncomp)
             return pc + wc
 
         # ---- matrix ops (§7c lane micro-sequences; products then

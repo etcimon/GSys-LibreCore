@@ -396,6 +396,10 @@ module g6lc_apu_vnfront
       // slot read (avail word0 + counter words1..nc) -> exec_w_q
       // REXBUF payload; WAIT re-polls until every slot is available
       StQryGo, StQryRd, StQryRdC, StQryFmt, StQryWait, StQryEnd,
+      // Vulkan 1.2/1.3/1.4 host helpers: hostQueryReset, BDA memory
+      // lookup, timeline semaphore signal, maintenance4 image req
+      StQryHostRst, StQryHostRstC, StBdaMemC, StSigSemRd, StSigSemHi,
+      StSigSemLk, StSigSemAuxH, StDevImgReqRep,
       StRep, StRepKick, StRepWait, StDone
     } state_e;
     state_e              state_q, ot_ret_q, cr_ret_q, cs_ret_q;
@@ -682,7 +686,7 @@ module g6lc_apu_vnfront
     logic                gp_fdep_q;   // FS entry.fs_fdepth (writes FragDepth)
     logic                gp_vsf_q;    // VS entry.vs_sidefx (TP5 vertex reuse)
     logic [4:0]          gp_nbind_q;
-    logic [3:0]          gp_nattr_q;
+    logic [4:0]          gp_nattr_q;
     logic [4:0]          gp_i_q;      // binding/attr/attach/dyn cursor
     logic [1:0]          gp_sp_q;     // VkGraphicsPipelineCreateInfo.subpass
     logic [7:0]          gp_top_q;    // VkPrimitiveTopology
@@ -703,8 +707,13 @@ module g6lc_apu_vnfront
     logic [1:0]          gp_cull_q;   // VkCullModeFlags
     logic                gp_ff_q;     // VK_FRONT_FACE_COUNTER_CLOCKWISE
     logic [15:0][21:0]   gp_bnd_q;    // {rate[21], valid[20], binding[19:16], stride[15:0]}
-    logic [7:0][31:0]    gp_atr_q;    // {valid[31], loc[26:24], binding[23:20],
-                                    //   fmt[19:12], offset[11:0]}
+    logic [15:0][31:0]   gp_atr_q;    // {valid[31], loc[27:24], binding[23:20],
+                                      //   fmt[19:12], offset[11:0]}
+    logic [23:0]         gp_dynmask_q; // Vulkan 1.0/1.3/1.4 per-field dynamic mask
+    logic [63:0]         sem_sig_val_q; // vkSignalSemaphore u64 value
+    logic [63:0]         sem_sig_id_q;  // vkSignalSemaphore handle id
+    logic [1:0]          sem_sig_ph_q;  // staged payload word cursor
+    logic [31:0]         bda_boff_q;    // vkGetBufferDeviceAddress bind_off
     // G2a: depth/stencil + per-attachment blend + constants
     logic                gp_dte_q, gp_dwr_q, gp_sten_q;
     logic [2:0]          gp_dcmp_q;
@@ -1027,7 +1036,7 @@ module g6lc_apu_vnfront
     function automatic logic [31:0] f_mpitch(input logic [15:0] w,
                                              input logic [7:0]  fmt,
                                              input logic [4:0]  m);
-      return ((32'(f_mdim(w, m)) * 32'(APU_VN_IMG_BPP[fmt[3:0]])) +
+      return ((32'(f_mdim(w, m)) * 32'(APU_VN_IMG_BPP[fmt[5:0]])) +
               32'd63) & ~32'd63;
     endfunction
     // floor(log2(extent))+1 for extent >= 1.  Caps a mip chain.
@@ -1117,52 +1126,56 @@ module g6lc_apu_vnfront
     //   w44/46 = VS/FS module ObjTab handle {gen,slot} (G3b-ii)
     //   w45/47 = VS/FS module parked pCode extent {chunk[31:16],
     //            words[15:0]} — cmdexec re-FILLs residency from it
-    function automatic logic [31:0] gp_pay_w(input logic [5:0] i);
-      if (i == 6'd0)
-        return {gp_fsm_q, gp_top_q, gp_nattr_q, gp_nbind_q,
+    function automatic logic [31:0] gp_pay_w(input logic [6:0] i);
+      if (i == 7'd0)
+        return {gp_fsm_q, gp_top_q, gp_nattr_q[3:0], gp_nbind_q,
                 gp_re_q, gp_fdep_q, gp_late_q, gp_cull_q, gp_ff_q, 1'b1};
-      if (i < 6'd17)
-        return {10'h0, gp_bnd_q[4'(i - 6'd1)]};
-      if (i < 6'd25)
-        return gp_atr_q[3'(i - 6'd17)];
-      if (i == 6'd25)
+      if (i < 7'd17)
+        return {10'h0, gp_bnd_q[4'(i - 7'd1)]};
+      if (i < 7'd25)
+        return gp_atr_q[3'(i - 7'd17)];
+      if (i == 7'd25)
         // [23] = gp_vsf_q (TP5 VS-side-effect flag for vertex reuse);
         // cmdexec reads only rdata[15:0] of this word so [31:24] stay pad
         return {8'h0, gp_vsf_q, gp_lop_q, gp_loe_q,
                 gp_sca_q && !gp_scdyn_q, gp_vpa_q && !gp_vpdyn_q,
                 gp_dcl_q, gp_natt_q[2:0], gp_rsd_q, gp_poly_q, gp_sten_q, gp_dbe_q,
                 gp_dcmp_q, gp_dbn_q, gp_bcdyn_q, gp_dwr_q, gp_dte_q};
-      if (i < 6'd30)
-        return gp_blend_q[2'(i - 6'd26)];
-      if (i < 6'd34)
-        return gp_bconst_q[2'(i - 6'd30)];
-      if (i < 6'd40)
-        return gp_vp_q[3'(i - 6'd34)];
-      if (i < 6'd44)
-        return gp_sc_q[2'(i - 6'd40)];
+      if (i < 7'd30)
+        return gp_blend_q[2'(i - 7'd26)];
+      if (i < 7'd34)
+        return gp_bconst_q[2'(i - 7'd30)];
+      if (i < 7'd40)
+        return gp_vp_q[3'(i - 7'd34)];
+      if (i < 7'd44)
+        return gp_sc_q[2'(i - 7'd40)];
       // G3b-ii: per-stage module descriptors for cmdexec's residency
       // resolve — {handle}, then the parked pCode {chunk,words}
-      if (i == 6'd44) return gp_mh0_q;
-      if (i == 6'd45) return gp_mc0_q;
-      if (i == 6'd46) return gp_mh1_q;
-      if (i == 6'd47) return gp_mc1_q;
-      if (i == 6'd48) return gp_dbc_q;
-      if (i == 6'd49) return gp_dbk_q;
-      if (i == 6'd50) return gp_dbs_q;
-      if (i == 6'd51) return {8'h0, gp_sfr_q, gp_sfw_q, gp_sfm_q};
-      if (i == 6'd52)
+      if (i == 7'd44) return gp_mh0_q;
+      if (i == 7'd45) return gp_mc0_q;
+      if (i == 7'd46) return gp_mh1_q;
+      if (i == 7'd47) return gp_mc1_q;
+      if (i == 7'd48) return gp_dbc_q;
+      if (i == 7'd49) return gp_dbk_q;
+      if (i == 7'd50) return gp_dbs_q;
+      if (i == 7'd51) return {8'h0, gp_sfr_q, gp_sfw_q, gp_sfm_q};
+      if (i == 7'd52)
         return {20'h0, gp_sfc_q, gp_sfp_q, gp_sfd_q, gp_sff_q};
-      if (i == 6'd53) return {8'h0, gp_sbr_q, gp_sbw_q, gp_sbm_q};
-      if (i == 6'd54)
+      if (i == 7'd53) return {8'h0, gp_sbr_q, gp_sbw_q, gp_sbm_q};
+      if (i == 7'd54)
         return {20'h0, gp_sbc_q, gp_sbp_q, gp_sbd_q, gp_sbf_q};
-      if (i == 6'd55) return gp_dbmin_q;
-      if (i == 6'd56) return gp_dbmax_q;
+      if (i == 7'd55) return gp_dbmin_q;
+      if (i == 7'd56) return gp_dbmax_q;
       // 8-colour-attachment extension: blend states for colour
-      // attachments 4..7 ride the appended tail words w57..60 (the
-      // w26..29 words carry attachments 0..3).  cmdexec decodes them
-      // into rd_q.blend[4..7]; unused slots stay blend-disabled.
-      if (i >= 6'd57 && i <= 6'd60)
-        return gp_blend_q[3'(i - 6'd53)];
+      // attachments 4..7 ride words w57..60
+      if (i >= 7'd57 && i <= 7'd60)
+        return gp_blend_q[3'(i - 7'd53)];
+      // P4 Vulkan 1.4 draw-state extension: w61 = 24-bit per-field
+      // dynamic state mask; w62..69 = vertex attributes 8..15.
+      if (i == 7'd61)
+        return {8'h0, gp_dynmask_q};
+      if (i >= 7'd62 && i <= 7'd69)
+        return gp_atr_q[4'(i - 7'd54)];
       return '0;
     endfunction
     // wire format -> device id, or 8'hFF unsupported
@@ -1194,15 +1207,23 @@ module g6lc_apu_vnfront
                  ExecEnumPd = 3, ExecEnumExt = 4, ExecMres = 5,
                  ExecEnumQf2 = 6, ExecEnumQGrp = 7, ExecExtBuf = 8,
                  ExecExtZero = 9, ExecSparse = 10, ExecFmt = 11,
-                 ExecImgFmt = 12, ExecImgSub = 13, ExecQueryRes = 14;
+                 ExecImgFmt = 12, ExecImgSub = 13, ExecQueryRes = 14,
+                 ExecBufAddr = 15, ExecSemVal = 16, ExecGran = 17,
+                 ExecToolZero = 18, ExecDslSup = 19, ExecPeerMem = 20,
+                 ExecDevBufReq = 21, ExecDevImgReq = 22, ExecPrivGet = 23,
+                 ExecZeroU64 = 24;
     function automatic int exec_kind(input logic [31:0] t);
       case (t)
         APU_VN_TYPE_VK_GET_BUFFER_MEMORY_REQUIREMENTS_EXT,
         APU_VN_TYPE_VK_GET_BUFFER_MEMORY_REQUIREMENTS_2_EXT:
           return ExecBufReq;
+        APU_VN_TYPE_VK_GET_DEVICE_BUFFER_MEMORY_REQUIREMENTS_EXT:
+          return ExecDevBufReq;
         APU_VN_TYPE_VK_GET_IMAGE_MEMORY_REQUIREMENTS_EXT,
         APU_VN_TYPE_VK_GET_IMAGE_MEMORY_REQUIREMENTS_2_EXT:
           return ExecImgReq;
+        APU_VN_TYPE_VK_GET_DEVICE_IMAGE_MEMORY_REQUIREMENTS_EXT:
+          return ExecDevImgReq;
         APU_VN_TYPE_VK_ENUMERATE_PHYSICAL_DEVICES_EXT:
           return ExecEnumPd;
         APU_VN_TYPE_VK_ENUMERATE_DEVICE_EXTENSION_PROPERTIES_EXT:
@@ -1224,12 +1245,35 @@ module g6lc_apu_vnfront
         APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_FORMAT_PROPERTIES_EXT,
         APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_FORMAT_PROPERTIES_2_EXT:
           return ExecFmt;
+        APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_IMAGE_FORMAT_PROPERTIES_EXT,
         APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_IMAGE_FORMAT_PROPERTIES_2_EXT:
           return ExecImgFmt;
-        APU_VN_TYPE_VK_GET_IMAGE_SUBRESOURCE_LAYOUT_EXT:
+        APU_VN_TYPE_VK_GET_IMAGE_SUBRESOURCE_LAYOUT_EXT,
+        APU_VN_TYPE_VK_GET_IMAGE_SUBRESOURCE_LAYOUT_2_EXT,
+        APU_VN_TYPE_VK_GET_DEVICE_IMAGE_SUBRESOURCE_LAYOUT_EXT:
           return ExecImgSub;
         APU_VN_TYPE_VK_GET_QUERY_POOL_RESULTS_EXT:
           return ExecQueryRes;
+        APU_VN_TYPE_VK_GET_BUFFER_DEVICE_ADDRESS_EXT,
+        APU_VN_TYPE_VK_GET_BUFFER_OPAQUE_CAPTURE_ADDRESS_EXT,
+        APU_VN_TYPE_VK_GET_DEVICE_MEMORY_OPAQUE_CAPTURE_ADDRESS_EXT:
+          return ExecBufAddr;
+        APU_VN_TYPE_VK_GET_SEMAPHORE_COUNTER_VALUE_EXT:
+          return ExecSemVal;
+        APU_VN_TYPE_VK_GET_RENDER_AREA_GRANULARITY_EXT,
+        APU_VN_TYPE_VK_GET_RENDERING_AREA_GRANULARITY_EXT:
+          return ExecGran;
+        APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_TOOL_PROPERTIES_EXT:
+          return ExecToolZero;
+        APU_VN_TYPE_VK_GET_DESCRIPTOR_SET_LAYOUT_SUPPORT_EXT:
+          return ExecDslSup;
+        APU_VN_TYPE_VK_GET_DEVICE_GROUP_PEER_MEMORY_FEATURES_EXT:
+          return ExecPeerMem;
+        APU_VN_TYPE_VK_GET_PRIVATE_DATA_EXT:
+          return ExecPrivGet;
+        APU_VN_TYPE_VK_GET_DEVICE_MEMORY_COMMITMENT_EXT,
+        APU_VN_TYPE_VK_GET_PIPELINE_CACHE_DATA_EXT:
+          return ExecZeroU64;
         default: return ExecNone;
       endcase
     endfunction
@@ -1483,6 +1527,9 @@ module g6lc_apu_vnfront
         gq_notready_q <= 1'b0;
         vw_lvl_q <= '0; vw_lay_q <= '0;
         sam_w0_q <= '0; sam_w1_q <= '0;
+        gp_dynmask_q <= '0;
+        sem_sig_val_q <= '0; sem_sig_id_q <= '0; sem_sig_ph_q <= '0;
+        bda_boff_q <= '0;
         pg_ok_q <= 1'b0; pg_res_q <= '0;
         rep_null_mask_q <= '0;
         pl_modid_q <= '0; pl_layid_q <= '0; pl_spec_q <= 1'b0;
@@ -1612,10 +1659,13 @@ module g6lc_apu_vnfront
               end else if (exec_kind(dec_op.cmd_type) == ExecBufReq ||
                            exec_kind(dec_op.cmd_type) == ExecImgReq ||
                            exec_kind(dec_op.cmd_type) == ExecQueryRes ||
+                           exec_kind(dec_op.cmd_type) == ExecBufAddr ||
+                           exec_kind(dec_op.cmd_type) == ExecSemVal ||
+                           exec_kind(dec_op.cmd_type) == ExecPrivGet ||
                            dec_op.cmd_type ==
                            APU_VN_TYPE_VK_GET_FENCE_STATUS_EXT) begin
-                // ExecQueryRes: watch the queryPool (2nd LOOKUP after
-                // the device) so ent_q carries {type|stats,extent}+size
+                // watch 2nd LOOKUP object (buffer/image/queryPool/semaphore/
+                // privateDataSlot/fence) so ent_q carries its fields
                 automatic int ls = lu_slot(dec_op, 1);
                 watch_q <= ls < 0 ? 4'hF : 4'(ls);
               end else if (dec_op.cmd_type ==
@@ -1623,7 +1673,9 @@ module g6lc_apu_vnfront
                            dec_op.cmd_type ==
                            APU_VN_TYPE_VK_CREATE_BUFFER_VIEW_EXT ||
                            dec_op.cmd_type ==
-                           APU_VN_TYPE_VK_GET_IMAGE_SUBRESOURCE_LAYOUT_EXT
+                           APU_VN_TYPE_VK_GET_IMAGE_SUBRESOURCE_LAYOUT_EXT ||
+                           dec_op.cmd_type ==
+                           APU_VN_TYPE_VK_GET_IMAGE_SUBRESOURCE_LAYOUT_2_EXT
                           ) begin
                 // §12.3 5b: watch the image/buffer (second LOOKUP after
                 // the device) so ent_q carries its aux + bind state —
@@ -1638,7 +1690,9 @@ module g6lc_apu_vnfront
                 automatic int rs = lu_slot(dec_op, 1);
                 watch_q <= rs < 0 ? 4'hF : 4'(rs);
               end else if (dec_op.cmd_type ==
-                           APU_VN_TYPE_VK_QUEUE_SUBMIT_EXT) begin
+                           APU_VN_TYPE_VK_QUEUE_SUBMIT_EXT ||
+                           dec_op.cmd_type ==
+                           APU_VN_TYPE_VK_QUEUE_SUBMIT_2_EXT) begin
                 // watch the OPTIONAL fence slot so ent_q.aux carries
                 // the executor fence index at submit time
                 automatic int fs = -1;
@@ -1920,14 +1974,6 @@ module g6lc_apu_vnfront
                     state_q     <= StRep;
                   end
                   ExecQueryRes: begin
-                    // vkGetQueryPoolResults: ent_q is the queryPool
-                    // (watch_q=2nd LOOKUP).  Latch operands + pool
-                    // fields; StQryGo validates and sizes the walk.
-                    //   imm[0]=firstQuery imm[1]=queryCount
-                    //   imm[2]=flags  q[2]=dataSize  q[3]=stride
-                    //   blob[0]=pData (out blob; byte count == dataSize
-                    //   is a client-asserted protocol check the decoder
-                    //   does not retain, so RTL bounds on dataSize).
                     gq_first_q   <= op_q.imm[0];
                     gq_count_q   <= op_q.imm[1];
                     gq_flags_q   <= op_q.imm[2];
@@ -1944,6 +1990,91 @@ module g6lc_apu_vnfront
                     gq_ew_q      <= '0;
                     gq_notready_q<= 1'b0;
                     state_q      <= StQryGo;
+                  end
+                  ExecBufAddr: begin
+                    // Vulkan 1.2 BDA / opaque capture address: return
+                    // 64'h0000_0001_0000_0000 + aperture_base + bind_off
+                    if (op_q.cmd_type ==
+                        APU_VN_TYPE_VK_GET_DEVICE_MEMORY_OPAQUE_CAPTURE_ADDRESS_EXT) begin
+                      exec_w_q[0*32 +: 32] <= ent_q.aux[63:32];
+                      exec_w_q[1*32 +: 32] <= 32'h0000_0001;
+                      state_q <= StRep;
+                    end else if (ent_q.bind_mem[15:0] == APU_OBJTAB_SLOT_NONE) begin
+                      exec_w_q[0*32 +: 32] <= 32'h0;
+                      exec_w_q[1*32 +: 32] <= 32'h0;
+                      state_q <= StRep;
+                    end else begin
+                      bda_boff_q <= ent_q.bind_offset[31:0];
+                      otr_q <= '{op: APU_OBJTAB_OP_READSLOT,
+                                 id: {48'h0, ent_q.bind_mem[15:0]},
+                                 kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
+                                 default: '0};
+                      ot_ret_q <= StBdaMemC;
+                      state_q  <= StOtReq;
+                    end
+                  end
+                  ExecSemVal: begin
+                    // Vulkan 1.2 vkGetSemaphoreCounterValue: 64-bit
+                    // timeline counter parked in ObjTab entry aux[63:0]
+                    exec_w_q[0*32 +: 32] <= ent_q.aux[31:0];
+                    exec_w_q[1*32 +: 32] <= ent_q.aux[63:32];
+                    state_q <= StRep;
+                  end
+                  ExecGran: begin
+                    // 1x1 pixel render/rendering area granularity
+                    exec_w_q[0*32 +: 32] <= 32'd1;
+                    exec_w_q[1*32 +: 32] <= 32'd1;
+                    state_q <= StRep;
+                  end
+                  ExecToolZero: begin
+                    exec_w_q[0*32 +: 32] <= 32'd0;
+                    exec_w_q[1*32 +: 32] <= 32'd0;
+                    state_q <= StRep;
+                  end
+                  ExecDslSup: begin
+                    exec_w_q[0*32 +: 32] <= 32'd1;
+                    state_q <= StRep;
+                  end
+                  ExecPeerMem: begin
+                    exec_w_q[0*32 +: 32] <= 32'hF;
+                    state_q <= StRep;
+                  end
+                  ExecDevBufReq: begin
+                    // Vulkan 1.3 maintenance4: compute requirements
+                    // directly from VkBufferCreateInfo.size (q[1])
+                    automatic logic [31:0] rsz =
+                        (op_q.q[1][31:0] + 32'd255) & ~32'd255;
+                    exec_w_q[0*32 +: 32] <= rsz == 32'h0 ? 32'd256 : rsz;
+                    exec_w_q[1*32 +: 32] <= 32'h0;
+                    exec_w_q[2*32 +: 32] <= 32'd256;
+                    exec_w_q[3*32 +: 32] <= 32'h0;
+                    exec_w_q[4*32 +: 32] <= 32'd3;
+                    state_q <= StRep;
+                  end
+                  ExecDevImgReq: begin
+                    // Vulkan 1.3 maintenance4: walk mip chain from
+                    // VkImageCreateInfo without creating an image
+                    imw_m_q   <= '0;
+                    imw_nm_q  <= (op_q.imm[6] == 32'd0) ? 5'd1 : 5'(op_q.imm[6]);
+                    imw_tgt_q <= 5'h1F;
+                    imw_acc_q <= '0;
+                    imw_w_q   <= (op_q.imm[3] == 32'd0) ? 16'd1 : 16'(op_q.imm[3]);
+                    imw_h_q   <= (op_q.imm[4] == 32'd0) ? 16'd1 : 16'(op_q.imm[4]);
+                    imw_fmt_q <= (f_img_fmt(op_q.imm[2]) == APU_IMG_FMT_NONE)
+                                 ? 8'd2 : f_img_fmt(op_q.imm[2]);
+                    imw_ret_q <= StDevImgReqRep;
+                    state_q   <= StImgMip;
+                  end
+                  ExecPrivGet: begin
+                    // Vulkan 1.3 privateData: stored u64 in slot aux
+                    exec_w_q[0*32 +: 32] <= ent_q.aux[31:0];
+                    exec_w_q[1*32 +: 32] <= ent_q.aux[63:32];
+                    state_q <= StRep;
+                  end
+                  ExecZeroU64: begin
+                    exec_w_q[0*32 +: 32] <= 32'h0;
+                    exec_w_q[1*32 +: 32] <= 32'h0;
+                    state_q <= StRep;
                   end
                   default: state_q <= StRep;
                 endcase
@@ -2051,9 +2182,9 @@ module g6lc_apu_vnfront
                       ext_bad = 1'b1;
                     if (op_q.immv[
                         APU_VN_CVAL_VK_MEMORY_ALLOCATE_FLAGS_INFO_FLAGS] &&
-                        op_q.imm[
+                        (op_q.imm[
                           APU_VN_CVAL_VK_MEMORY_ALLOCATE_FLAGS_INFO_FLAGS]
-                        != 32'h0)
+                         & ~32'h7) != 32'h0)
                       feat_bad = 1'b1;
                     if (ext_bad) begin
                       result_q <= APU_VK_ERROR_INVALID_EXTERNAL_HANDLE;
@@ -2307,7 +2438,8 @@ module g6lc_apu_vnfront
               APU_VN_ACT_WAIT: begin
                 case (op_q.cmd_type)
                   APU_VN_TYPE_VK_DEVICE_WAIT_IDLE_EXT,
-                  APU_VN_TYPE_VK_QUEUE_WAIT_IDLE_EXT:
+                  APU_VN_TYPE_VK_QUEUE_WAIT_IDLE_EXT,
+                  APU_VN_TYPE_VK_WAIT_SEMAPHORES_EXT:
                     state_q <= StWaitIdle;
                   APU_VN_TYPE_VK_WAIT_FOR_FENCES_EXT,
                   APU_VN_TYPE_VK_RESET_FENCES_EXT: begin
@@ -2375,26 +2507,61 @@ module g6lc_apu_vnfront
                 end
               end
               APU_VN_ACT_EVENT: begin
-                // §5a G3b-iii: host event ops — vkSetEvent/vkResetEvent
-                // write the entry's state[0] live bit through the
-                // shared SETSTATE helper; vkGetEventStatus replies
-                // VK_EVENT_SET/RESET on the watched entry
-                automatic int es = lu_slot(op_q, 1);
-                if (es < 0) begin
-                  result_q <= APU_VK_ERROR_UNKNOWN;
-                  state_q  <= StRep;
+                // §5a G3b-iii + Vulkan 1.2/1.3/1.4 host mutations:
+                // vkGetEventStatus/vkSetEvent/vkResetEvent,
+                // vkResetQueryPool (hostQueryReset),
+                // vkSignalSemaphore (timelineSemaphore),
+                // vkSetPrivateData (privateData), vkCopyImageToImage.
+                if (op_q.cmd_type ==
+                    APU_VN_TYPE_VK_RESET_QUERY_POOL_EXT) begin
+                  gq_first_q <= op_q.imm[0];
+                  gq_count_q <= op_q.imm[1];
+                  gq_pool_q  <= ent_q.size[31:0];
+                  gq_base_q  <= {16'h0, ent_q.aux[63:48]} << 6;
+                  gq_qi_q    <= '0;
+                  state_q    <= (op_q.imm[1] == 32'h0 ||
+                                 op_q.imm[0] >= ent_q.size[31:0])
+                                ? StRep : StQryHostRst;
                 end else if (op_q.cmd_type ==
-                             APU_VN_TYPE_VK_GET_EVENT_STATUS_EXT) begin
-                  result_q <= ent_q.state[0]
-                              ? APU_VK_EVENT_SET : APU_VK_EVENT_RESET;
-                  state_q  <= StRep;
+                             APU_VN_TYPE_VK_SIGNAL_SEMAPHORE_EXT) begin
+                  sem_sig_ph_q <= '0;
+                  stg_i_q      <= '0;
+                  stg_ret_q    <= StSigSemRd;
+                  state_q      <= StStgRd;
+                end else if (op_q.cmd_type ==
+                             APU_VN_TYPE_VK_SET_PRIVATE_DATA_EXT) begin
+                  automatic int ps = lu_slot(op_q, 1);
+                  if (ps < 0) begin
+                    result_q <= APU_VK_ERROR_UNKNOWN;
+                    state_q  <= StRep;
+                  end else begin
+                    hnd_pay_q   <= hnd_q[ps];
+                    auxlo_val_q <= op_q.q[3][31:0];
+                    auxhi_val_q <= op_q.q[3][63:32];
+                    auxlo_ret_q <= StSigSemAuxH;
+                    state_q     <= StAuxLo;
+                  end
+                end else if (op_q.cmd_type ==
+                             APU_VN_TYPE_VK_COPY_IMAGE_TO_IMAGE_EXT) begin
+                  state_q <= StRep;
                 end else begin
-                  hnd_pay_q  <= hnd_q[es];
-                  stv_val_q  <= {31'h0, op_q.cmd_type ==
-                                 APU_VN_TYPE_VK_SET_EVENT_EXT};
-                  stv_mask_q <= 32'h1;
-                  stv_ret_q  <= StRep;
-                  state_q    <= StStSet;
+                  automatic int es = lu_slot(op_q, 1);
+                  if (es < 0) begin
+                    result_q <= APU_VK_ERROR_UNKNOWN;
+                    state_q  <= StRep;
+                  end else if (op_q.cmd_type ==
+                               APU_VN_TYPE_VK_GET_EVENT_STATUS_EXT) begin
+                    result_q <= ent_q.state[0]
+                                ? APU_VK_EVENT_SET : APU_VK_EVENT_RESET;
+                    state_q  <= StRep;
+                  end else begin
+                    hnd_pay_q  <= hnd_q[es];
+                    stv_val_q  <= {31'h0, op_q.cmd_type ==
+                                   APU_VN_TYPE_VK_SET_EVENT_EXT};
+                    stv_mask_q <= 32'h1;
+                    stv_ret_q  <= StRep;
+                    state_q    <= StStSet;
+                  end
                 end
               end
               default: begin
@@ -3542,7 +3709,7 @@ module g6lc_apu_vnfront
                 // a graphics pipeline's second handle follows.
                 ret_gp_q   <= ot_cpl_i.entry.aux[6];
                 ret_payb_q <= 32'(ot_cpl_i.entry.aux[31:16]) << 6;
-                ret_pw_q   <= ot_cpl_i.entry.aux[6] ? 16'd61 : 16'd2;
+                ret_pw_q   <= ot_cpl_i.entry.aux[6] ? 16'd70 : 16'd2;
                 opr_q      <= '{op: APU_OBJPAY_OP_READ,
                                addr: (32'(ot_cpl_i.entry.aux[31:16])
                                       << 6) +
@@ -6264,6 +6431,7 @@ module g6lc_apu_vnfront
               gp_vp_q <= '0; gp_sc_q <= '0;
               gp_vpp_q <= 1'b0; gp_vpa_q <= 1'b0; gp_sca_q <= 1'b0;
               gp_vpdyn_q <= 1'b0; gp_scdyn_q <= 1'b0;
+              gp_dynmask_q <= '0;
               gp_bnd_q <= '0; gp_atr_q <= '0;
               // G2a: absent per-attachment blend state defaults to
               // {en=0, mask=4'hF} — a NULL pColorBlendState still
@@ -6384,34 +6552,34 @@ module g6lc_apu_vnfront
               5'd12: begin // vertexAttributeDescriptionCount (0..8)
                 // 0 is legal: no attribute gather, the VS sees only
                 // builtins (gl_VertexIndex / gl_InstanceIndex)
-                if (stg_word_q > 32'd8)
+                if (stg_word_q > 32'd16)
                   state_q <= StPipeFail;
                 else begin
-                  gp_nattr_q <= stg_word_q[3:0];
+                  gp_nattr_q <= stg_word_q[4:0];
                   gp_i_q     <= '0;
                   gp_ph_q    <= (stg_word_q == 32'h0) ? 5'd17 : 5'd13;
                   state_q    <= StGpRd;
                 end
               end
-              5'd13: begin // location (<8)
-                if (stg_word_q > 32'd7) state_q <= StPipeFail;
+              5'd13: begin // location (<16)
+                if (stg_word_q > 32'd15) state_q <= StPipeFail;
                 else begin
-                  gp_atr_q[gp_i_q[2:0]][31]    <= 1'b1;
-                  gp_atr_q[gp_i_q[2:0]][26:24] <= stg_word_q[2:0];
+                  gp_atr_q[gp_i_q[3:0]][31]    <= 1'b1;
+                  gp_atr_q[gp_i_q[3:0]][27:24] <= stg_word_q[3:0];
                   gp_ph_q <= 5'd14; state_q <= StGpRd;
                 end
               end
               5'd14: begin // binding (<16)
                 if (stg_word_q > 32'd15) state_q <= StPipeFail;
                 else begin
-                  gp_atr_q[gp_i_q[2:0]][23:20] <= stg_word_q[3:0];
+                  gp_atr_q[gp_i_q[3:0]][23:20] <= stg_word_q[3:0];
                   gp_ph_q <= 5'd15; state_q <= StGpRd;
                 end
               end
               5'd15: begin // format
                 if (!f_vattr_ok(stg_word_q)) state_q <= StPipeFail;
                 else begin
-                  gp_atr_q[gp_i_q[2:0]][19:12] <= stg_word_q[7:0];
+                  gp_atr_q[gp_i_q[3:0]][19:12] <= stg_word_q[7:0];
                   gp_ph_q <= 5'd16; state_q <= StGpRd;
                 end
               end
@@ -6419,7 +6587,7 @@ module g6lc_apu_vnfront
                 if (stg_word_q > 32'd2047) begin
                   state_q <= StPipeFail;
                 end else begin
-                  gp_atr_q[gp_i_q[2:0]][11:0] <= stg_word_q[11:0];
+                  gp_atr_q[gp_i_q[3:0]][11:0] <= stg_word_q[11:0];
                   gp_i_q  <= gp_i_q + 5'd1;
                   gp_ph_q <= (gp_i_q + 5'd1 >= gp_nattr_q)
                              ? 5'd17 : 5'd13;
@@ -6702,13 +6870,38 @@ module g6lc_apu_vnfront
                 gp_ph_q   <= (stg_word_q == 32'h0) ? 6'd44 : 6'd43;
                 state_q   <= StGpRd;
               end
-              6'd43: begin // dynamic state ids; BLEND_CONSTANTS = 4,
-                          // VIEWPORT = 0, SCISSOR = 1
-                if (stg_word_q == 32'd4) gp_bcdyn_q <= 1'b1;
-                if (stg_word_q == 32'd0) gp_vpdyn_q <= 1'b1;
-                if (stg_word_q == 32'd1) gp_scdyn_q <= 1'b1;
-                gp_i_q  <= gp_i_q + 4'd1;
-                gp_ph_q <= (gp_i_q + 4'd1 >= 4'(gp_ndyn_q))
+              6'd43: begin // Vulkan 1.0/1.3/1.4 VkDynamicState ids ->
+                          // 24-bit per-field mask (gp_dynmask_q) + legacy bits
+                case (stg_word_q)
+                  32'd0:          begin gp_vpdyn_q <= 1'b1; gp_dynmask_q[0]  <= 1'b1; end
+                  32'd1:          begin gp_scdyn_q <= 1'b1; gp_dynmask_q[1]  <= 1'b1; end
+                  32'd2:          gp_dynmask_q[2]  <= 1'b1; // LINE_WIDTH
+                  32'd3:          gp_dynmask_q[3]  <= 1'b1; // DEPTH_BIAS
+                  32'd4:          begin gp_bcdyn_q <= 1'b1; gp_dynmask_q[4]  <= 1'b1; end
+                  32'd5:          gp_dynmask_q[5]  <= 1'b1; // DEPTH_BOUNDS
+                  32'd6:          gp_dynmask_q[6]  <= 1'b1; // STENCIL_COMPARE_MASK
+                  32'd7:          gp_dynmask_q[7]  <= 1'b1; // STENCIL_WRITE_MASK
+                  32'd8:          gp_dynmask_q[8]  <= 1'b1; // STENCIL_REFERENCE
+                  32'd1000267000: gp_dynmask_q[9]  <= 1'b1; // CULL_MODE
+                  32'd1000267001: gp_dynmask_q[10] <= 1'b1; // FRONT_FACE
+                  32'd1000267002: gp_dynmask_q[11] <= 1'b1; // PRIMITIVE_TOPOLOGY
+                  32'd1000267003: begin gp_vpdyn_q <= 1'b1; gp_dynmask_q[0]  <= 1'b1; end
+                  32'd1000267004: begin gp_scdyn_q <= 1'b1; gp_dynmask_q[1]  <= 1'b1; end
+                  32'd1000267005: gp_dynmask_q[12] <= 1'b1; // VERTEX_INPUT_BINDING_STRIDE
+                  32'd1000267006: gp_dynmask_q[13] <= 1'b1; // DEPTH_TEST_ENABLE
+                  32'd1000267007: gp_dynmask_q[14] <= 1'b1; // DEPTH_WRITE_ENABLE
+                  32'd1000267008: gp_dynmask_q[15] <= 1'b1; // DEPTH_COMPARE_OP
+                  32'd1000267009: gp_dynmask_q[16] <= 1'b1; // DEPTH_BOUNDS_TEST_ENABLE
+                  32'd1000267010: gp_dynmask_q[17] <= 1'b1; // STENCIL_TEST_ENABLE
+                  32'd1000267011: gp_dynmask_q[18] <= 1'b1; // STENCIL_OP
+                  32'd1000377001: gp_dynmask_q[19] <= 1'b1; // RASTERIZER_DISCARD_ENABLE
+                  32'd1000377002: gp_dynmask_q[20] <= 1'b1; // DEPTH_BIAS_ENABLE
+                  32'd1000377004: gp_dynmask_q[21] <= 1'b1; // PRIMITIVE_RESTART_ENABLE
+                  32'd1000259000: gp_dynmask_q[22] <= 1'b1; // LINE_STIPPLE
+                  default: ;
+                endcase
+                gp_i_q  <= gp_i_q + 5'd1;
+                gp_ph_q <= ({3'b0, gp_i_q} + 8'd1 >= gp_ndyn_q)
                            ? 6'd44 : 6'd43;
                 state_q <= StGpRd;
               end
@@ -6840,7 +7033,7 @@ module g6lc_apu_vnfront
               // for colour attachments 4..7 at w57..60 (w26..29 carry
               // attachments 0..3); StGpPayWd writes and cmdexec reads
               // all 61
-              opr_q    <= '{op: APU_OBJPAY_OP_ALLOC, words: 32'd61,
+              opr_q    <= '{op: APU_OBJPAY_OP_ALLOC, words: 32'd70,
                            default: '0};
               op_ret_q <= StGpAlcC;
               state_q  <= StOpReq;
@@ -6858,11 +7051,11 @@ module g6lc_apu_vnfront
           StGpPayW: begin
             opr_q    <= '{op: APU_OBJPAY_OP_WRITE,
                          addr: op_base_q + 32'(pay_i_q),
-                         wdata: gp_pay_w(pay_i_q[5:0]), default: '0};
+                         wdata: gp_pay_w(pay_i_q[6:0]), default: '0};
 // pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
             $display("[DBG] vnf gpayw[%0d] @%04x = %08x (fsm=%02x top=%02x na=%0d nb=%0d cull=%0d ff=%0d) t=%0t",
-                     pay_i_q, op_base_q + pay_i_q, gp_pay_w(pay_i_q[5:0]),
+                     pay_i_q, op_base_q + pay_i_q, gp_pay_w(pay_i_q[6:0]),
                      gp_fsm_q, gp_top_q, gp_nattr_q, gp_nbind_q,
                      gp_cull_q, gp_ff_q, $time);
 `endif
@@ -6871,7 +7064,7 @@ module g6lc_apu_vnfront
             state_q  <= StOpReq;
           end
           StGpPayWd: begin
-            if (pay_i_q + 16'd1 >= 16'd61) begin
+            if (pay_i_q + 16'd1 >= 16'd70) begin
               // ObjTab ALLOC the pipeline object (id = this element's
               // out id); aux writes follow on the completion
               otr_q <= '{op: APU_OBJTAB_OP_ALLOC,
@@ -6896,7 +7089,7 @@ module g6lc_apu_vnfront
               // unwind at StGpUnr
               opr_q    <= '{op: APU_OBJPAY_OP_FREE,
                            addr: op_base_q,
-                           words: 32'd61, default: '0};
+                           words: 32'd70, default: '0};
               op_ret_q <= StGpUnr;
               state_q  <= StOpReq;
             end else begin
@@ -7500,8 +7693,8 @@ module g6lc_apu_vnfront
                        (lays >= 32'd1) && (lays <= 32'd256);
             else if (ity == 32'd1)
               dim_ok = (dd == 32'd1) &&
-                       (ww >= 32'd1) && (ww <= 32'd4096) &&
-                       (hh >= 32'd1) && (hh <= 32'd4096) &&
+                       (ww >= 32'd1) && (ww <= 32'd8192) &&
+                       (hh >= 32'd1) && (hh <= 32'd8192) &&
                        (lays >= 32'd1) && (lays <= 32'd256);
             else if (ity == 32'd2)
               dim_ok = (lays == 32'd1) &&
@@ -7655,13 +7848,13 @@ module g6lc_apu_vnfront
           // 14=borderColor 15=unnormCoords
           StSamCk: begin
             if (op_q.imm[1] > 32'd1 || op_q.imm[2] > 32'd1 ||
-                op_q.imm[3] > 32'd1 || op_q.imm[8] != 32'h0 ||
+                op_q.imm[3] > 32'd1 || op_q.imm[8] > 32'd1 ||
                 op_q.imm[11] > 32'd7 || op_q.imm[14] > 32'd5) begin
               result_q <= APU_VK_ERROR_FEATURE_NOT_PRESENT;
               state_q  <= StRep;
-            end else if (op_q.imm[4] > 32'd3 || op_q.imm[5] > 32'd3 ||
-                         op_q.imm[6] > 32'd3 || op_q.imm[15] != 32'h0) begin
-              // MIRROR_CLAMP_TO_EDGE + unnormalized coords: refused
+            end else if (op_q.imm[4] > 32'd4 || op_q.imm[5] > 32'd4 ||
+                         op_q.imm[6] > 32'd4 || op_q.imm[15] != 32'h0) begin
+              // unnormalized coords refused; MIRROR_CLAMP_TO_EDGE (4) admitted
               result_q <= APU_VK_ERROR_FEATURE_NOT_PRESENT;
               state_q  <= StRep;
             end else begin
@@ -7739,7 +7932,7 @@ module g6lc_apu_vnfront
                 ? ext - off : rng0;
             // texel alignment: APU_VN_IMG_BPP is a power of two so
             // x % tb == x & (tb-1); only the low 4 bits can be set
-            automatic logic [7:0]  tb   = APU_VN_IMG_BPP[bvw_did_q[3:0]];
+            automatic logic [7:0]  tb   = APU_VN_IMG_BPP[bvw_did_q[5:0]];
             automatic logic [7:0]  tbm1 = tb - 8'd1;   // {0,1,3,7,15}
             automatic logic        abad =
                 (off[3:0] & tbm1[3:0]) != 4'h0 ||
@@ -7927,6 +8120,90 @@ module g6lc_apu_vnfront
                                        : APU_VK_SUCCESS;
               state_q  <= StRep;
             end
+          end
+
+          // ---- Vulkan 1.2/1.3/1.4 host helpers ----------------------
+          // vkResetQueryPool (hostQueryReset): zero word0 (availability)
+          // of each slot in [firstQuery, firstQuery+queryCount)
+          StQryHostRst: begin
+            if (gq_qi_q >= gq_count_q ||
+                gq_first_q + gq_qi_q >= gq_pool_q) begin
+              state_q <= StRep;
+            end else begin
+              opr_q    <= '{op: APU_OBJPAY_OP_WRITE,
+                            addr: gq_base_q + ((gq_first_q + gq_qi_q) << 4),
+                            wdata: 32'h0, default: '0};
+              op_ret_q <= StQryHostRstC;
+              state_q  <= StOpReq;
+            end
+          end
+          StQryHostRstC: begin
+            gq_qi_q <= gq_qi_q + 32'd1;
+            state_q <= StQryHostRst;
+          end
+          // vkGetBufferDeviceAddress memory READSLOT completion
+          StBdaMemC: begin
+            if (ot_cpl_i.status == APU_OBJTAB_OK &&
+                ot_cpl_i.entry.aux[63:32] != APU_MEM_UNBACKED) begin
+              exec_w_q[0*32 +: 32] <= ot_cpl_i.entry.aux[63:32] + bda_boff_q;
+              exec_w_q[1*32 +: 32] <= 32'h0000_0001;
+            end else begin
+              exec_w_q[0*32 +: 32] <= 32'h0;
+              exec_w_q[1*32 +: 32] <= 32'h0;
+            end
+            state_q <= StRep;
+          end
+          // vkSignalSemaphore: read staged {sem_lo, sem_hi, val_lo, val_hi}
+          StSigSemRd: begin
+            case (sem_sig_ph_q)
+              2'd0: sem_sig_id_q[31:0]  <= stg_word_q;
+              2'd1: sem_sig_id_q[63:32] <= stg_word_q;
+              2'd2: sem_sig_val_q[31:0] <= stg_word_q;
+              default: sem_sig_val_q[63:32] <= stg_word_q;
+            endcase
+            if (sem_sig_ph_q == 2'd3) begin
+              otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                            id: APU_VN_ID_TAG | sem_sig_id_q,
+                            kind: 6'(APU_VN_KIND_VK_SEMAPHORE),
+                            ctx: ctx_i, default: '0};
+              ot_ret_q <= StSigSemLk;
+              state_q  <= StOtReq;
+            end else begin
+              sem_sig_ph_q <= sem_sig_ph_q + 2'd1;
+              stg_i_q      <= stg_i_q + 16'd1;
+              stg_ret_q    <= StSigSemRd;
+              state_q      <= StStgRd;
+            end
+          end
+          StSigSemHi: state_q <= StRep;
+          StSigSemLk: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              result_q <= APU_VK_ERROR_UNKNOWN;
+              state_q  <= StRep;
+            end else begin
+              hnd_pay_q   <= ot_cpl_i.handle;
+              auxlo_val_q <= sem_sig_val_q[31:0];
+              auxhi_val_q <= sem_sig_val_q[63:32];
+              auxlo_ret_q <= StSigSemAuxH;
+              state_q     <= StAuxLo;
+            end
+          end
+          StSigSemAuxH: begin
+            auxhi_ret_q <= StRep;
+            state_q     <= StAuxSet;
+          end
+          // vkGetDeviceImageMemoryRequirements reply after StImgMip
+          StDevImgReqRep: begin
+            automatic logic [31:0] lays =
+                (op_q.imm[1] == 32'd2)
+                ? (op_q.imm[5] == 32'd0 ? 32'd1 : op_q.imm[5])
+                : (op_q.imm[7] == 32'd0 ? 32'd1 : op_q.imm[7]);
+            exec_w_q[0*32 +: 32] <= lays * imw_lay_q;
+            exec_w_q[1*32 +: 32] <= 32'h0;
+            exec_w_q[2*32 +: 32] <= 32'd64;
+            exec_w_q[3*32 +: 32] <= 32'h0;
+            exec_w_q[4*32 +: 32] <= 32'd3;
+            state_q <= StRep;
           end
 
           // ---- reply --------------------------------------------------------
@@ -8151,7 +8428,9 @@ module g6lc_apu_vnfront
                       StSamCk, StSamAuxH, StImgSubRep, StBufVwCk, StBufVwMC, StBufVwAuxH
                       }) return VF_IMG;
         if (s inside {
-                      StQryGo, StQryRd, StQryRdC, StQryFmt, StQryWait, StQryEnd
+                      StQryGo, StQryRd, StQryRdC, StQryFmt, StQryWait, StQryEnd,
+                      StQryHostRst, StQryHostRstC, StBdaMemC, StSigSemRd,
+                      StSigSemHi, StSigSemLk, StSigSemAuxH, StDevImgReqRep
                       }) return VF_QRY;
         return VF_OTHER;
       endfunction

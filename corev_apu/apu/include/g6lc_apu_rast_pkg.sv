@@ -60,7 +60,7 @@ package g6lc_apu_rast_pkg;
     logic [4:0]  src_c;                      // [5:1]  srcColorBlendFactor
     logic        en;                         // [0]    blendEnable
   } apu_rast_blend_t;
-  typedef struct packed { logic [2:0] loc; logic [3:0] binding; logic [7:0] fmt; logic [11:0] offset; logic valid; } apu_rast_attr_t;
+  typedef struct packed { logic [3:0] loc; logic [3:0] binding; logic [7:0] fmt; logic [11:0] offset; logic valid; } apu_rast_attr_t;
   typedef struct packed { logic [31:0] x, y, w, h, minz, maxz; } apu_rast_vp_t;   // f32 bit patterns (VkViewport)
   typedef struct packed {
     apu_rast_op_e      op;
@@ -69,24 +69,26 @@ package g6lc_apu_rast_pkg;
     logic              fs_late;              // FS writes FragDepth or may kill/demote -> late-Z in the ROP
     logic              fs_fdepth;            // FS declares FragDepth out -> slot8 word0 is the depth source
     logic              vs_sidefx;            // TP5: VS module may side-effect globally -> vertex reuse unsafe
-    logic [7:0]        topology;             // VkPrimitiveTopology: 3 LIST, 4 STRIP, 5 FAN (others → UNSUPPORTED)
+    logic [7:0]        topology;             // VkPrimitiveTopology: 0..5 (POINT/LINE/TRI LIST/STRIP/FAN)
     logic [1:0]        poly_mode;            // VkPolygonMode: 0 fill, 1 line, 2 point
     logic              rast_discard;         // rasterizerDiscardEnable
     logic              restart;              // indexed primitiveRestartEnable
     logic [1:0]        cull;                 // VkCullModeFlags bit0 FRONT bit1 BACK
     logic              front_ccw;            // VK_FRONT_FACE_COUNTER_CLOCKWISE
-    apu_rast_attr_t [7:0] attr;
+    apu_rast_attr_t [15:0] attr;             // Vulkan 1.4: up to 16 vertex input attributes
     logic [15:0][31:0] vb_base;              // aperture byte base (mem base + bind off + cmd offset)
     logic [15:0][31:0] vb_size;              // bytes readable from vb_base (robust: OOB attribute reads as 0)
     logic [15:0][15:0] vb_stride;
     logic [15:0]       vb_rate;              // per-binding inputRate: bit b = INSTANCE (index by inst, not vertex)
+    logic [15:0]       vb_div_en;            // Vulkan 1.4 vertexAttributeInstanceRateDivisor enable per binding
+    logic [15:0][31:0] vb_div;               // per-binding instance divisor (0 = zero divisor)
     logic [31:0]       ib_base, ib_size;
-    logic [1:0]        ib_type;              // 0 none (vkCmdDraw), 1 UINT16, 2 UINT32
+    logic [1:0]        ib_type;              // 0 none (vkCmdDraw), 1 UINT16, 2 UINT32, 3 UINT8 (Vulkan 1.4)
     apu_rast_vp_t      vp;                   // dynamic viewport (f32)
     logic [15:0]       sc_x, sc_y, sc_w, sc_h;
     apu_xfer_img_t [7:0] ca;                 // color attachments (FS out loc l -> ca[l]); CLEAR uses ca[0]
     logic [7:0]        ca_valid;
-    apu_xfer_img_t     da;                   // depth attachment (D32_SFLOAT / D16_UNORM)
+    apu_xfer_img_t     da;                   // depth attachment (D32_SFLOAT / D16_UNORM / D24_UNORM_S8_UINT)
     logic              da_valid;
     apu_rast_blend_t [7:0] blend;            // per-attachment blend state
     logic [3:0][31:0]  blend_const;          // f32 blendConstants (dynamic or pipeline-static)
@@ -108,6 +110,11 @@ package g6lc_apu_rast_pkg;
     logic [31:0]       depth_bias_const;     // f32 constantFactor
     logic [31:0]       depth_bias_clamp;     // f32; 0 disables the clamp
     logic [31:0]       depth_bias_slope;     // f32 slopeFactor (stored)
+    logic              stip_en;              // Vulkan 1.4 stippledBresenhamLines enable
+    logic [7:0]        stip_fac;             // lineStippleFactor (1..256; 0 treated as 1)
+    logic [15:0]       stip_pat;             // lineStipplePattern (16-bit mask)
+    logic [15:0]       view_idx;             // Vulkan 1.1+ multiview gl_ViewIndex
+    logic [15:0]       draw_idx;             // Vulkan 1.1+ shaderDrawParameters gl_DrawID
     logic [31:0]       vertex_count, instance_count, first_vertex, first_instance;  // Draw; DrawIndexed: index_count in vertex_count
     logic [31:0]       first_index; logic signed [31:0] vertex_offset;
     logic [3:0][31:0]  clear_color;          // CLEAR: VkClearColorValue float32[4]; depth clear uses [0], D24S8 stencil byte uses [1][7:0]

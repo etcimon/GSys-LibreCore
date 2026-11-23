@@ -347,7 +347,7 @@ module g6lc_apu_xfer
     function automatic logic [31:0] f_mpitch(input logic [15:0] w,
                                              input logic [7:0]  fmt,
                                              input logic [4:0]  m);
-      return ((32'(f_mdim(w, m)) * 32'(APU_VN_IMG_BPP[fmt[3:0]])) +
+      return ((32'(f_mdim(w, m)) * 32'(APU_VN_IMG_BPP[fmt[5:0]])) +
               32'd63) & ~32'd63;
     endfunction
     // ---- CLEAR colour conversions ------------------------------------
@@ -437,7 +437,7 @@ module g6lc_apu_xfer
     assign cwl_hm = f_mdim(cwl_ih, im_m_q);
     assign crl = rg_q[2] != 32'h0 ? rg_q[2] : rg_q[11];
     assign cih = rg_q[3] != 32'h0 ? rg_q[3] : rg_q[12];
-    assign cbpp = 32'(APU_VN_IMG_BPP[xf_q.img0.fmt[3:0]]);
+    assign cbpp = 32'(APU_VN_IMG_BPP[xf_q.img0.fmt[5:0]]);
 
     function automatic logic [31:0] f_cop(input logic [5:0] s);
       if (s >= 6'd2 && s <= 6'd19) return rg_q[5'(s - 6'd2)];
@@ -1030,8 +1030,8 @@ module g6lc_apu_xfer
                 if (xf_i.regions == 16'h0) begin
                   state_q <= XDone;
                 end else if (xf_i.op == APU_XFER_OP_I2I &&
-                    APU_VN_IMG_BPP[xf_i.img0.fmt[3:0]] !=
-                    APU_VN_IMG_BPP[xf_i.img1.fmt[3:0]]) begin
+                    APU_VN_IMG_BPP[xf_i.img0.fmt[5:0]] !=
+                    APU_VN_IMG_BPP[xf_i.img1.fmt[5:0]]) begin
                   // CopyImage requires equal bytes-per-texel
                   xf_fault_q <= 1'b1;
                   state_q    <= XDone;
@@ -1511,7 +1511,7 @@ module g6lc_apu_xfer
                    rg_q[12] == 32'h0 && rg_q[13] == 32'd1 &&
                    rg_q[0] == 32'd1 && rg_q[10] == 32'd1 &&
                    cbpp == 32'd4 && ex >= 32'd1 && ey >= 32'd1 &&
-                   32'(APU_VN_IMG_BPP[xf_q.img1.fmt[3:0]]) == 32'd4 &&
+                   32'(APU_VN_IMG_BPP[xf_q.img1.fmt[5:0]]) == 32'd4 &&
                    xf_q.img0.fmt == xf_q.img1.fmt &&
                    ex  <= 32'(f_mdim(xf_q.img0.w, 5'd0)) &&
                    ey  <= 32'(f_mdim(xf_q.img0.h, 5'd0)) &&
@@ -2054,8 +2054,8 @@ module g6lc_apu_xfer
             automatic logic [3:0]   cj;
             automatic logic         is_alpha, go;
             automatic logic [127:0] cv, tex;
-            attr  = APU_VN_IMG_ATTR[xf_q.img0.fmt[3:0]];
-            bpp   = APU_VN_IMG_BPP[xf_q.img0.fmt[3:0]];
+            attr  = APU_VN_IMG_ATTR[xf_q.img0.fmt[5:0]];
+            bpp   = APU_VN_IMG_BPP[xf_q.img0.fmt[5:0]];
             ncomp = 4'(attr[2:0]) + 4'd1;
             cbits = 6'({bpp, 3'b0} >>
                     (attr[2:0] == 3'd3 ? 6'd2 :

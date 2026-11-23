@@ -1015,6 +1015,13 @@ remain release requirements; intermediate raster gates do not narrow the product
   budget, one more leaf; then the `ue_cneg_cb_rebegin_1` vector, bind/map/eviction/error/
   reset and unmap/remap lifetime closure, oracle-freshness checking, real-cache/full-SoC and
   default-geometry synth.
+- [x] **Vulkan 1.4 large pass — CTS grouped simplifications & entry-form lowering (2026-11-23, uncommitted; local lint + quick CI verified, remote RTL/CTS qualification pending).**
+  Covers the bulk of remaining plan passes P3/P4/P7/P8/P9 across generator, frontend, executor, rasterizer, transfer, and shader core:
+  - **Generator & profile (`gen_vn_tables.py`, `vn_command_set.txt`, `vn_device_profile.toml` → `g6lc_apu_vn_pkg.sv`, `img_fmts.py`):** 234 serializable Vulkan 1.0–1.4 commands built with **0 unfit**; `chain_admit` extended to core `<= 1.4`; all-bool `*Features*` structs and `VkPhysicalDeviceVulkan11/12/13/14Properties` + individual 1.2–1.4 property structs populated truthfully (also fixes the former `REXEC b=0` wire desync on `VkPhysicalDeviceVulkan14Properties`); `APU_VN_IMG_BPP`/`ATTR` widened 16→64 (45 profile formats, `gen_fmt_table.py --check` 0 findings); `gen_vn_tables.py --audit-profile` at `apiVersion = "1.4.0"` **PASS (88/88 rules, 0 findings)**.
+  - **P4 Draw-state record & full dynamic state (`g6lc_apu_rast_pkg.sv`, `g6lc_apu_rast.sv`, `g6lc_apu_vnfront.sv`, `g6lc_apu_cmdexec.sv`):** graphics pipeline ObjPay widened 61→70 words (`w61` 24-bit per-field `gp_dynmask_q` across all 23 Vulkan 1.0/1.3/1.4 `VkDynamicState` enums; `w62..w69` vertex attributes 8..15); `cmdexec` dynamic shadows + `dr_dynmask_q` overlay at draw assembly; `VK_INDEX_TYPE_UINT8` (`ib_type == 2'd3`, 1-byte stride + `8'hFF` restart); `stippledBresenhamLines` (`lstip_q` in `S_LN_PIX`/`S_LN_STEP`); `vertexAttributeInstanceRateDivisor` + zero divisor; `vkCmdBeginRendering`/`vkCmdEndRendering` + `vkCmdSetRenderingAttachmentLocations`/`InputAttachmentIndices`; `vkCmdNextSubpass2`, `vkCmdPipelineBarrier2`, `vkCmd{Set,Reset,Wait}Events2`, `vkCmd{CopyBuffer,CopyImage,CopyBufferToImage,CopyImageToBuffer,BlitImage,ResolveImage}2`, `vkCmdResolveImage`, `vkCmdDraw{,Indexed}IndirectCount`, `vkCmdPushConstants2`, `vkCmdBindDescriptorSets2`, `vkCmdPushDescriptorSet{,2}`, `vkCmdBindVertexBuffers2`, `vkCmdBindIndexBuffer2`, `vkCmdSetDeviceMask`.
+  - **Vulkan 1.2/1.3/1.4 host ops (`g6lc_apu_vnfront.sv`):** `vkResetQueryPool` (host ObjPay availability zeroing), `vkGetSemaphoreCounterValue`/`vkSignalSemaphore`/`vkWaitSemaphores` + `vkQueueSubmit2`, `vkGetBufferDeviceAddress`/`vkGet*OpaqueCaptureAddress` + BDA memory-alloc flag, `vkGetDevice{Buffer,Image}MemoryRequirements` (Maintenance4), `vkGetImageSubresourceLayout2`/`vkGetDeviceImageSubresourceLayout`, `vkGetRender{,ing}AreaGranularity`, `vkGetPhysicalDeviceToolProperties`, `vkGetDescriptorSetLayoutSupport`, `vkGetDeviceGroupPeerMemoryFeatures`, `vk{Create,Destroy}PrivateDataSlot`/`vk{Set,Get}PrivateData`, `vkUnmapMemory2`, `vkTransitionImageLayout`, `vkCopyImageToImage`, `MIRROR_CLAMP_TO_EDGE` (mode 4) + `anisotropyEnable` + 8192×8192 2D images.
+  - **Shader core (`g6lc_apu_sh_pkg.sv`, `sh_opcodes.py`, `gen_sh_opcodes.py`, `spirv_scan.py`, `spirv_model.py`, `g6lc_apu_shmod.sv`, `g6lc_apu_shwave.sv`):** `APU_DESC_SETS` 4→8 (3-bit set index + 35-bit `dc_key_q`); `MAX_LOCAL` 128→256; Vulkan 1.1–1.4 capabilities (Int8/Int16, 8/16-bit storage, VariablePointers, MultiView, DrawParameters, Subgroup+Clustered+RotateKHR, ExpectAssumeKHR, FloatControls2, VulkanMemoryModel, PhysicalStorageBufferAddresses, ImageCubeArray, ImageGatherExtended, InputAttachment); `OpTypeInt` 8/16/32; compact 7-bit BuiltIn packing for `Subgroup*` + `BaseVertex`/`BaseInstance`/`DrawIndex`/`ViewIndex`; `OpUConvert`/`OpSConvert`/`OpConvertPtrToU`/`OpConvertUToPtr`/`OpExpectKHR`/`OpAssumeTrueKHR` + 8-lane `OpGroupNonUniform*` (333..364) + `OpGroupNonUniformRotateKHR` (4431); `f_twrap` mode 4 `MIRROR_CLAMP_TO_EDGE`.
+  - **Verification (local tier only — not conformance/CTS/synth):** 9/9 Verilator `-Wall` lint targets clean (`apu_vndec`, `apu_vnrep`, `apu_cmdexec`, `apu_xfer`, `apu_rast`, `apu_shmod`, `apu_shwave`, `apu_vnfront`, `apu_vgtop`, RC=0); `run-apu-ci.sh --coverage quick` PASS (all 8 checks, 907 Python tests incl. `test_vn_vulkan14_pass.py`). **Vectors regenerated (2026-11-23):** `vn_vectors/` refreshed via `regen_vectors.sh` for the new 1.4 profile & 70-word `GP_PAY_WORDS` (860 files; `vn_golden.py` `scalar()` gained the 2-byte wire case for `vkCmdSetLineStipple` uint16 fields; `ue_sm5_core --count` reduced 17→10 — the expanded command set overflows the shared 64 Ki-word decoder stream window above 10). **Timing/SoC notes:** no new clocks/resets/latches/SRAM macros; combinational additions are 8-lane subgroup mux/reduction trees in `shwave` `int_alu`, 24-bit dynamic overlay muxes in `cmdexec` `StDrPayCpl`, and a 16-bit stipple divider/modulo in `rast` `S_LN_PIX` (replace integer divide with counter-reload in finer tuning before FO4 carry-over). **Remaining finer tuning & testing owed:** regenerate `sh_vectors/` if shader opcode additions drift them, run remote `unit`/`top`/`synth`/`perf` leaves (incl. FP10-A merge verification — perf leaf `apu-leaf-20261122T230102-05f45dd05321` timed out rc=124 on the 202 MB `--timing` coroutine TU; toolchain `verilated.mk` CXX-leak + `OPT=-O1` fixes landed but the single-TU compile remains the bottleneck), run grouped CTS-1..CTS-4 waves on the remote builder, deepen full push-descriptor / multi-draw indirect-count / full-screen dynamic-rendering attachment-resolve / 8/16-bit sub-word LSU packing / ray-tracing & mesh engines (W7/W8) / WSI (W9).
 - [ ] Complete shader/memory/sync → raster/ROP → VM/cache/matrix/RT/mesh/scheduling engines
   and configuration-safe throughput, using the full feature matrix in the plan.
 - [ ] Clear generic Venus/protocol stock-package blockers, virtio-pci/external-sync/WSI,
@@ -2198,6 +2205,351 @@ remain release requirements; intermediate raster gates do not narrow the product
     path running ≥1 instr ahead — a real FSM/pipeline restructure, not
     a local tweak; wave-interleave avoids same-wave forwarding but
     still needs the adjacent wave decoded first.
+    2026-11-21 TP3a-3 GROUNDWORK DONE (design only, no RTL): the
+    decode-pipe plan + hazard analysis the blocker demanded is written
+    in `.cache/apu-perf/tp3a3-brief.md`. Key verified facts that shape it:
+    the prog port (`prog_addr_o`/`prog_data_i`) is a single-word SRAM
+    stream that is IDLE through `W_EX`/`W_WB`/`W_NEXT` — that is the
+    lookahead slot; `rf_addr={wave_q,reg}` gives each wave a private
+    1024-reg slice so cross-wave operand reads have NO RAW hazard (the
+    only hazard is same-wave-consecutive, closed by a different-wave
+    gate or TP3a-4 forwarding); operand state (`va_q`/`ocst_q`/`ops_q`/
+    `oidx_q`) is single-buffered and is the real structural cost — a
+    `*_l` shadow set or 2-entry operand queue is required. Phased plan:
+    3a lookahead fetch FIFO (observational) → 3b shadow decode → 3c
+    port-1 operand prefetch → 3d cutover at W_NEXT → 3a-4 residual
+    same-wave RAW.  CRUX RESOLVED (same brief §4-3a): WHICH wave/instr
+    to prefetch — the next `t_sched` pick is a pure comb function of
+    wave_q/nwaves_q/wfin_q/wbar_q, all stable during N's execute, so it
+    is predictable one cycle early by replicating the round-robin scan;
+    same-wave → pc_q[wave_q]+wc_q, wave-interleave → pc_q[pick]; stale
+    predictions on terminator/barrier N are SAFE (3d validates pick/pc
+    at W_NEXT, discards on mismatch). No per-wave lookahead storage.
+    DESIGN NOW IMPLEMENTATION-READY (brief §6): operand shadow set
+    `*_l` ≈11Kb (va_l[6]+ocst_l[6]+ops_l+type/tag/idx) is negligible vs
+    16Mbit RF; at 3d cutover `*_l→*_q` in ONE reg-copy cycle so W_EX
+    reads `*_q` unchanged (no datapath fork). Lookahead = SEPARATE
+    always block + own state reg mirroring only the fetch/decode/
+    operand-read subset, fed by prog FIFO + RF port-1; row-cache hits
+    replicate rc restore. Remaining items are coding-time details
+    (idle-window state set, FIFO depth vs OPB=32, whether 3c RF prefetch
+    lands in first cutover). Honest ceiling: hides the
+    fetch+decode+operand-read
+    serial prefix (~15-20% of per-instr cost), NOT execute; W_IDLE 35%
+    stays TP6/TP7. Hazard checklist (WAR/WAW double-buffering, row-cache
+    replicate, multi-row-WB cutover point, fault flush, shared
+    type/regmap/const port audit of the ~4000-line W_EX) is enumerated.
+    2026-11-21 REFINEMENT (same brief §6): the "shared decode-table
+    ports" hazard is now quantified — shmod read ports are ~11 DEDICATED
+    1-cycle id/data pairs (prog/type/const/memb/rm/init/blk/phi/func/
+    parm/entry/mem), and `prog_addr_o=pa_w` is dedicated to the
+    instr+operand stream only (ty_w/rm_w/etc drive the OTHER ports).
+    KEY STAGING WIN: a row-cache-HIT restores ALL decode facts (nva/wreg/
+    types/per-operand vty/otag/oidx/oaux/oid) from rc_row with ZERO table
+    reads — so a lookahead limited to row-cache-hit instructions needs
+    only prog_* + rc read + RF port-1, NO ~11-port table arbitration.
+    That covers the hot {slot,pc} loop case; miss-path decode (the table
+    walk) becomes an optional later increment with 3d serial fallback.
+    Recommended first cutover = row-cache-hit lookahead only.
+    SAFE-WINDOW RULE RESOLVED (brief §6): prog_data_i is captured only
+    in W_F1/W_LD1, reachable only from addr-present states {W_F0,W_LD0,
+    W_LD1} — so lookahead may drive prog_addr_o=la_addr whenever
+    st_q∉{W_F0,W_LD0,W_LD1} and capture prog_data_i→FIFO one cycle
+    later; a pure 3-term st_q comparator, no next-state prediction.
+    Observational 3a is cycle-exact by construction (FIFO fills, decode
+    untouched). LOCAL VERIFY UNLOCKED: managed tools/verilator v5.008
+    builds tb_g6lc_apu_shwave in WSL; vec4arith_1 PASS maxulp=0
+    cycles=8982 — TP3a-3 RTL is now locally verifiable, no longer
+    remote-only.
+    2026-11-22 TP3a-3a LANDED + FULL-SUITE VERIFIED (observational
+    lookahead fetch FIFO, `corev_apu/apu/g6lc_apu_shwave.sv` ~l.2600-2622
+    decl, ~l.2692 prog_addr_o mux, ~l.9016-9056 always_ff+dbg).  la_ok =
+    st_q∉{W_F0,W_F1,W_LD0,W_LD1} — the conservative complement of the
+    live-capture set (W_F1 also excluded because la_base_q/la_idx_q are
+    mid-load there, so la_addr would be transient); prog_addr_o =
+    la_ok ? la_addr : pa_w borrows the idle instr port.  la_base_q latches
+    the same-wave successor pc_q[wave_q]+prog_data_i[31:16] at W_F1;
+    la_idx_q walks la_base+0..31; prog_data_i→8×32b FIFO one cycle later
+    via la_v_q (la_ok delayed); saturating la_fill_q + `+la_dbg` dump at
+    W_DONE under translate_off.  Decode untouched — FIFO is write-only,
+    becomes the 3b/3c/3d prefetch buffer.  VERIFIED on managed
+    tools/verilator v5.008 (PGO/unroll env): verilate+build clean, ZERO
+    warnings on new code; **FULL SUITE PASS cases=685 checks=112613
+    maxulp=1 cycles=4057091** (maxulp=1 only on math450 pre-existing FP
+    oracle tolerance; every int/ctrl/mem/atomic/agg/barrier vector
+    bit-exact max=0; cycle count grew vs the 548-case note only because
+    the corpus itself grew).  Cycle-exactness PROVEN BY CONSTRUCTION
+    (la_ok states have don't-care prog_data_i — only {W_F0,W_F1,W_LD0,
+    W_LD1} consume it, all excluded — and la_* regs feed nothing back
+    into the FSM).  +la_dbg confirms the port is genuinely borrowed:
+    fill=8057 words, la_idx walking the predicted-next region.  NOTE:
+    `+only` matches BASE names (vec4arith, not vec4arith_1); suffixed
+    names silently fall through to 3 unconditional tail cases.  TP3a-3a2
+    SAME DAY: deepened FIFO LA_DEPTH 8→64 (pow2 wrap) + LA_SPAN 5→6 and
+    added an observational parse — la_ncap_q counts pushes since last
+    W_F1 (first push = la_base+0 = instr word → la_wc_l/la_opc_l),
+    la_full_w = captured≥wc, plus coverage counters la_fc_q (complete-
+    instruction captures) + la_mxwc_q (deepest valid wc).  VALIDATED:
+    mxwc=9 proves a 9-word (instr+8 operand) instruction is captured
+    COMPLETE; fc in the thousands.  **FULL SUITE PASS cases=685
+    checks=112613 maxulp=1 cycles=4057091 — IDENTICAL cycle count to the
+    8-deep 3a run**, the strongest possible cycle-exactness proof that
+    the deeper FIFO + parse + counters have zero timing impact; every
+    int/ctrl/mem/atomic/agg/barrier vector bit-exact max=0.  This proves
+    the 3b fetch-side precondition — the lookahead delivers whole
+    multi-operand instructions.  Still observational/cycle-exact
+    (nothing consumes la_*).  **TP3a-3b FIRST SLICE LANDED + VERIFIED
+    (2026-11-22, same session):** row-cache-hit-only shadow decode —
+    *_l metadata set (nva/wreg/rkind/rcomps/rcols/relem/rsz/rlw/rty_v/
+    rty_id/ncomp + per-slot vty/otag/oidx/oaux/oid[3] + res_id/res_slot/
+    ridx/raux), the rc-port time-multiplex (la_rc_ok = NOT{W_F0,W_F1,
+    W_RW1} — W_LD0/W_LD1 INCLUDED since rc is idle while prog streams;
+    la_rc_req/la_rc_idx mux rc_idx only in that disjoint window), a 4-state
+    la_d FSM (W_F1→REQ→CAP→EVAL→IDLE), ASYMMETRIC capture (rc_vld_w is
+    comb rcv_q[rc_idx] so latched during REQ; rc_row is registered SRAM
+    out so latched during CAP), and *_l population mirroring the W_F1
+    hit-restore exactly.  Operand VALUES (va/ocst/ops) remain 3c; miss
+    decode remains serial (la_l_vld=0 fallback).  **FULL SUITE PASS
+    cases=685 cycles=4057091 — STILL IDENTICAL**, cycle-exact by
+    construction (la_rc_req/rc_idx only touch don't-care live states).
+    +la_dbg VALIDATES: hc (shadow hits) and agree (la_base==live pc &&
+    *_l valid) — vec4arith/agg_arr/atomic_cas agree==hc (perfect on
+    sequential), **barrier_prefix hc=2945 agree=688 → same-wave la_base
+    only predicts the real next-pick ~23% under wave sync — pick_nq
+    wave-interleave is now PROVEN necessary, not optional.**  **pick_nq
+    LANDED + VERIFIED (2026-11-22):** `f_pick_nq` combinationally
+    replicates `t_sched`'s round-robin pick (pre-N wfin/wbar);
+    `la_base_q` at W_F1 = `pick_nq==wave_q ? pc_q[wave_q]+wc_q :
+    pc_q[pick_nq]`.  slot_q is workgroup-shared so rc tag/idx follow
+    la_base unchanged.  FULL SUITE PASS cycles=4057091 STILL
+    IDENTICAL.  **+la_dbg agreement barrier_prefix 23%→99.4%**
+    (agree 688→3429 of hc 3450); sequential vectors stay
+    agree==hc=100%.  The lookahead now reliably names the actual
+    next instruction — prerequisite for 3c operand prefetch + 3d
+    cutover.  Residual ~0.6% = terminator/barrier-N stale picks.
+    **ops_l LANDED + VERIFIED (2026-11-22):** `logic [31:0] ops_l[OPB]`
+    shadows ops_q operand words — push la_ncap_q==k+1 (=prog word
+    la_base+k+1) → ops_l[k], gated `1<=la_ncap_q<la_wc_l` so
+    over-fetched neighbor instrs are excluded.  FULL SUITE PASS
+    cycles=4057091 STILL IDENTICAL (cycle-exact).  +la_dbg dumps
+    ops0/ops1 (non-zero = capture works; wc=1 tail leaves prior
+    operand words, stale-by-design).  ops_l correctness implied by
+    agree + shared prog_data_i source (same guarantee as ops_q).
+    **va_l/3c RF port-1 operand prefetch LANDED + VERIFIED
+    (2026-11-22):** port-1 plumbing wired through the NumPorts(2)
+    bank macros (q_req/q_addr[1], rf1_rda gather, rf1_rdt_q tile
+    tracker mirroring port-0); comb rf1_req/rf1_addr issue operand
+    la_rf_k's RF row {la_wave,oidx_l[k]} while la_l_vld, skipping
+    APU_SH_RT_CONST; registered va_l[la_rf_p]<=rf1_rdata capture
+    (1-cycle, mirrors live rc_is_v/rc_cap_v).  la_wave=pick_nq's wave
+    (diff-wave) else wave_q.  va_l[3]+va_l_v[3]+la_vc_q added.
+    FULL SUITE PASS cycles=4057091 STILL IDENTICAL (port-1 reads are
+    observational, port-0 untouched).  +la_dbg vc= operand captures:
+    vec4arith 801, agg_arr 468, barrier_prefix 3461, atomic_cas 519 —
+    the lookahead now yields decode metadata + operand words + operand
+    VALUES for N+1.  **ocst_l const-operand prefetch LANDED + VERIFIED
+    (2026-11-22):** const operands can't use RF port-1 — they need the
+    shared shmod const port (const_id_o→const_data_i, ~7 live capture
+    states, no idle window).  Three consecutive const-free states
+    {W_NEXT,W_F0,W_F1} each give one safe const_id_o injection:
+    const_data_i returns next cycle into W_F0/W_F1/W_LD0/W_PRE/W_TY0A/
+    W_EOW — none capture const_data_i — so live's res_id_q const read
+    (don't-care there) is undisturbed.  la_cst_k scans operand slots
+    0..2 across the windows (one/cycle; register slots consume a window
+    without issuing); la_cst_p/la_cst_pv pipeline the 1-cycle const
+    response into ocst_l[la_cst_p]<=const_data_i (capture NOT gated by
+    la_l_vld — it drops at W_F1 between issue and capture).  const_id_o
+    muxes oid_l[la_cst_ik] highest-priority, mutually exclusive with
+    live drivers by state.  ocst_l[3]+ocst_l_v[3]+la_cc_q added.
+    FULL SUITE PASS cycles=4057091 STILL IDENTICAL (const_id_o borrow
+    is observational — const_data_i lands only in don't-care states).
+    +la_dbg cc=/oc= const captures: atomic_cas cc=28 oc01=1, vec4arith
+    cc=84, barrier_prefix cc=308, agg_arr cc=0 (no const operands —
+    consistent).  The lookahead now yields COMPLETE fast-path operand
+    state for hit instrs: *_l decode + ops_l words + va_l register
+    values + ocst_l const values.  **Hit-rate measured (la_dc_q
+    total-EVAL counter):** hc/dc = vec4arith 66%, agg_arr 66%,
+    atomic_cas 46%, barrier_prefix 62% — ~half of predicted instrs are
+    row-cache hits, so a hit-only cutover covers ~half without needing
+    miss-decode.  **3d cutover constraint found:** la_l_vld clears at
+    W_F1 and the *_l/va_l/ocst_l/ops_l shadow persists only until the
+    NEXT la_d EVAL (~3cy later) overwrites it for N+2 — tight lifetime
+    vs the W_LD operand-stream loop; plus RAW (va_l reads pre-N-
+    writeback; gate same-wave or forward) and va_q/ocst_q[6] vs
+    va_l/ocst_l[3] width.  Derived-index regs are execute-time, NOT a
+    hit-path gap.  **ocst_l execute-tail windows LANDED + VERIFIED
+    (2026-11-22):** added W_WB/W_WB2 to la_cst_win (with W_NEXT/W_F0/
+    W_F1) — fixed const-free successors (W_WB2/W_NEXT/W_F0/W_EOW),
+    const_id_o=res_id_q don't-care, const_data_i lands in non-capture
+    states.  Now const operands prefetch during N's EXECUTE TAIL
+    (la_l_vld already=N+1), ready BEFORE N+1's front-end — resolves the
+    const-vs-cutover tension (was borrowing the very states cutover
+    skips).  la_cst_k caps at 3 slots, resets on la_l_vld drop →
+    per-instruction alignment preserved; N's own front-end windows
+    prefetch N redundantly (harmless, ocst_l overwritten by N+1's
+    later tail writes).  FULL SUITE cycles=4057091 STILL IDENTICAL;
+    +la_dbg cc= captures continue (ccv=010).  ALL operand types now
+    prefetch during execute → cutover-ready for hit instrs.  NEXT:
+    TP3a-3b remainder —
+    row-cache-MISS shadow decode (the ~11 table-port arbiters +
+    W_TY*/W_RM*/W_OT*/W_CV*/W_RV* walk replication) + operand streaming
+    into la_fifo→ops_l + derived index regs ph_row_q/mi_q/ccr_q/cmj_q/
+    lrc_q/ag_row_q still to shadow; then W_NEXT cutover (3d);
+    multi-session.  **TP3a-3d cutover LANDED + VERIFIED (2026-11-23):**
+    `la_fire` at W_F0 commits the N+1 shadow (`*_l→*_q`, `ops_l→ops_q`,
+    `va_l→va_q` REG / `ocst_l→ocst_q`+splat CONST) and skips
+    W_F1/W_LD0/W_LD1 → W_PRE, re-arming lookahead for N+2.  Safety gates:
+    `LaCutEn` param (def 1, synthesizable, -G-overridable) && la_cut_ok
+    (hit+ops-ready+la_base_q==pc_q) && la_full_w && diff-wave
+    (`wave_q!=la_execw_q`, kills same-wave RAW) && `la_waveq_q==wave_q`
+    (frozen read-wave==actual; rf1_addr uses frozen la_waveq_q) && pc+wc
+    bound.  Two bring-up bugs fixed: (1) `ocst_l_v[]` never cleared per
+    window → stale const-valid committed prev-instr ocst_l[k]
+    (barrier_prefix_opt_3 FAILURES=352) → now cleared on !la_l_vld;
+    (2) wave identity via frozen la_waveq_q + la_execw_q RAW gate.
+    **FULL SUITE PASS cases=685 checks=112613 cycles=4003146 vs
+    baseline 4057091 = -53945 cycles (~1.33%), fw=10406 fires**
+    (~5.2cy/fire).  Composes with RowCacheEntries=0 (no hits→never
+    fires).  NEXT: TP3a-3b remainder —
+    row-cache-MISS shadow decode (the ~11 table-port arbiters +
+    W_TY*/W_RM*/W_OT*/W_CV*/W_RV* walk replication) + operand streaming
+    into la_fifo→ops_l + derived index regs ph_row_q/mi_q/ccr_q/cmj_q/
+    lrc_q/ag_row_q still to shadow (would raise fire fraction past the
+    ~50-65% hit rate); same-wave RAW forwarding to unlock the
+    diff-wave-restricted fires; multi-session.  **Fire-rate ceiling
+    MEASURED (la_blk_* counters, suite cycles=4003146 unchanged):**
+    of la_cut_ok=52468 → fw=10406 (~20%); blockers la_full_w=22134
+    (~42%, 1w/cyc fetch bounded by N's execute len — needs deeper/
+    earlier prefetch or wider operand port), same-wave=19928 (~38%,
+    needs derived-index operand-overlap), wave-match=0, pc=0 (gates
+    correctly tuned, not the limiter).  Post-writeback va_l-read and
+    all-const-subset shortcuts RULED OUT (tp3a3-brief §10).  Next real
+    increment = derived-index shadow — shared prerequisite for
+    same-wave overlap AND miss-decode operands-3-5.
+    **Same-wave RAW UNLOCKED (2026-11-23, tp3a3-brief §11):** §10's
+    "needs derived indices both sides" was too pessimistic — capture
+    the ACTUAL `rf_addr[RI-1:0]` write dest on each `rf_req&&rf_we`
+    commit (la_wd0/la_wd1/la_wn_q, distinct-dedup, >2→block) instead
+    of computing `wreg_q+derived`; read side needs no derived index
+    (hit-path operand addr IS base `oidx_l[k]`, proven by rf1_addr).
+    `la_sw_safe`=exact no-overlap over the 3 operand slots; la_fire
+    gate relaxed to `(diff-wave)||la_sw_safe`.  Reset la_wn_q at W_F1
+    AND cutover re-arm.  **FULL SUITE PASS cases=685 checks=112613
+    cycles=3957567 vs 4003146 = -45579 more; vs 4057091 = -99524
+    (~2.45%)** — ~8.7k extra same-wave fires ≈doubles cutover count,
+    bit-exact.  barrier_prefix +la_dbg: LA_BLK full=1705 same=27 —
+    same-wave ~98%-resolved; **la_full_w is the SOLE remaining
+    blocker** (1w/cyc prog_data_i borrowed only in la_ok; wc≤6 vs
+    short-execute windows).  Next = wider prog port (i_prog 16-tile
+    NumPorts(1)→per-port tile decode, ~3 modules) OR deeper
+    multi-instr prefetch (FIFO boundary tagging) — both architectural,
+    tp3a3-brief §12.  **2-WORD PROG PORT LANDED + VERIFIED (2026-11-23,
+    tp3a3-brief §14):** chose the wider-port lever over deep-prefetch.
+    `g6lc_apu_shmod` `i_prog` tile bank `NumPorts(1)→(2)` — port0
+    bit-identical, port1 = free-running read-only second port on
+    `pr_addr+1` (full `PW` add carries into `pr_addr[15:12]` tile bits →
+    4095/4096 boundary resolves free) with its OWN registered tile sel
+    `pr2_rdt_q` (port1 can sit in a different tile than port0); packed
+    `{port1,port0}` req/we per the proven RF `NumPorts(2)` pattern,
+    `we2=0`.  `prog_data2_o`→shcore `prog_data2` wire→shwave
+    `prog_data2_i` (internal, no external shcore port).  shwave captures
+    BOTH `prog_data_i`(word@la_addr)+`prog_data2_i`(word@la_addr+1) per
+    `la_ok` cycle → `la_idx_q`+=2 (64-window guarded), `la_ncap_q`
+    saturates 2/cyc; ops_l interleave wordA→`ops_l[ncap-1]`,
+    wordB→`ops_l[ncap]` both `<OPB`-bounded; ordinal0 still parses
+    wc/opc.  Live fetch path UNCHANGED.  **FULL SUITE PASS cases=685
+    checks=112613 ulp1=52 ulp2=0 maxulp=1 ouw=17544 oum=0
+    cycles=3923453** vs 3957567 = -34114 more; vs 4057091 = -133638
+    (~3.3%).  barrier_prefix +la_dbg: LA_BLK full≈same (~1.5:1, was
+    ~63:1) → la_full_w no longer dominant.  Controls safe:
+    LaCutEn=0→la_fire=0; port1 read-only can't corrupt i_prog.  Cost:
+    +1 SRAM read/cyc (power note §0.1.7).  NEXT = TP3a-3b remainder:
+    row-cache-MISS shadow decode (~11 table-port arbiters + W_TY*/W_RM*/
+    W_OT*/W_CV*/W_RV* walk) + operand streaming into la_fifo→ops_l +
+    derived-index regs ph_row_q/mi_q/ccr_q/cmj_q/lrc_q/ag_row_q +
+    operands 3-5 — raises fire fraction past the ~50-65% row-cache-hit
+    rate; multi-session.  **TP3a-3f FRONT-END PREFETCH LANDED + VERIFIED
+    (2026-11-23, tp3a3-brief §15):** `la_ok` excluded W_LD0/W_LD1 — the
+    per-operand load loop (~wc-1 cycles, la_ok=0) — a large untapped
+    window between la_base_q arming (W_F1) and execute.  shwave adds
+    `prog_addr2_o = la_addr + la_ok`: during la_ok port1 reads la_addr+1
+    (unchanged pair word B), during W_LD0/W_LD1 (la_ok=0) port1 reads
+    la_addr itself → 1 word/cyc prefetch of N+1 while port0 streams N's
+    operands.  `la_fe_ok=(W_LD0||W_LD1)`, `la_fe_v_q<=la_fe_ok`;
+    `la_idx_q` unified next-word offset (+2 la_ok / +1 la_fe_ok,
+    saturating <LA_SPAN); new `la_fe_v_q` capture pushes prog_data2_i as
+    ordinal la_ncap_q.  shcore wires internal `prog_addr2`; shmod adds
+    `prog_addr2_i` input, port1 `pr2_addr={rd_slot_i,
+    prog_addr2_i[LSW-1:0]}` (was `pr_addr+1`), still read-only+`pr_req`/
+    `!pr_we`-gated, own `pr2_rdt_q` tile decode.  tb_shmod ties
+    `.prog_addr2_i('0)`.  **FULL SUITE PASS cases=685 checks=112613
+    ulp1=52 ulp2=0 maxulp=1 ouw=17544 oum=0 cycles=3920476** (-2977 vs
+    3923453).  Aggregate LA_BLK co=50775 fw=24758 (48.8%) full=18575
+    same=7429 wave=13 pc=0: +470 fires, la_full_w -403 (~2%); mxwc 6->7
+    + ncap~14 on barrier_prefix prove deeper operand streams captured.
+    la_full_w STILL ~71% of non-firing — remaining fails are wc=1 /
+    short-execute where even W_LD+execute can't deliver wc at the port
+    ceiling; W_F0/W_F1 can't prefetch N+1 (la_base_q only becomes N+1 at
+    W_F1), so the window is architecturally fixed → single-ahead prefetch
+    near bandwidth floor; further needs multi-instr lookahead or >2 prog
+    ports (both large).  NEXT = TP3a-3b remainder: row-cache-MISS shadow
+    decode + operands 3-5 + derived-index regs.  **TP3a-3g LIVE-ONLY
+    ROW-CACHE WIDENING LANDED + VERIFIED (2026-11-23, tp3a3-brief §18):**
+    §16 finding — f_rowok capped nva<=3 and rc_row_t operand arrays were
+    [3] while the live datapath decodes 6 slots, so nva=4..6 texture/
+    fetch/gather ops were ALWAYS row misses running the full decode walk.
+    Implemented the GATED variant: rc_row_t nva->[2:0] + operand fields
+    ->6 slots; oaux_q/oid_q [3]->[6]; f_rowok nv<=3'd6 + m-scan ops 0-5;
+    live W_F1 restore k<3->k<6; oaux_q/oid_q write gate <3'd3-><3'd6;
+    rc_ik/rc_jk saturation <6'd3-><6'd6; row_w/rc_kv/rc_l_* ->6 operands.
+    Lookahead KEPT 3-wide (va_l/ocst_l/vty_l/otag_l/oidx_l/oaux_l/oid_l
+    stay [3], prefetch/commit loops unchanged) and la_cut_ok gained
+    `nva_l <= 3'd3` so high-nva hits never cutover until *_l widens.
+    **FULL SUITE PASS cases=685 checks=112613 ulp1=52 ulp2=0 maxulp=1
+    ouw=17544 oum=0 cycles=3906674** (-13,802 vs 3920476; cumulative vs
+    pre-cutover 4057091 -> -150,417 ~3.71%).  Bit-identical correctness;
+    LA_BLK co=50763 fw=24758 (48.8%) full=18575 same=7417 — lookahead
+    stats ~unchanged (still gated nva<=3), so the entire -13,802 is
+    live-path decode-walk savings on now-cached high-nva ops.  NOTE:
+    run used cached apu-verilator-pgo-v1 (source.id stale vs tools/
+    verilator 350e57f+PGO-tuning-uncommitted; rebuild pending — RTL
+    correctness is verilator-version independent).  NEXT = either FULL
+    lookahead widening (extend *_l/va_l/ocst_l to [6] + prefetch scans +
+    commit loops to 6 so high-nva also cutover) or miss-decode shadow.
+    **TP3a-3h/3i FRONT-END FLOOR — RESOLVED 2026-11-23
+    (tp3a3-brief §19-22c):** the two NEXT options above were both
+    evaluated and CLOSED.  (a) FULL lookahead widening is low-EV: the
+    `same` LA_BLK sub-cause counters (la_blk_swn/la_blk_sov, diagnostic-
+    only, cycle-exact — suite still cycles=3906674) prove `same`=7417 is
+    99.2% genuine same-wave RAW (sov=7354) vs only swn=63 (>2 write
+    dests), so widening *_l to [6] buys nothing — operand forwarding is
+    the only `same` lever (~15-35k cy ceiling, needs post-WB RF
+    re-read/result-forwarding in the cutover path; deferred, poor
+    EV/complexity).  (b) miss-decode shadow is the large option BUT the
+    decode-walk (~300k cy) is BENCH-INFLATED: all 685 cases do
+    wr→commit→dispatch, and do_commit fires rc_inval_i (shcore.sv:616)
+    clearing the whole row cache each case → first-wave compulsory
+    misses dominate; production reuses modules across draws so the hit
+    rate (and amortised decode cost) is far higher than this suite
+    shows.  RowCacheEntries=4096 measured cycles=3904490 (-2184 ~0.06%)
+    for 4x SRAM → misses are compulsory-per-case, NOT capacity/conflict
+    → cache sizing closed.  Operand stream W_LD0/W_LD1 (~350k, runs
+    EVERY execution hit-or-miss) is the real per-exec cost but
+    port/refactor-bound: prog port1 already streams N+1 lookahead during
+    W_LD, RF is NumPorts(2) with port1 on prefetch, and ops_q[]→row-field
+    reconstruction is a pervasive refactor — no bounded win.  W_IDLE
+    (~40%) re-confirmed testbench dispatch-feed idle (st_q enters W_IDLE
+    only from W_EOW; bench serialises dispatch→wait-done→commit), NOT an
+    engine lever.  NET: shwave front-end lookahead+row-cache+operand work
+    is at its architectural floor at -150,417 cy (~3.71% suite, ~6%
+    busy), bit-exact throughout.  tools/verilator PGO rebuild COMPLETE:
+    rev v5.008-37-g350e57f24(mod) installed to apu-verilator-pgo-v1,
+    policy CHECK PASS, suite PASS cycles=3906674; shcore (11)+shmod
+    (112, 2M checks) benches PASS.  NEXT graphics levers are all
+    multi-session architectural: rasteriser interp residual → pipelined
+    fpnew issue/banked RF (FP0f already pairs 2 FMA lanes; residual is
+    serial issue + per-loc write-chain), FP10-A merge (variable blend
+    chain serial), FP9 texture unit.
     2026-11-15 SCOPING (tp3a-brief §5a): per-state HIST attributes the
     operand stream W_LD0+W_LD1 ≈449k cy (~12%) as the largest per-instr
     cost after W_EX — but it is FETCH-WIDTH-bound (one prog_data_i word/
@@ -2421,6 +2773,26 @@ remain release requirements; intermediate raster gates do not narrow the product
       depth/blend/MRT/stencil/LOP/instancing/discard, zero failures);
       yosys Enable=0/1 clean (0 problems, no latches).  Detail: fp0-brief
       "FP0f LANDED+VERIFIED".
+    - FP10-A recon + bounded-first-increment spec (2026-11-22, DESIGN ONLY —
+      not implemented): rast-suite classes now interp=1,128,540 /
+      merge=310,996 / clear=145,920 / depth=51,882.  merge is the #2 class;
+      its S_BL_* chain is a serial per-component blend (factor SUB ->
+      src*sf -> dst*df -> final op) on the single muxed fp port
+      (fp_kind_q->i_fma/i_dq/i_cv).  KEY ENABLER: i_fma2 is dedicated to
+      S_F_V0 interp and sits IDLE for the whole merge phase — a free second
+      fpnew_fma lane the merge path can borrow (fp2_* port + fma2_res
+      capture path already exist; verified no other site sets fp2_iss_q).
+      Bounded slice: dual-issue src*sf (i_fma) + dst*df (i_fma2) inside one
+      blend component — sf_q/df_q both stable at the factor-resolve point
+      for every blend-factor path (non-ONE_MINUS uses f_fbase directly,
+      ONE_MINUS uses fp_res_q), so the two products are independent;
+      S_BL_M2 then captures both and issues the final op, dropping one
+      issue state/comp.  Est. merge ~311k -> ~250-280k.  Main risk: df_q
+      readiness across ONE_MINUS/SATURATE/CONSTANT/MIN/MAX paths + the
+      fma2_res merge-capture path must not disturb the V0 capture.
+      Full 2-component-parallel blend (banked sf/df/bm1/bm2) and the
+      interp conv_q double-buffer are the deferred multi-session steps.
+      Detail: .cache/apu-perf/fp10a-brief.md.
   - [ ] Gate G-F1 (with G-T1): graphics-session cycles ≤ 25% of the frame baseline,
     pixel-identical; unchanged-state draws re-resolve nothing; the 50,784-index draw
     finishes inside Mesa's fence patience. Threshold provisional until FP0.
@@ -26621,3 +26993,95 @@ Receipt: `build-platform/workspace/build/storamic-review-30/FINAL-SV-30.md`.
   unchanged on purpose so the SMT boot ladders are not disturbed; the owner of
   those ladders should decide whether to drop the Storamic term from
   `LuSmtHold`. hyp8 tree not ported.
+
+### L3 server-prefetcher malformed-probe fix — leaf-verified (uncommitted)
+
+- [x] `corev_apu/l3_cache/g6lc_server_prefetcher.sv` PF-AR attribute fix
+  verified on the managed `tools/verilator` v5.008 PGO build (WSL), covering
+  the full `verif/regress/remote/run_pf_review.py` contract:
+  - Verilate+build clean (`--cc --main --timing --assert --threads 1
+    -Werror-LATCH -Werror-UNOPTFLAT -DL2TB_STATIC`); only pre-existing
+    `axi_pkg` width warnings (non-fatal).
+  - All 4 ownership scenarios `RTL_REVIEW_PASS` + `PF_METRICS`: 0 prefetch
+    injects/absorbs with upstream undisturbed; 1 reserved-id demand burst not
+    consumed by the absorb path; 2 non-aliasing demand not held off while a
+    prefetch is outstanding; 3 no prefetch injected while upstream owns the
+    reserved id.
+  - All 4 `+oracle_negative` controls correctly `$fatal PF_DATA` (got vs want
+    differ by the injected XOR bit) — the scoreboard is not vacuous.
+  - Yosys 0.68 `read_slang` + `synth -noabc` on `g6lc_pf_fixture` (which
+    instantiates `g6lc_server_prefetcher` directly): 0 problems, 0 inferred
+    latches, 0 SCCs, 7714 cells.
+  - Static: every `ar_chan_t` field is now driven explicitly (id/addr/len/
+    size/burst/lock/cache/prot/qos/region/user); `region`/`user`/`qos`/`prot`/
+    `cache` are `'0` on every demand path so zeroing them is safe, and `cache`
+    is immaterial because the probe's R beats are absorbed and discarded (it
+    is a DRAM row-warm probe, not a cache fill). `size=$clog2(DW/8)=3` on a
+    `LINE_BYTES`-aligned `pf_addr` is safe for all real configs
+    (`AXI_DATA_WIDTH=64`, `LINE_BYTES=64`).
+- [ ] End-to-end proof still needs the remote `mc_cas_lock_handoff` re-run:
+  the leaf memory model is attribute-lenient (records `{addr,id,len}` and
+  responds regardless of `size`/`burst`/`lock`), so it verifies response
+  ownership (no regression) but cannot itself reproduce the malformed-AR
+  wedge. The wedge mechanism — a demand AR's stale `size`/`burst`/`lock`
+  inherited into the `len=0` probe → memory never returns R → `pf_ot_q`
+  stuck → `up_pfid_alias` starves every reserved-id (`'1`) fill — is
+  confirmed by inspection and the in-code comment; admission awaits the
+  cluster run.
+
+### hyp8-mc: `mc_cas_lock_handoff` wedge and OpenWrt boot-hart starvation — root-caused (uncommitted)
+
+- [x] `mc_cas_lock_handoff` / `zacas_amocas_d` wedge is **not** the L3 server
+  prefetcher (the entry above): `ServerPrefetchEn` is `bit'(0)` in
+  `g6lc64_hyp8_mc_config_pkg.sv`, so `i_server_pf` is a passthrough in the
+  failing model, and the xbar probe shows the demux forwarding the AR
+  (`full=0 selocc=0 av=1 ar=0`). Root cause: `corev_apu/src/g6lc_axi_lrsc.sv`
+  counted outstanding reads on AR handshakes only, while the AMO adapter below
+  it answers each R-producing atomic with an injected R; eight atomics wrap the
+  counter onto `MaxOut` and every DRAM AR is refused. Fixed in both trees;
+  leaf `verif/tb/uncore/run-axi-lrsc-atop.sh` passes (positive, oracle negative,
+  `G6LC_MUT_LRSC_ATOP_R_UNCOUNTED` caught). The prefetcher fix stays valid as
+  hygiene for `ServerPrefetchEn=1`; it has no cluster run to wait for here.
+- [x] mc `fw_payload` never booted on the zicclsmfix model: boot hart frozen
+  at 6333 retired from cycle ~32k (tracedb, both witnesses, to 2.05M cycles).
+  Root cause: `core/smt/g6lc_thread_select.sv` I4bg `li t0` deferral
+  suppressed the SMT_RR quantum switch at every fetch of OpenSBI's
+  `_wait_for_boot_hart` loop. Fixed in both trees (deferral granted once per
+  resident); leaf `verif/regress/remote/hyp8/run_tsel_t0_leaf.sh` passes
+  (positive, oracle negative, `G6LC_MUT_SMT_T0_DEFER_UNBOUNDED` caught).
+- [ ] Cluster validation on `hyp8-lrscfix-aggregate-t1` /
+  `hyp8-smtt0fix-aggregate-t1` (CAS/AMO/LRSC, SMT, the nine `killed(wall)`
+  coverage tests, 600k-cycle boot probe) — `fixval-chain.sh`, results in tracedb.
+- [ ] SMT_RR quantum is counted in fetch fires: a div spin loop holds the core
+  ~195k cycles per quantum against ~32k for the boot hart. Needs a
+  cycle-bounded quantum (config-gated) before a long mc boot is worth running.
+- [ ] `/opt/testharness/tracedb/autoingest.sh` guard bug (`ls a b c || continue`)
+  — it has never ingested a run; fix and redeploy.
+- [ ] Verilator sentinel/native profile (§56 performance guide): measure the deferred
+  deleter on a matched MC ELF before any harness speedup claim; verify cycle 4649
+  and byte-identical RVFI artifacts. Leaf qualification is not MC qualification.
+- [ ] Follow §57: profile the exact tiled MC LSQ/issue payloads, then qualify
+  wrapped age columns against that baseline; do not promote from leaf ratios.
+- [x] §59: measured LSQ candidate-mask occupancy on the tiled MC build and
+  qualified the consumer-only empty-mask guard on its eight reviewed sites.
+- [x] §60: timed original, tiled and guarded MC models on the complete
+  64-iteration four-writer test (nine trace-equivalent runs); retain tiled
+  as the baseline, not the consumer-only guard.
+- [x] §61: prove private transpose ownership from the same input port before
+  scheduling; verify removal in the full Hyp8 MC generated model.
+- [x] Native-built both fresh §61 schedules and qualified the 64-iteration MC
+  writer. Fusion regressed median paired cycles/s by 10.07%; keep it opt-in.
+- [x] §63: measured fused task 23 wait: ~70% before task 4 starts, mostly
+  overlapped by task 16/17 bodies. Keep the dependency and fusion opt-in.
+- [ ] On the faster unfused build, isolate common `rob_d` next-state logic
+  in task 25's sampled callees before attempting another whole-model rewrite.
+- [ ] Verilator 5.020 (local PATH) appears to miscompile `g6lc_l2_top` back-inval
+  match decode (`tag_match_index/tag` follow `self_inval_addr` while
+  `l2_back_inval_valid_i`=1; TB recompute of the same assign disagrees with the
+  net, optimisation-flag sensitive). The same RTL and bench pass under 5.008. No
+  standalone reproducer yet. Reduce it, then decide whether run-l2-tb.sh and the
+  other leaf runners that take the PATH verilator must pin 5.008.
+  Evidence: verif/tb/l2/run-l2l3-stack.sh.
+- [ ] Relaunch deferred remote runs: hyp8-casack-aggregate-t1 (AMOCAS.D miss-ack
+  mask) + fixval mc-casack-*; boot probe smtt0fix to >= 320k cycles (t0 fix is
+  only discriminated past ~226k); mc_l3_stride_scan for system-level l3_hit.

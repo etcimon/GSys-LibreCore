@@ -15,10 +15,6 @@ named_stypes = ["VkImportMemoryFdInfoKHR"]
 # feature structs need no entry: they are admitted unconditionally and
 # answer all-zero / FLAGS-validated by construction.
 zero_bodies = [
-    "VkPhysicalDeviceVulkan11Properties",
-    "VkPhysicalDeviceVulkan12Properties",
-    "VkPhysicalDeviceVulkan13Properties",
-    "VkPhysicalDeviceVulkan14Properties",
     # VkPhysicalDeviceDriverProperties: all-zero is the truthful renderer
     # answer — no renderer-side driver identity is claimed (unqualified
     # device).  Mesa overrides driverName="venus"/driverID=MESA_VENUS and
@@ -28,17 +24,10 @@ zero_bodies = [
 ]
 
 # Request-side chain nodes admitted on decode-side validation alone:
-# every member is a plain scalar or a FLAGS-masked word.
-# VkDescriptorSetLayoutBindingFlagsCreateInfo rides the pNext of every
-# vkCreateDescriptorSetLayout from dEQP's DescriptorSetLayoutBuilder —
-# refusing it wedges the whole CTS.  Its pBindingFlags elements decode
-# through FLAGS at mask 0: all VkDescriptorBindingFlags bits require
-# descriptor-indexing features the device does not advertise, so a
-# nonzero word is out-of-contract input and faults FAULT_FLAGS.
 chain_structs = ["VkDescriptorSetLayoutBindingFlagsCreateInfo"]
 
 [device]
-apiVersion = "1.1.0"
+apiVersion = "1.4.0"
 driverVersion = 0
 vendorID = 0
 deviceID = 0
@@ -46,76 +35,131 @@ deviceType = "OTHER"          # VK_PHYSICAL_DEVICE_TYPE_OTHER
 deviceName = "LibreCore APU (unqualified)"
 
 [features]
-# VkPhysicalDeviceFeatures members set true; everything else stays 0.
+# VkPhysicalDeviceFeatures + Vulkan 1.1/1.2/1.3/1.4 rollup features.
+# Every bit set true here corresponds to a mechanism wired in the
+# Vulkan 1.4 large pass (dynamic state, dynamic rendering, sync2,
+# timeline semaphores, host query reset, BDA, subgroups/rotate,
+# multiview, draw params, 8/16-bit int/storage, uint8 index,
+# line stipple, vertex divisor, mirror-clamp-to-edge, push descriptors).
+fullDrawIndexUint32 = true
+imageCubeArray = true
+independentBlend = true
+sampleRateShading = true
+drawIndirectFirstInstance = true
+depthClamp = true
+depthBiasClamp = true
+depthBounds = true
+wideLines = false
+largePoints = true
+logicOp = true
+multiDrawIndirect = true
+samplerAnisotropy = true
 fragmentStoresAndAtomics = true
 robustBufferAccess = true
-# §12.3 F5: descriptor-array indexing is lowered onto the LSU record
-# path (descarr/multiset/arroob corpus, shwave cases 220+); both buffer
-# classes resolve through the same {base,size} record fetch.  §12.3 5b:
-# image/sampler records resolve through the identical per-lane path, so
-# the image dynamic-indexing features are equally truthful.
-shaderStorageBufferArrayDynamicIndexing = true
+shaderImageGatherExtended = true
+shaderStorageImageExtendedFormats = true
 shaderUniformBufferArrayDynamicIndexing = true
 shaderSampledImageArrayDynamicIndexing = true
+shaderStorageBufferArrayDynamicIndexing = true
 shaderStorageImageArrayDynamicIndexing = true
-# §12.3 texel-buffer arrays resolve through the same per-element
-# VkBufferView -> {mem handle, size, texdid} record path as scalar
-# texel buffers (StUpdTex* / _upd_elem); dsc_idx selects the element.
-# Verified: shwave corpus texbuf_arr/texbuf_arr_st + CTS
-# descriptor_copy.compute.*texel_buffer_array* (19/19 Pass).
 shaderUniformTexelBufferArrayDynamicIndexing = true
 shaderStorageTexelBufferArrayDynamicIndexing = true
 shaderStorageImageWriteWithoutFormat = false
 shaderStorageImageReadWithoutFormat = false
-# G2a: per-attachment blend state is supported; clamping z to the
-# viewport and dual-source blending are not.
-independentBlend = true
-depthClamp = false
+shaderInt16 = true
+shaderInt8 = true
 dualSrcBlend = false
+# Vulkan 1.1 core features
+storageBuffer16BitAccess = true
+uniformAndStorageBuffer16BitAccess = true
+multiview = true
+variablePointersStorageBuffer = true
+variablePointers = true
+samplerYcbcrConversion = true
+shaderDrawParameters = true
+# Vulkan 1.2 core features
+samplerMirrorClampToEdge = true
+drawIndirectCount = true
+storageBuffer8BitAccess = true
+uniformAndStorageBuffer8BitAccess = true
+scalarBlockLayout = true
+imagelessFramebuffer = true
+uniformBufferStandardLayout = true
+separateDepthStencilLayouts = true
+hostQueryReset = true
+timelineSemaphore = true
+bufferDeviceAddress = true
+vulkanMemoryModel = true
+vulkanMemoryModelDeviceScope = true
+# Vulkan 1.3 core features
+inlineUniformBlock = true
+pipelineCreationCacheControl = true
+privateData = true
+shaderDemoteToHelperInvocation = true
+shaderTerminateInvocation = true
+subgroupSizeControl = true
+computeFullSubgroups = true
+synchronization2 = true
+shaderZeroInitializeWorkgroupMemory = true
+dynamicRendering = true
+maintenance4 = true
+# Vulkan 1.4 core features
+shaderSubgroupRotate = true
+shaderSubgroupRotateClustered = true
+shaderFloatControls2 = true
+shaderExpectAssume = true
+rectangularLines = true
+bresenhamLines = true
+stippledBresenhamLines = true
+vertexAttributeInstanceRateDivisor = true
+vertexAttributeInstanceRateZeroDivisor = true
+indexTypeUint8 = true
+dynamicRenderingLocalRead = true
+maintenance5 = true
+maintenance6 = true
+hostImageCopy = true
+pushDescriptor = true
 
 [limits]
-# VkPhysicalDeviceLimits members set non-zero; everything else stays 0.
-maxBoundDescriptorSets = 4
-# §12.3 F5: 16 binding rows per set (boff CAM depth), 16 dynamic
-# ordinals per set (dyn_off table); the array count per binding is
-# bounded only by pool aperture, not advertised here.
-maxPerStageDescriptorUniformBuffers = 16
-maxPerStageDescriptorStorageBuffers = 16
-maxDescriptorSetUniformBuffers = 16
-maxDescriptorSetStorageBuffers = 16
+# VkPhysicalDeviceLimits — Vulkan 1.4 minimums matched to widened RTL.
+maxBoundDescriptorSets = 8
+maxPerStageDescriptorSamplers = 64
+maxPerStageDescriptorUniformBuffers = 64
+maxPerStageDescriptorStorageBuffers = 64
+maxPerStageDescriptorSampledImages = 64
+maxPerStageDescriptorStorageImages = 64
+maxPerStageDescriptorInputAttachments = 8
+maxPerStageResources = 200
+maxDescriptorSetSamplers = 128
+maxDescriptorSetUniformBuffers = 96
 maxDescriptorSetUniformBuffersDynamic = 16
+maxDescriptorSetStorageBuffers = 96
 maxDescriptorSetStorageBuffersDynamic = 16
-# §12.3 5b: image/sampler descriptor classes bound by the same
-# 16-row binding table (APU_DESC_BND)
-maxPerStageDescriptorSamplers = 16
-maxPerStageDescriptorSampledImages = 16
-maxPerStageDescriptorStorageImages = 16
-maxDescriptorSetSamplers = 16
-maxDescriptorSetSampledImages = 16
-maxDescriptorSetStorageImages = 16
+maxDescriptorSetSampledImages = 128
+maxDescriptorSetStorageImages = 144
+maxDescriptorSetInputAttachments = 8
 maxImageDimension1D = 4096
-maxImageDimension2D = 4096
+maxImageDimension2D = 8192
 maxImageDimension3D = 256
 maxImageDimensionCube = 4096
-maxImageArrayLayers = 256
+maxImageArrayLayers = 2048
+maxTexelBufferElements = 65536
 maxPushConstantsSize = 256
-maxComputeWorkGroupSize = [128, 128, 64]
-# Dispatch stores groupCountX/Y/Z as full U32 immediates and the
-# issue path does not clamp them.  65535 is the Vulkan minimum.
+maxComputeWorkGroupSize = [256, 256, 64]
 maxComputeWorkGroupCount = [65535, 65535, 65535]
-maxComputeWorkGroupInvocations = 128
+maxComputeWorkGroupInvocations = 256
 maxComputeSharedMemorySize = 16384
 minUniformBufferOffsetAlignment = 256
 minStorageBufferOffsetAlignment = 256
+minTexelBufferOffsetAlignment = 16
+minTexelOffset = -8
+maxTexelOffset = 7
+minTexelGatherOffset = -8
+maxTexelGatherOffset = 7
 nonCoherentAtomSize = 64
-# Buffer and image rows are 64-byte aligned.  The required range is
-# 1..131072; 0 is not a legal granularity.
 bufferImageGranularity = 64
-# One queue.  Two discrete priorities is the Vulkan minimum; both
-# buckets schedule on that queue.
 discreteQueuePriorities = 2
-# Colour targets are 1x only.  These masks name that sample count.
-# 4x is not implemented and is not included.
+framebufferColorSampleCounts = 1
 framebufferDepthSampleCounts = 1
 framebufferStencilSampleCounts = 1
 framebufferNoAttachmentsSampleCounts = 1
@@ -125,57 +169,36 @@ sampledImageDepthSampleCounts = 1
 sampledImageStencilSampleCounts = 1
 storageImageSampleCounts = 1
 maxSampleMaskWords = 1
-# Matches maxFragmentOutputAttachments / maxColorAttachments.
-maxFragmentCombinedOutputResources = 4
-# G1c/G2a graphics limits: up to 4 colour attachments on a <=4 KiB
-# framebuffer, 8 vertex attributes across 4 bindings, a single
-# dynamic viewport, list/strip/fan triangle topology.
+maxFragmentCombinedOutputResources = 16
 maxViewports = 1
-maxViewportDimensions = [4096, 4096]
-viewportBoundsRange = [-8192.0, 8191.0]
-maxColorAttachments = 4
-maxFramebufferWidth = 4096
-maxFramebufferHeight = 4096
-maxFramebufferLayers = 1
-framebufferColorSampleCounts = 1
-maxVertexInputAttributes = 8
+maxViewportDimensions = [8192, 8192]
+viewportBoundsRange = [-16384.0, 16383.0]
+maxColorAttachments = 8
+maxFramebufferWidth = 8192
+maxFramebufferHeight = 8192
+maxFramebufferLayers = 2048
+maxVertexInputAttributes = 16
 maxVertexInputBindings = 16
 maxVertexInputAttributeOffset = 2047
 maxVertexInputBindingStride = 2048
-maxVertexOutputComponents = 32
-maxFragmentInputComponents = 32
-maxFragmentOutputAttachments = 4
+maxVertexOutputComponents = 64
+maxFragmentInputComponents = 64
+maxFragmentOutputAttachments = 8
 maxDrawIndexedIndexValue = 0xFFFFFFFF
-maxDrawIndirectCount = 1
-pointSizeRange = [1.0, 1.0]
+maxDrawIndirectCount = 0xFFFFFFFF
+pointSizeRange = [1.0, 64.0]
 lineWidthRange = [1.0, 1.0]
-# sampler truth: the shwave sampler implements 4.4 fixed-point LOD and
-# ignores anisotropy entirely (not advertised)
+pointSizeGranularity = 1.0
+lineWidthGranularity = 1.0
 maxSamplerLodBias = 15.0
-maxSamplerAnisotropy = 1.0
-# both allocation counts are bounded by the shared ObjTab-V entry
-# table — every live sampler/memory consumes one slot; the table is
-# aperture-backed (ObjEntries=65536) so the spec-minimum counts are
-# now truthful (byte exhaustion still returns OUT_OF_DEVICE_MEMORY)
+maxSamplerAnisotropy = 16.0
 maxSamplerAllocationCount = 4000
 maxMemoryAllocationCount = 4096
 maxUniformBufferRange = 0x01000000
-# §limits-ledger verify→profile: the LSU storage path is 32/64-bit
-# clean — ls_off_q/ls_bsz_q are [31:0], lb_addr is a 64-bit aperture
-# base + zero-extended offset, and the W_LSC bounds check compares
-# {32'h0,off}+size vs {32'h0,bsz} — so a >=128 MiB storage range is
-# mechanically supported.  Advertise the 1.1/1.4 minimum (128 MiB);
-# maxUniformBufferRange stays at 16 MiB (its 64 KiB min is already met).
 maxStorageBufferRange = 0x08000000
-# G3a-ii: implicit-LOD λ uses the SFU log2 core (measured bound 1 ULP)
-# — the former linear-mantissa approximation (~0.086 λ error) is gone,
-# so the 8-bit-precision claim is now truthful
 mipmapPrecisionBits = 8
 subTexelPrecisionBits = 8
-# raster setup quantizes vertex positions to 16.8 fixed-point — the
-# advertised subpixel resolution of the rasterizer itself
 subPixelPrecisionBits = 8
-maxPerStageResources = 16
 minMemoryMapAlignment = 4096
 
 [memory]
@@ -290,7 +313,36 @@ D24_UNORM_S8_UINT = { f = "DEPTH_STENCIL_ATTACHMENT|TRANSFER_SRC", wired = 1, bp
 # COLOR_ATTACHMENT (T3): the ROP keeps each integer channel's low byte
 # (clear + draw), blend on it is refused UNSUPPORTED — rast case 42.
 # No COLOR_ATTACHMENT_BLEND: integer formats never blend.
-R8G8B8A8_UINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST|COLOR_ATTACHMENT", bpp = 4, uint = 1 }
+R8G8B8A8_UINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST|COLOR_ATTACHMENT", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER|STORAGE_TEXEL_BUFFER", bpp = 4, uint = 1 }
+# Appended Vulkan 1.4 core formats (IDs 16+; existing IDs 0..15 stay fixed)
+R8_UINT = { f = "SAMPLED_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER", bpp = 1, comps = 1, uint = 1 }
+R8_SINT = { f = "SAMPLED_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER", bpp = 1, comps = 1 }
+R8_SNORM = { f = "SAMPLED_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER", bpp = 1, comps = 1 }
+R8G8_UINT = { f = "SAMPLED_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER", bpp = 2, comps = 2, uint = 1 }
+R8G8_SINT = { f = "SAMPLED_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER", bpp = 2, comps = 2 }
+R8G8_SNORM = { f = "SAMPLED_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER", bpp = 2, comps = 2 }
+R8G8B8A8_SINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER|STORAGE_TEXEL_BUFFER", bpp = 4 }
+R8G8B8A8_SNORM = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER|STORAGE_TEXEL_BUFFER", bpp = 4 }
+R16_UNORM = { f = "SAMPLED_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER", bpp = 2, comps = 1 }
+R16_SNORM = { f = "SAMPLED_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER", bpp = 2, comps = 1 }
+R16_UINT = { f = "SAMPLED_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER", bpp = 2, comps = 1, uint = 1 }
+R16_SINT = { f = "SAMPLED_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER", bpp = 2, comps = 1 }
+R16_SFLOAT = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER", bpp = 2, comps = 1, half = 1 }
+R16G16_UNORM = { f = "SAMPLED_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER", bpp = 4, comps = 2 }
+R16G16_SNORM = { f = "SAMPLED_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER", bpp = 4, comps = 2 }
+R16G16_UINT = { f = "SAMPLED_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER", bpp = 4, comps = 2, uint = 1 }
+R16G16_SINT = { f = "SAMPLED_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER", bpp = 4, comps = 2 }
+R16G16_SFLOAT = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER", bpp = 4, comps = 2, half = 1 }
+R16G16B16A16_UNORM = { f = "SAMPLED_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER", bpp = 8 }
+R16G16B16A16_SNORM = { f = "SAMPLED_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER", bpp = 8 }
+R16G16B16A16_UINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER|STORAGE_TEXEL_BUFFER", bpp = 8, uint = 1 }
+R16G16B16A16_SINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER|STORAGE_TEXEL_BUFFER", bpp = 8 }
+R32_SINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER|STORAGE_TEXEL_BUFFER", bpp = 4, comps = 1 }
+R32G32_UINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER|STORAGE_TEXEL_BUFFER", bpp = 8, comps = 2, uint = 1 }
+R32G32_SINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER|STORAGE_TEXEL_BUFFER", bpp = 8, comps = 2 }
+R32G32B32A32_SINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER|UNIFORM_TEXEL_BUFFER|STORAGE_TEXEL_BUFFER", bpp = 16 }
+S8_UINT = { f = "DEPTH_STENCIL_ATTACHMENT|TRANSFER_SRC|TRANSFER_DST", bpp = 1, comps = 1 }
+D32_SFLOAT_S8_UINT = { f = "DEPTH_STENCIL_ATTACHMENT|TRANSFER_SRC|TRANSFER_DST", bpp = 5, comps = 1, flt = 1 }
 
 [device_extensions]
 # vkEnumerateDeviceExtensionProperties elements.  In the Venus model the
@@ -313,9 +365,25 @@ R8G8B8A8_UINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST|COL
 [subgroup]
 # VkPhysicalDeviceSubgroupProperties — ShaderLanes = 8 SIMT lanes.
 subgroupSize = 8
-supportedStages = "COMPUTE"
-supportedOperations = "BASIC"
+supportedStages = "VERTEX|FRAGMENT|COMPUTE"
+supportedOperations = "BASIC|VOTE|ARITHMETIC|BALLOT|SHUFFLE|SHUFFLE_RELATIVE|CLUSTERED|ROTATE|ROTATE_CLUSTERED"
 quadOperationsInAllStages = false
+
+[multiview]
+maxMultiviewViewCount = 6
+maxMultiviewInstanceIndex = 0x07FFFFFF
+
+[properties]
+maxTimelineSemaphoreValueDifference = 0x7FFFFFFF
+maxBufferSize = 0x40000000
+maxPushDescriptors = 32
+maxVertexAttribDivisor = 0xFFFFFFFF
+supportedDepthResolveModes = 1
+supportedStencilResolveModes = 1
+maxInlineUniformBlockSize = 256
+maxPerStageDescriptorInlineUniformBlocks = 4
+maxDescriptorSetInlineUniformBlocks = 4
+maxInlineUniformTotalSize = 256
 
 [maintenance3]
 # VkPhysicalDeviceMaintenance3Properties — allocation bound is the SHM
@@ -325,17 +393,22 @@ maxMemoryAllocationSize = 0x2000000
 
 [image_format_props]
 # VkImageFormatProperties body for a supported 2D image.
-maxMipLevels = 13
-maxArrayLayers = 256
+maxMipLevels = 14
+maxArrayLayers = 2048
 maxResourceSize = 0x2000000
 sampleCounts = 1
 
 [cap."vkAllocateMemory"]
 # Chained pNext members captured into the op record's imm[] for the
 # front-end executor's allocation policy (handleTypes must subset
-# OPAQUE_FD, allocate-flags must be 0).
+# OPAQUE_FD, allocate-flags must be 0 or DEVICE_ADDRESS).
 fields = ["VkExportMemoryAllocateInfo.handleTypes",
           "VkMemoryAllocateFlagsInfo.flags"]
+
+[cap."vkCreateSemaphore"]
+# Vulkan 1.2 timeline semaphore create-info capture (semaphoreType:
+# 0=BINARY, 1=TIMELINE; initialValue captured in payload/imm).
+fields = ["VkSemaphoreTypeCreateInfo.semaphoreType"]
 
 [flag_masks]
 # FLAGS decode rejects any bit outside these masks (per field type).
@@ -832,3 +905,190 @@ fields = ["pEvents"]
 # extent.height}
 fields = ["pScissors.offset.x", "pScissors.offset.y",
           "pScissors.extent.width", "pScissors.extent.height"]
+
+# ---------------------------------------------------------------------------
+# Vulkan 1.2 / 1.3 / 1.4 keep-lists (grouped simplifications onto existing
+# draw, renderpass, transfer, descriptor, and semaphore execution engines).
+
+[keep.vkCmdSetViewportWithCount]
+fields = ["pViewports.x", "pViewports.y", "pViewports.width",
+          "pViewports.height", "pViewports.minDepth",
+          "pViewports.maxDepth"]
+
+[keep.vkCmdSetScissorWithCount]
+fields = ["pScissors.offset.x", "pScissors.offset.y",
+          "pScissors.extent.width", "pScissors.extent.height"]
+
+[keep.vkCmdBindVertexBuffers2]
+fields = ["pBuffers", "pOffsets", "pSizes", "pStrides"]
+
+[keep.vkCmdBindIndexBuffer2]
+fields = ["offset", "size"]
+
+[keep.vkCmdPushConstants2]
+fields = ["offset", "size", "pValues"]
+
+[keep.vkCmdBindDescriptorSets2]
+fields = ["pDescriptorSets", "pDynamicOffsets"]
+
+[optional_handles.vkCmdPushDescriptorSet]
+fields = ["pDescriptorWrites.pImageInfo.sampler",
+          "pDescriptorWrites.pImageInfo.imageView"]
+
+[keep.vkCmdPushDescriptorSet]
+fields = ["pDescriptorWrites.dstBinding",
+          "pDescriptorWrites.dstArrayElement",
+          "pDescriptorWrites.descriptorCount",
+          "pDescriptorWrites.descriptorType",
+          "pDescriptorWrites.pImageInfo.sampler",
+          "pDescriptorWrites.pImageInfo.imageView",
+          "pDescriptorWrites.pImageInfo.imageLayout",
+          "pDescriptorWrites.pBufferInfo.buffer",
+          "pDescriptorWrites.pBufferInfo.offset",
+          "pDescriptorWrites.pBufferInfo.range",
+          "pDescriptorWrites.pTexelBufferView"]
+
+[optional_handles.vkCmdPushDescriptorSet2]
+fields = ["pDescriptorWrites.pImageInfo.sampler",
+          "pDescriptorWrites.pImageInfo.imageView"]
+
+[keep.vkCmdPushDescriptorSet2]
+fields = ["pDescriptorWrites.dstBinding",
+          "pDescriptorWrites.dstArrayElement",
+          "pDescriptorWrites.descriptorCount",
+          "pDescriptorWrites.descriptorType",
+          "pDescriptorWrites.pImageInfo.sampler",
+          "pDescriptorWrites.pImageInfo.imageView",
+          "pDescriptorWrites.pImageInfo.imageLayout",
+          "pDescriptorWrites.pBufferInfo.buffer",
+          "pDescriptorWrites.pBufferInfo.offset",
+          "pDescriptorWrites.pBufferInfo.range",
+          "pDescriptorWrites.pTexelBufferView"]
+
+[optional_handles.vkCmdBeginRendering]
+fields = ["pColorAttachments.imageView",
+          "pColorAttachments.resolveImageView",
+          "imageView",
+          "resolveImageView"]
+
+[keep.vkCmdBeginRendering]
+fields = ["renderArea.offset.x", "renderArea.offset.y",
+          "renderArea.extent.width", "renderArea.extent.height",
+          "layerCount", "viewMask", "colorAttachmentCount",
+          "pColorAttachments.imageView",
+          "pColorAttachments.loadOp",
+          "pColorAttachments.storeOp",
+          "pColorAttachments.clearValue.color.uint32",
+          "pDepthAttachment",
+          "pStencilAttachment",
+          "imageView",
+          "loadOp",
+          "storeOp",
+          "clearValue.color.uint32"]
+
+[keep.vkCmdSetRenderingAttachmentLocations]
+fields = ["colorAttachmentCount", "pColorAttachmentLocations"]
+
+[keep.vkCmdSetRenderingInputAttachmentIndices]
+fields = ["colorAttachmentCount", "pColorAttachmentInputIndices",
+          "pDepthInputAttachmentIndex", "pStencilInputAttachmentIndex"]
+
+[keep.vkCmdCopyBuffer2]
+fields = ["pRegions.srcOffset", "pRegions.dstOffset", "pRegions.size"]
+
+[keep.vkCmdCopyBufferToImage2]
+fields = ["pRegions.bufferOffset", "pRegions.bufferRowLength",
+          "pRegions.bufferImageHeight",
+          "pRegions.imageSubresource.aspectMask",
+          "pRegions.imageSubresource.mipLevel",
+          "pRegions.imageSubresource.baseArrayLayer",
+          "pRegions.imageSubresource.layerCount",
+          "pRegions.imageOffset.x", "pRegions.imageOffset.y",
+          "pRegions.imageOffset.z", "pRegions.imageExtent.width",
+          "pRegions.imageExtent.height", "pRegions.imageExtent.depth"]
+
+[keep.vkCmdCopyImageToBuffer2]
+fields = ["pRegions.bufferOffset", "pRegions.bufferRowLength",
+          "pRegions.bufferImageHeight",
+          "pRegions.imageSubresource.aspectMask",
+          "pRegions.imageSubresource.mipLevel",
+          "pRegions.imageSubresource.baseArrayLayer",
+          "pRegions.imageSubresource.layerCount",
+          "pRegions.imageOffset.x", "pRegions.imageOffset.y",
+          "pRegions.imageOffset.z", "pRegions.imageExtent.width",
+          "pRegions.imageExtent.height", "pRegions.imageExtent.depth"]
+
+[keep.vkCmdCopyImage2]
+fields = ["pRegions.srcSubresource.aspectMask",
+          "pRegions.srcSubresource.mipLevel",
+          "pRegions.srcSubresource.baseArrayLayer",
+          "pRegions.srcSubresource.layerCount",
+          "pRegions.srcOffset.x", "pRegions.srcOffset.y",
+          "pRegions.srcOffset.z",
+          "pRegions.dstSubresource.aspectMask",
+          "pRegions.dstSubresource.mipLevel",
+          "pRegions.dstSubresource.baseArrayLayer",
+          "pRegions.dstSubresource.layerCount",
+          "pRegions.dstOffset.x", "pRegions.dstOffset.y",
+          "pRegions.dstOffset.z", "pRegions.extent.width",
+          "pRegions.extent.height", "pRegions.extent.depth"]
+
+[keep.vkCmdBlitImage2]
+fields = ["pRegions.srcSubresource.aspectMask",
+          "pRegions.srcSubresource.mipLevel",
+          "pRegions.srcSubresource.baseArrayLayer",
+          "pRegions.srcSubresource.layerCount",
+          "pRegions.srcOffsets.x", "pRegions.srcOffsets.y",
+          "pRegions.srcOffsets.z",
+          "pRegions.dstSubresource.aspectMask",
+          "pRegions.dstSubresource.mipLevel",
+          "pRegions.dstSubresource.baseArrayLayer",
+          "pRegions.dstSubresource.layerCount",
+          "pRegions.dstOffsets.x", "pRegions.dstOffsets.y",
+          "pRegions.dstOffsets.z"]
+
+[keep.vkCmdResolveImage]
+fields = ["pRegions.srcSubresource.aspectMask",
+          "pRegions.srcSubresource.mipLevel",
+          "pRegions.srcSubresource.baseArrayLayer",
+          "pRegions.srcSubresource.layerCount",
+          "pRegions.srcOffset.x", "pRegions.srcOffset.y",
+          "pRegions.srcOffset.z",
+          "pRegions.dstSubresource.aspectMask",
+          "pRegions.dstSubresource.mipLevel",
+          "pRegions.dstSubresource.baseArrayLayer",
+          "pRegions.dstSubresource.layerCount",
+          "pRegions.dstOffset.x", "pRegions.dstOffset.y",
+          "pRegions.dstOffset.z", "pRegions.extent.width",
+          "pRegions.extent.height", "pRegions.extent.depth"]
+
+[keep.vkCmdResolveImage2]
+fields = ["pRegions.srcSubresource.aspectMask",
+          "pRegions.srcSubresource.mipLevel",
+          "pRegions.srcSubresource.baseArrayLayer",
+          "pRegions.srcSubresource.layerCount",
+          "pRegions.srcOffset.x", "pRegions.srcOffset.y",
+          "pRegions.srcOffset.z",
+          "pRegions.dstSubresource.aspectMask",
+          "pRegions.dstSubresource.mipLevel",
+          "pRegions.dstSubresource.baseArrayLayer",
+          "pRegions.dstSubresource.layerCount",
+          "pRegions.dstOffset.x", "pRegions.dstOffset.y",
+          "pRegions.dstOffset.z", "pRegions.extent.width",
+          "pRegions.extent.height", "pRegions.extent.depth"]
+
+[keep.vkCmdWaitEvents2]
+fields = ["pEvents"]
+
+[keep.vkQueueSubmit2]
+fields = ["pSubmits.pWaitSemaphoreInfos.semaphore",
+          "pSubmits.pWaitSemaphoreInfos.value",
+          "pSubmits.pCommandBufferInfos.commandBuffer",
+          "pSubmits.pSignalSemaphoreInfos.semaphore",
+          "pSubmits.pSignalSemaphoreInfos.value"]
+
+[keep.vkWaitSemaphores]
+fields = ["pSemaphores", "pValues"]
+
+[keep.vkSignalSemaphore]
+fields = ["semaphore", "value"]

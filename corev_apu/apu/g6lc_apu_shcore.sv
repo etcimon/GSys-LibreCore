@@ -148,7 +148,9 @@ module g6lc_apu_shcore
     // shmod ↔ shwave read-port fabric
     logic [2:0]   rd_slot;
     logic [15:0]  prog_addr;
+    logic [15:0]  prog_addr2;
     logic [31:0]  prog_data;
+    logic [31:0]  prog_data2;
     logic [9:0]   type_id, const_id, memb_id, rm_id, init_id, blk_id;
     logic [9:0]   phi_id;
     // G3a-i: function/param table read fabric
@@ -579,8 +581,8 @@ module g6lc_apu_shcore
       .busy_o(c_busy_o), .done_o(c_done_o), .done_pl_o(c_done_pl_o),
       .retire_i(retire_i),
       .retire_slot_i(retire_slot_i),
-      .rd_slot_i(rd_slot), .prog_addr_i(prog_addr),
-      .prog_data_o(prog_data),
+      .rd_slot_i(rd_slot), .prog_addr_i(prog_addr), .prog_addr2_i(prog_addr2),
+      .prog_data_o(prog_data), .prog_data2_o(prog_data2),
       .type_id_i(type_id), .type_data_o(type_data),
       .const_id_i(const_id), .const_data_o(const_data),
       .memb_id_i(memb_id), .memb_data_o(memb_data),
@@ -617,8 +619,8 @@ module g6lc_apu_shcore
       .disp_i(disp_q_valid && !wbusy), .disp_pl_i(disp_q),
       .desc_i, .push_n_i, .push_i,
       .busy_o(wbusy), .done_o(wdone), .done_pl_o(wdone_pl),
-      .rd_slot_o(rd_slot), .prog_addr_o(prog_addr),
-      .prog_data_i(prog_data),
+      .rd_slot_o(rd_slot), .prog_addr_o(prog_addr), .prog_addr2_o(prog_addr2),
+      .prog_data_i(prog_data), .prog_data2_i(prog_data2),
       .type_id_o(type_id), .type_data_i(type_data),
       .const_id_o(const_id), .const_data_i(const_data),
       .memb_id_o(memb_id), .memb_data_i(memb_data),

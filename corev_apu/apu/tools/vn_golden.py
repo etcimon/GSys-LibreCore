@@ -92,6 +92,8 @@ class Enc:
                 bytes([val or 0])
             pad = (4 - len(b) % 4) % 4
             self.buf += b + b'\0' * pad
+        elif n == 2:
+            self.buf += struct.pack('<H', val or 0) + b'\0\0'
         else:
             raise ValueError('scalar size %d' % n)
 
@@ -1440,8 +1442,8 @@ VK_ERR_FEATURE = 0xFFFFFFF8
 VK_ERR_UNKNOWN = 0xFFFFFFF3
 VK_ERR_VALIDATION_FAILED = 0xC4650B08   # VK_ERROR_VALIDATION_FAILED
 VK_ERR_FEATURE_NOT_PRESENT = 0xFFFFFFF8     # -8
-# graphics-pipeline ObjPay state block (vnfront gp_pay_w w0..w56)
-GP_PAY_WORDS = 61
+# graphics-pipeline ObjPay state block (vnfront gp_pay_w w0..w69)
+GP_PAY_WORDS = 70
 # vertex-attribute formats vnfront f_vattr_ok / rast gather accept
 VATTR_OK = frozenset((9, 10, 13, 14, 16, 17, 20, 21, 23, 24, 27, 28,
                       37, 38, 41, 42, 70, 71, 74, 75, 76, 77, 78, 81,
@@ -2402,15 +2404,27 @@ class FrontModel(ObjectTable, PayloadMemory):
         # constants dynamic; VIEWPORT(0)/SCISSOR(1) clear the static
         # bake flags for the record
         bcdyn = vpdyn = scdyn = 0
+        dynmask = 0
+        _DYN_BITS = {
+            0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8,
+            1000267000: 9, 1000267001: 10, 1000267002: 11,
+            1000267003: 0, 1000267004: 1, 1000267005: 12,
+            1000267006: 13, 1000267007: 14, 1000267008: 15,
+            1000267009: 16, 1000267010: 17, 1000267011: 18,
+            1000377001: 19, 1000377002: 20, 1000377004: 21,
+            1000259000: 22,
+        }
         if nx() != 0:                        # pDynamicState presence
             ndyn = nx()
             for _a in range(ndyn):
                 w = nx()
+                if w in _DYN_BITS:
+                    dynmask |= 1 << _DYN_BITS[w]
                 if w == 4:
                     bcdyn = 1
-                elif w == 0:
+                elif w in (0, 1000267003):
                     vpdyn = 1
-                elif w == 1:
+                elif w in (1, 1000267004):
                     scdyn = 1
         lid = nx() | (nx() << 32)            # pipeline layout id
         sp = nx()                            # declared subpass (0..3)
@@ -2514,6 +2528,16 @@ class FrontModel(ObjectTable, PayloadMemory):
         # '{8{32'h7800_0000}} gp_blend_q default.
         for i in range(4, 8):
             words.append(blends[i] if i < natt else 0x78000000)
+        # w61: 24-bit per-field dynamic state mask (P4 Vulkan 1.4)
+        words.append(dynmask & 0xFFFFFF)
+        # w62..69: vertex attributes 8..15
+        for i in range(8, 16):
+            if i < na:
+                loc, b, fmt, off = atrs[i]
+                words.append((1 << 31) | ((loc & 0xF) << 24) | (b << 20) |
+                             (fmt << 12) | (off & 0xFFF))
+            else:
+                words.append(0)
         assert len(words) == GP_PAY_WORDS
         for i, w in enumerate(words):
             self.pay[pbase + i] = w

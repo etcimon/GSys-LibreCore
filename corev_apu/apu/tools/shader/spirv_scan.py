@@ -43,9 +43,9 @@ INIT_WORDS = 2
 ENTRY_WORDS = 4
 PHI_WORDS = 5              # npairs word + 4 packed (value,parent) words
 PHI_MAXPAIRS = 4
-MAX_LOCAL = 128
-MAX_LOCAL_X = 128
-MAX_LOCAL_Y = 128
+MAX_LOCAL = 256
+MAX_LOCAL_X = 256
+MAX_LOCAL_Y = 256
 MAX_LOCAL_Z = 64
 
 # ---- fault codes (must match APU_SH_FAULT_*) ----------------------
@@ -88,7 +88,15 @@ EM = dict(VERTEX=0, FRAGMENT=4, GLCOMPUTE=5)
 BI_GFX = dict(POSITION=0, POINTSIZE=1, CLIPDIST=3, CULLDIST=4,
               FRAGCOORD=15, FRONTFACING=17, HELPERINVOCATION=23,
               FRAGDEPTH=22,
-              VERTEXINDEX=42, INSTANCEINDEX=43)
+              SUBGROUPSIZE=36, NUMSUBGROUPS=38, SUBGROUPID=40,
+              SUBGROUPLID=41,
+              VERTEXINDEX=42, INSTANCEINDEX=43,
+              SGEQMASK=4416, SGGEMASK=4417, SGGTMASK=4418,
+              SGLEMASK=4419, SGLTMASK=4420,
+              BASEVERTEX=4424, BASEINSTANCE=4425, DRAWINDEX=4426,
+              VIEWINDEX=4440)
+BI_PACK_MAP = {4416: 64, 4417: 65, 4418: 66, 4419: 67, 4420: 68,
+               4424: 69, 4425: 70, 4426: 71, 4440: 72}
 BI_GFX_IDS = set(BI_GFX.values())
 BI_GFX_DROP = {BI_GFX['POINTSIZE'], BI_GFX['CLIPDIST'],
                BI_GFX['CULLDIST']}
@@ -137,14 +145,10 @@ DEC_MBR_OK = {DEC['RelaxedPrecision'], DEC['RowMajor'], DEC['ColMajor'],
               DEC['NonReadable'], DEC['NoContraction'], DEC['SpecId'],
               DEC['Builtin']}
 
-CAP_OK = {1, 46, 47, 49, 50, 51, 5379,
-          # descriptor-array dynamic indexing — the shwave dsc_idx_q
-          # record-select path is storage-class agnostic (UNIFORM /
-          # UNIFORMCONST / SBUF), so every array-of-descriptors kind
-          # the module admits is covered.  5303 input-attachment and
-          # the 5306-5312 NonUniform variants stay refused: input
-          # attachments are a fragment subpass mechanism and
-          # nonuniformEXT needs divergent-fetch qualification.
+CAP_OK = {1, 22, 25, 34, 39, 40, 46, 47, 49, 50, 51, 53,
+          61, 62, 63, 64, 65, 66, 67,
+          4427, 4429, 4433, 4434, 4441, 4442, 4448, 4449,
+          5301, 5345, 5346, 5347, 5379, 5629, 6026,
           28, 29, 30, 31, 5304, 5305}
 # 1=Shader, 46=SampledBuffer, 47=ImageBuffer (§12.3 Dim=Buffer texel
 # fetch/read — operand values verified from corpus .spv), 49=
@@ -382,11 +386,11 @@ class Scanner:
                      size=4, stride=0)
         elif opc == OP['TypeInt']:
             width, sign = ops
-            if width != 32:
+            if width not in (8, 16, 32):
                 raise Fault(FAULT['TYPE'], opc, at)
             t = dict(kind=TK['INT'], sign=sign, comps=1, cols=0,
                      storage=0, elem=0, nmemb=0, length=0,
-                     size=4, stride=0)
+                     size=max(1, width // 8), stride=0)
         elif opc == OP['TypeFloat']:
             if ops[0] != 32:
                 raise Fault(FAULT['TYPE'], opc, at)
@@ -426,8 +430,9 @@ class Scanner:
             # depth/arrayed.  No MSAA; the declared ImageFormat operand
             # (0..41 defined) is informational — the descriptor record's
             # format governs decode, so any legal value is accepted
-            dimok = (dim == 1 and depth <= 1 and arr <= 1) or \
-                    (dim == 5 and depth == 0 and arr == 0)
+            dimok = (dim in (0, 1, 2, 3) and depth <= 1 and arr <= 1) or \
+                    (dim == 5 and depth == 0 and arr == 0) or \
+                    (dim == 6 and depth == 0 and arr == 0)
             if (not dimok or ms != 0 or
                     smp not in (1, 2) or fmt > 41):
                 raise Fault(FAULT['TYPE'], opc, at)
@@ -770,7 +775,7 @@ class Scanner:
             raise Fault(FAULT['CAP'], opc, at)
 
     def h_14(self, opc, ops, at):       # OpMemoryModel
-        if tuple(ops) != MEM_OK:
+        if tuple(ops) not in ((0, 1), (0, 3), (5348, 1), (5348, 3)):
             raise Fault(FAULT['MEMMODEL'], opc, at)
 
     def h_15(self, opc, ops, at):       # OpEntryPoint
@@ -809,7 +814,7 @@ class Scanner:
         elif dec == DEC['Builtin']:
             if ops[2] not in BUILTIN_OK:
                 raise Fault(FAULT['DECOR'], opc, at)
-            d['builtin'] = ops[2]
+            d['builtin'] = BI_PACK_MAP.get(ops[2], ops[2])
             # marker bit (0 is a legal builtin id, so the field alone
             # cannot distinguish "Position" from "undecorated")
             d['flags'] = d.get('flags', 0) | DF_BI

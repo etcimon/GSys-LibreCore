@@ -45,7 +45,7 @@ package g6lc_apu_cmdexec_pkg;
   // executor state registers, snapshotted into every work record
   typedef struct packed {
     logic [31:0]        pipeline;       // bound pipeline {gen,slot}
-    logic [3:0][31:0]   dset;           // §7b: bound descriptor sets
+    logic [7:0][31:0]   dset;           // §7b + Vulkan 1.4: 8 bound descriptor sets
     logic [31:0]        ibo;            // bound index buffer
     logic [31:0]        vtx;            // first bound vertex buffer
     logic [31:0]        vp;             // first viewport imm word
@@ -56,10 +56,8 @@ package g6lc_apu_cmdexec_pkg;
     logic [15:0]        push_len;       // §7b: its byte size
     logic               rp_active;
     logic [3:0]         subpass;
-    // §12.3 F5: per-set dynamic-offset shadow — vkCmdBindDescriptorSets
-    // streams, per bound set, {handle, ndyn, dyn offsets} so the
-    // offsets land per set even across interleaved bind calls.
-    logic [3:0][15:0][31:0] dyn;
+    // §12.3 F5: per-set dynamic-offset shadow — 8 sets x 16 dynamic slots
+    logic [7:0][15:0][31:0] dyn;
   } apu_cmdexec_state_t;
 
   typedef struct packed {

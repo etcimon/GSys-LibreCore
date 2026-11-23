@@ -15,9 +15,10 @@ G=corev_apu/apu/tools/vn_golden.py
 
 python3 $G --transport ue_sm5_transport 1
 # decoder/reply vectors: keep-list and profile changes alter payw/rep
-# --count 17 is the largest batch that still fits the 64 Ki-word
-# decoder stream window for this vector set (18 overflows).
-python3 $G --vectors ue_sm5_core 1 --count 17
+# --count 10 is the largest batch that still fits the 64 Ki-word
+# decoder stream window for this vector set (the Vulkan 1.1-1.4 command
+# expansion pushed the tape over the window; 11 overflows).
+python3 $G --vectors ue_sm5_core 1 --count 10
 python3 $G --reply-vectors ue_sm5_reply 1
 python3 $G --session ue_sm5_session 1
 python3 $G --payfull-session ue_sm5_payfull 1 --paywords 512

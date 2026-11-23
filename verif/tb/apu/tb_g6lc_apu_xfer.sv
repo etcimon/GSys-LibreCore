@@ -431,7 +431,7 @@ module tb_g6lc_apu_xfer;
   // padding is left at whatever poison set.
   task automatic fill_img(input apu_xfer_img_t im, input int unsigned sd);
     int bpp;
-    bpp = APU_VN_IMG_BPP[im.fmt[3:0]];
+    bpp = APU_VN_IMG_BPP[im.fmt[5:0]];
     for (int l = 0; l < int'(im.layers); l++)
       for (int m = 0; m < int'(im.mips); m++) begin
         int wm, hm, pit, moff;
@@ -550,9 +550,9 @@ module tb_g6lc_apu_xfer;
   function automatic logic [127:0] m_clear_pat(
       input logic [7:0] fmt, input logic [31:0] cw [4]);
     logic [7:0] at; logic [127:0] tex; int nc, cb;
-    at = APU_VN_IMG_ATTR[fmt[3:0]];
+    at = APU_VN_IMG_ATTR[fmt[5:0]];
     nc = at[2:0] + 1;
-    cb = 8 * APU_VN_IMG_BPP[fmt[3:0]] / nc;
+    cb = 8 * APU_VN_IMG_BPP[fmt[5:0]] / nc;
     tex = '0;
     for (int c = 0; c < nc; c++) begin
       int           cj;
@@ -576,7 +576,7 @@ module tb_g6lc_apu_xfer;
     int unsigned o; int wp;
     o = 0;
     for (int i = 0; i < m; i++) begin
-      wp = ((im.w >> i) == 0 ? 1 : (im.w >> i)) * APU_VN_IMG_BPP[im.fmt[3:0]];
+      wp = ((im.w >> i) == 0 ? 1 : (im.w >> i)) * APU_VN_IMG_BPP[im.fmt[5:0]];
       wp = (wp + 63) & ~63;
       o += wp * ((im.h >> i) == 0 ? 1 : (im.h >> i));
     end
@@ -585,7 +585,7 @@ module tb_g6lc_apu_xfer;
   function automatic int unsigned m_pitch(
       input apu_xfer_img_t im, input int m);
     int unsigned wp;
-    wp = ((im.w >> m) == 0 ? 1 : (im.w >> m)) * APU_VN_IMG_BPP[im.fmt[3:0]];
+    wp = ((im.w >> m) == 0 ? 1 : (im.w >> m)) * APU_VN_IMG_BPP[im.fmt[5:0]];
     return (wp + 63) & ~63;
   endfunction
 
@@ -596,7 +596,7 @@ module tb_g6lc_apu_xfer;
                                input logic [31:0] rg []);
     logic [127:0] tex; int bpp;
     tex = m_clear_pat(im.fmt, cw);
-    bpp = APU_VN_IMG_BPP[im.fmt[3:0]];
+    bpp = APU_VN_IMG_BPP[im.fmt[5:0]];
     for (int r = 0; r < int'(nr); r++) begin
       int asp, bm, lc, bl, nl;
       asp = rg[5*r+0][7:0]; bm = rg[5*r+1]; lc = rg[5*r+2];
@@ -639,7 +639,7 @@ module tb_g6lc_apu_xfer;
                                 input int unsigned nr,
                                 input logic [31:0] rg []);
     logic [127:0] tex; int bpp;
-    bpp = APU_VN_IMG_BPP[im.fmt[3:0]];
+    bpp = APU_VN_IMG_BPP[im.fmt[5:0]];
     tex = bpp == 2 ? {8{m_f32_u16(depth)}} : {4{depth}};
     for (int r = 0; r < int'(nr); r++) begin
       int asp, bm, lc, bl, nl;
@@ -715,7 +715,7 @@ module tb_g6lc_apu_xfer;
   task automatic m_apply_i2i(input apu_xfer_img_t s, input apu_xfer_img_t d,
                              input int unsigned nr, input logic [31:0] rg []);
     int bpp;
-    bpp = APU_VN_IMG_BPP[s.fmt[3:0]];
+    bpp = APU_VN_IMG_BPP[s.fmt[5:0]];
     for (int r = 0; r < int'(nr); r++) begin
       int sm, dm, sbl, sbc, dbl, dbc, sx, sy, dx, dy, ex, ey;
       int spit, dpit, smoff, dmoff;
@@ -757,7 +757,7 @@ module tb_g6lc_apu_xfer;
   task automatic m_apply_blit(input apu_xfer_img_t s, input apu_xfer_img_t d,
                               input int unsigned nr, input logic [31:0] rg []);
     int bpp;
-    bpp = APU_VN_IMG_BPP[s.fmt[3:0]];
+    bpp = APU_VN_IMG_BPP[s.fmt[5:0]];
     for (int r = 0; r < int'(nr); r++) begin
       int sm, dm, sbl, sbc, dbl, dbc;
       int sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1;

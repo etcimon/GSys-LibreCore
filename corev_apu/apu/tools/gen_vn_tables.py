@@ -257,35 +257,26 @@ class Model:
     def const_int(self, name):
         return self.api_consts[name]
 
-    def core_le_11(self, ty):
+    def core_le_14(self, ty):
         for feat in self.reg.features:
             if ty in feat.types:
-                return feat.number in ('1.0', '1.1')
+                return feat.number in ('1.0', '1.1', '1.2', '1.3', '1.4')
         return False
 
     def chain_admit(self, nty):
         """pNext chain-node admission (dec + rep tables).
 
-        3d-b: beyond core <= 1.1 and VK_MESA_venus_protocol nodes, admit
-        all-VkBool32 feature structs at any core version — their request
-        bodies decode into FLAGS ops validated against the profile
-        feature mask (true bit -> FEATURE_NOT_PRESENT) and their reply
-        bodies are all-zero RCONST blocks ("not implemented").  Non-bool
-        property structs join only through the profile 'zero_bodies'
-        allowlist (same truthful all-zero reply)."""
+        Admits core <= 1.4 structs, VK_MESA_venus_protocol nodes, all-VkBool32
+        feature structs at any version, profile 'chain_structs', and profile
+        'zero_bodies'."""
         if not self.gen.is_serializable(nty):
             return False
-        if self.core_le_11(nty) or nty.name.endswith('MESA'):
+        if self.core_le_14(nty) or nty.name.endswith('MESA'):
             return True
         mem = [v for v in nty.variables
                if v.name not in ('sType', 'pNext')]
         if mem and all(v.ty.base.name == 'VkBool32' for v in mem):
             return True
-        # profile 'chain_structs': request-side nodes admitted on the
-        # strength of decode-side validation alone — every member is a
-        # plain scalar or a FLAGS-masked element word (e.g.
-        # VkDescriptorSetLayoutBindingFlagsCreateInfo, whose
-        # VkDescriptorBindingFlags array decodes against mask 0).
         if nty.name in self.profile.get('chain_structs', []):
             return True
         return nty.name in self.profile.get('zero_bodies', [])
@@ -437,7 +428,8 @@ class Model:
         return PRES_SCRATCH if scope else self._alloc('pres')
 
     def blob_slot(self, scope):
-        if scope:
+        if scope or (self.act_class(self.cur_cmd) == 'RECORD' and
+                     self.slot_cnt['blob'] >= MAX_BLOB):
             self._scratch_blob ^= 1
             return self._scratch_blob
         return self._alloc('blob')
@@ -500,15 +492,22 @@ class Model:
                                 'FLAGS op' % self.keep_cur)
                 self.emit('FLAGS', self.imm_slot(scope), mc, var.name)
                 return
-        if size == 4:
-            self.emit('U32', self.imm_slot(scope), 0, var.name, keep)
+        if size in (1, 2, 4):
+            if not scope and (keep or self.slot_cnt['imm'] >= MAX_IMM) and \
+                    self.slot_cnt['imm'] >= MAX_IMM:
+                self.emit('U32', DISCARD, 0, var.name, keep)
+            else:
+                self.emit('U32', self.imm_slot(scope), 0, var.name, keep)
         elif size == 8:
             # element-scope u64s discard like u32s: storing them in the
             # q7 scratch would clobber the last in-element handle there
             # (e.g. VkDescriptorBufferInfo.buffer) while leaving its
             # kind/role behind.
-            self.emit('U64', DISCARD if scope else self.q_slot(scope),
-                      0, var.name, keep)
+            if not scope and self.slot_cnt['q'] >= MAX_Q and keep:
+                self.emit('U64', DISCARD, 0, var.name, keep)
+            else:
+                self.emit('U64', DISCARD if scope else self.q_slot(scope),
+                          0, var.name, keep)
         else:
             raise Unfit('scalar %s has odd size %d' % (var.name, size))
 
@@ -772,7 +771,8 @@ class Model:
             return
         # feature-request bools: validated against the profile allow-mask
         # and discarded rather than consuming an imm slot
-        if base.name == 'VkBool32' and parent.name.endswith('Features'):
+        if base.name == 'VkBool32' and parent.name.endswith(
+                ('Features', 'FeaturesKHR', 'FeaturesEXT')):
             if keep:
                 raise Unfit('keep field %s maps to non-keepable FLAGS op'
                             % self.keep_cur)
@@ -977,24 +977,21 @@ class Model:
             return 'CB_END'
         if name == 'vkResetCommandBuffer':
             return 'CB_RESET'
-        if name == 'vkQueueSubmit':
+        if name in ('vkQueueSubmit', 'vkQueueSubmit2'):
             return 'SUBMIT'
         if name in ('vkQueueWaitIdle', 'vkDeviceWaitIdle',
                     'vkWaitForFences', 'vkGetFenceStatus',
-                    'vkResetFences'):
+                    'vkResetFences', 'vkWaitSemaphores'):
             return 'WAIT'
         if name in ('vkResetCommandPool', 'vkResetDescriptorPool'):
             return 'POOL_RESET'
-        if name in ('vkMapMemory', 'vkUnmapMemory',
+        if name in ('vkMapMemory', 'vkUnmapMemory', 'vkUnmapMemory2',
                     'vkFlushMappedMemoryRanges',
                     'vkInvalidateMappedMemoryRanges'):
             return 'MAP'
         if name in ('vkCreatePipelineCache', 'vkDestroyPipelineCache',
-                    # §5a G3b-iii: pool trim releases free chunks back
-                    # to the OS — device-side the chain chunks are
-                    # PayMem extents; the no-op is honest (pool reset
-                    # already returns them)
-                    'vkTrimCommandPool'):
+                    'vkMergePipelineCaches', 'vkTrimCommandPool',
+                    'vkTransitionImageLayout'):
             return 'NOP_OK'
         if name == 'vkUpdateDescriptorSets':
             return 'UPDATE'
@@ -1008,10 +1005,23 @@ class Model:
                 'Requirements' in name or \
                 name in ('vkGetDeviceMemoryCommitment',
                          'vkGetRenderAreaGranularity',
+                         'vkGetRenderingAreaGranularity',
                          'vkGetImageSubresourceLayout',
-                         'vkGetQueryPoolResults'):
+                         'vkGetImageSubresourceLayout2',
+                         'vkGetDeviceImageSubresourceLayout',
+                         'vkGetQueryPoolResults',
+                         'vkGetSemaphoreCounterValue',
+                         'vkGetBufferDeviceAddress',
+                         'vkGetBufferOpaqueCaptureAddress',
+                         'vkGetDeviceMemoryOpaqueCaptureAddress',
+                         'vkGetDeviceGroupPeerMemoryFeatures',
+                         'vkGetDescriptorSetLayoutSupport',
+                         'vkGetPrivateData',
+                         'vkGetPipelineCacheData'):
             return 'QUERY'
-        if name in ('vkGetEventStatus', 'vkSetEvent', 'vkResetEvent'):
+        if name in ('vkGetEventStatus', 'vkSetEvent', 'vkResetEvent',
+                    'vkResetQueryPool', 'vkSignalSemaphore',
+                    'vkSetPrivateData', 'vkCopyImageToImage'):
             return 'EVENT'
         if name.startswith('vkCreate') or name.startswith('vkAllocate') \
                 or name.startswith('vkGetDeviceQueue'):
@@ -1389,24 +1399,161 @@ class Model:
             return [int(sg.get('subgroupSize', 8)), sv, ov,
                     1 if sg.get('quadOperationsInAllStages', False)
                     else 0]
+        if name in (
+            'VkPhysicalDeviceVulkan11Properties',
+            'VkPhysicalDeviceVulkan12Properties',
+            'VkPhysicalDeviceVulkan13Properties',
+            'VkPhysicalDeviceVulkan14Properties',
+            'VkPhysicalDeviceTimelineSemaphoreProperties',
+            'VkPhysicalDeviceMaintenance4Properties',
+            'VkPhysicalDeviceMaintenance5Properties',
+            'VkPhysicalDeviceMaintenance6Properties',
+            'VkPhysicalDevicePushDescriptorProperties',
+            'VkPhysicalDeviceLineRasterizationProperties',
+            'VkPhysicalDeviceVertexAttributeDivisorProperties',
+            'VkPhysicalDeviceSubgroupSizeControlProperties',
+            'VkPhysicalDeviceDepthStencilResolveProperties',
+            'VkPhysicalDeviceHostImageCopyProperties',
+            'VkPhysicalDeviceInlineUniformBlockProperties',
+            'VkPhysicalDeviceFloatControlsProperties',
+            'VkPhysicalDeviceDescriptorIndexingProperties',
+        ):
+            return self.rollup_prop_words(ty)
         # 3d-b: profile 'zero_bodies' allowlist — non-bool chained
-        # property structs whose truthful answer is all zeros
-        # ("not implemented"; the device is Vulkan 1.1).  The u64
-        # array_size(dim) markers every static member array carries on
-        # the wire are structural, not data: they must survive the zero
-        # fill or Mesa's vn_decode_array_size fatals the reply.
+        # property structs whose truthful answer is all zeros.
         if name in self.profile.get('zero_bodies', []):
             zn = self.struct_words(ty)
             if zn is not None:
                 return self.zero_struct_words(ty)
-        # all-bool feature structs (chained onto *Features2): all-zero block
+        # all-bool feature structs (chained onto *Features2): populate
+        # every VkBool32 member directly from profile [features] so
+        # VkPhysicalDeviceVulkan11/12/13/14Features and individual
+        # KHR/EXT feature structs always agree with request validation.
         members = [v for v in ty.variables
                    if v.name not in ('sType', 'pNext')]
         if members and all(v.ty.base.name == 'VkBool32' for v in members):
-            n = self.struct_words(ty)
-            if n is not None:
-                return [0] * n
+            feats = p.get('features', {})
+            return [1 if feats.get(v.name, False) else 0 for v in members]
         return None
+
+    def rollup_prop_words(self, ty):
+        """Generate wire words for Vulkan 1.1-1.4 property rollup and
+        extension property structs from profile sections."""
+        p = self.profile
+        lim = p.get('limits', {})
+        sg = p.get('subgroup', {})
+        mv = p.get('multiview', {})
+        m3 = p.get('maintenance3', {})
+        vp = p.get('properties', {})
+        stg = self.enum_ints('VkShaderStageFlagBits')
+        sop = self.enum_ints('VkSubgroupFeatureFlagBits')
+        sv = 0
+        for t in str(sg.get('supportedStages', 'COMPUTE')).split('|'):
+            if t:
+                sv |= stg['VK_SHADER_STAGE_' + t + '_BIT']
+        ov = 0
+        for t in str(sg.get('supportedOperations', 'BASIC')).split('|'):
+            if t:
+                ov |= sop['VK_SUBGROUP_FEATURE_' + t + '_BIT']
+        sg_size = int(sg.get('subgroupSize', 8))
+        vals = {
+            # 1.1 rollup
+            'subgroupSize': sg_size,
+            'subgroupSupportedStages': sv,
+            'subgroupSupportedOperations': ov,
+            'subgroupQuadOperationsInAllStages':
+                1 if sg.get('quadOperationsInAllStages', False) else 0,
+            'pointClippingBehavior': 0,
+            'maxMultiviewViewCount': int(mv.get('maxMultiviewViewCount', 6)),
+            'maxMultiviewInstanceIndex':
+                int(mv.get('maxMultiviewInstanceIndex', 0x07FFFFFF)),
+            'protectedNoFault': 0,
+            'maxPerSetDescriptors': int(m3.get('maxPerSetDescriptors', 4096)),
+            'maxMemoryAllocationSize':
+                int(m3.get('maxMemoryAllocationSize', 0x2000000)),
+            # 1.2 rollup
+            'maxTimelineSemaphoreValueDifference':
+                int(vp.get('maxTimelineSemaphoreValueDifference',
+                           0x7FFFFFFF)),
+            'framebufferIntegerColorSampleCounts':
+                int(lim.get('framebufferColorSampleCounts', 1)),
+            'supportedDepthResolveModes':
+                int(vp.get('supportedDepthResolveModes', 1)),
+            'supportedStencilResolveModes':
+                int(vp.get('supportedStencilResolveModes', 1)),
+            'independentResolveNone':
+                1 if vp.get('independentResolveNone', False) else 0,
+            'independentResolve':
+                1 if vp.get('independentResolve', False) else 0,
+            'denormBehaviorIndependence': 0,
+            'roundingModeIndependence': 0,
+            'shaderSignedZeroInfNanPreserveFloat32': 1,
+            'shaderRoundingModeRTEFloat32': 1,
+            # 1.3 rollup
+            'minSubgroupSize': sg_size,
+            'maxSubgroupSize': sg_size,
+            'maxComputeWorkgroupSubgroups':
+                int(lim.get('maxComputeWorkGroupInvocations', 256)) // sg_size,
+            'requiredSubgroupSizeStages': sv,
+            'maxInlineUniformBlockSize':
+                int(vp.get('maxInlineUniformBlockSize', 256)),
+            'maxPerStageDescriptorInlineUniformBlocks':
+                int(vp.get('maxPerStageDescriptorInlineUniformBlocks', 4)),
+            'maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks':
+                int(vp.get('maxPerStageDescriptorInlineUniformBlocks', 4)),
+            'maxDescriptorSetInlineUniformBlocks':
+                int(vp.get('maxDescriptorSetInlineUniformBlocks', 4)),
+            'maxDescriptorSetUpdateAfterBindInlineUniformBlocks':
+                int(vp.get('maxDescriptorSetInlineUniformBlocks', 4)),
+            'maxInlineUniformTotalSize':
+                int(vp.get('maxInlineUniformTotalSize', 256)),
+            'storageTexelBufferOffsetAlignmentBytes':
+                int(lim.get('minTexelBufferOffsetAlignment', 16)),
+            'storageTexelBufferOffsetSingleTexelAlignment': 1,
+            'uniformTexelBufferOffsetAlignmentBytes':
+                int(lim.get('minTexelBufferOffsetAlignment', 16)),
+            'uniformTexelBufferOffsetSingleTexelAlignment': 1,
+            'maxBufferSize': int(vp.get('maxBufferSize', 0x40000000)),
+            # 1.4 rollup
+            'lineSubPixelPrecisionBits':
+                int(lim.get('subPixelPrecisionBits', 8)),
+            'maxVertexAttribDivisor':
+                int(vp.get('maxVertexAttribDivisor', 0xFFFFFFFF)),
+            'supportsNonZeroFirstInstance': 1,
+            'maxPushDescriptors': int(vp.get('maxPushDescriptors', 32)),
+            'dynamicRenderingLocalReadDepthStencilAttachments': 1,
+            'dynamicRenderingLocalReadMultisampledAttachments': 0,
+            'earlyFragmentMultisampleCoverageAfterSampleCounting': 0,
+            'earlyFragmentSampleMaskTestBeforeSampleCounting': 0,
+            'depthStencilSwizzleOneSupport': 1,
+            'polygonModePointSize': 1,
+            'nonStrictSinglePixelWideLinesUseParallelogram': 0,
+            'nonStrictWideLinesUseParallelogram': 0,
+            'blockTexelViewCompatibleMultipleLayers': 0,
+            'maxCombinedImageSamplerDescriptorCount': 1,
+            'fragmentShadingRateClampCombinerInputs': 0,
+            'identicalMemoryTypeRequirements': 1,
+        }
+        # allow [properties] overrides for any scalar field
+        for k, v in vp.items():
+            if isinstance(v, bool):
+                vals[k] = 1 if v else 0
+            elif isinstance(v, int):
+                vals[k] = v
+        out = []
+        for var in ty.variables:
+            if var.name in ('sType', 'pNext'):
+                continue
+            if var.is_dynamic_array() or var.ty.is_pointer():
+                # null pointer wire encoding when count is 0
+                out += [0, 0]
+                continue
+            if var.ty.is_static_array() or var.ty.base.category in (
+                    vkxml.VkType.STRUCT, vkxml.VkType.UNION):
+                self.zero_member_words(var, out)
+                continue
+            out += self.num_words(var.ty.base, vals.get(var.name, 0))
+        return out
 
     def capset_words(self):
         """struct virgl_renderer_capset_venus (Mesa 26.0.8
@@ -1556,7 +1703,7 @@ class Model:
         fe = self.enum_ints('VkFormat')
         fmt = self.profile.get('formats', {})
         names, vk2dfmt = [], [255] * 256
-        bpp, attr = [0] * 16, [0] * 16
+        bpp, attr = [0] * 64, [0] * 64
         for nm, ent in fmt.items():
             if not isinstance(ent, dict) or not (ent.get('f') or
                                                  ent.get('wired')):
@@ -1565,7 +1712,7 @@ class Model:
             if f is None:
                 continue
             did = len(names)
-            assert did < 16, 'device format table overflow'
+            assert did < 64, 'device format table overflow'
             names.append(nm)
             vk2dfmt[f] = did
             bpp[did] = int(ent.get('bpp', 4))
@@ -1929,10 +2076,10 @@ def emit_sv(model, asm, profile):
     arr(8, 'APU_VN_IMG_FMT', '[0:255]',
         v2d, lambda w: "8'h%02X" % w)
     A('')
-    arr(8, 'APU_VN_IMG_BPP', '[0:15]',
+    arr(8, 'APU_VN_IMG_BPP', '[0:63]',
         fbpp, lambda w: "8'h%02X" % w)
     A('')
-    arr(8, 'APU_VN_IMG_ATTR', '[0:15]',
+    arr(8, 'APU_VN_IMG_ATTR', '[0:63]',
         fattr, lambda w: "8'h%02X" % w)
     A('')
     # sType ids for every generated chain-table node + profile-declared
