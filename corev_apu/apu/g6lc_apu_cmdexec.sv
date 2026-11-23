@@ -302,6 +302,18 @@ module g6lc_apu_cmdexec
     logic [63:0]         ind_base_q;        // aperture byte base
     logic [2:0]          ind_i_q, ind_nb_q; // beat cursor / count
     logic [7:0][31:0]    ind_w_q;           // raw beat halves
+    // Vulkan 1.x multi-draw-indirect: drawCount>1 re-arms the operand
+    // fetch at ind_base + i*stride.  ind_left_q counts draws still to
+    // issue after the in-flight one; ind_stride_q/ind_len_q carry the
+    // record's stride and the fixed command byte length; ind_xb_q/
+    // ind_xs_q keep the resolved aperture base + operand extent so the
+    // loop can bounds-check each stride step like the first fetch.
+    logic                ind_loop_q;        // multi-draw indirect active
+    logic [31:0]         ind_left_q;        // draws remaining after cur
+    logic [31:0]         ind_stride_q;      // stride bytes per command
+    logic [4:0]          ind_len_q;         // command byte length
+    logic [63:0]         ind_xb_q;          // resolved aperture base
+    logic [31:0]         ind_xs_q;          // operand extent bytes
     apu_cmdrec_rec_t     rec_q;         // current record
     logic [2:0]          h_i_q;         // handle resolve cursor
     logic [6:0]          pay_i_q;       // §7b arena read cursor
@@ -827,6 +839,14 @@ module g6lc_apu_cmdexec
         rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT) ||
         rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_COUNT_EXT) ||
         rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_COUNT_EXT);
+    // multi-draw-indirect loop eligibility: only the non-Count draw
+    // ctypes carry a real drawCount in imm[0] (Count variants hold
+    // maxDrawCount and need the countBuffer read first — still
+    // single-draw).  Re-checked at StWork so a stale ind_loop_q left
+    // by a mid-assembly abort can never divert a different record.
+    wire rec_is_ind_draw =
+        rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_EXT) ||
+        rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT);
     // fetched indirect-command word w (the operand can start on the
     // second half of an aligned aperture beat).  The word arriving on
     // this cycle's response beat must read through — the ind_w_q
@@ -1398,6 +1418,12 @@ module g6lc_apu_cmdexec
         ind_i_q     <= '0;
         ind_nb_q    <= '0;
         ind_w_q     <= '0;
+        ind_loop_q  <= 1'b0;
+        ind_left_q  <= '0;
+        ind_stride_q<= '0;
+        ind_len_q   <= '0;
+        ind_xb_q    <= '0;
+        ind_xs_q    <= '0;
         rec_q       <= '0;
         h_i_q       <= '0;
         pay_i_q     <= '0;
@@ -2503,7 +2529,36 @@ module g6lc_apu_cmdexec
           end else if (work_ready_i && !pinq_full) begin
             outst_q <= outst_q + 8'h1 -
                        ((work_done_i && outst_q != 8'h0) ? 8'h1 : 8'h0);
-            state_q <= StNextBuf;
+            // multi-draw-indirect: the just-issued draw consumed one
+            // Vk*IndirectCommand; while draws remain, re-arm the
+            // operand fetch at ind_base + stride instead of advancing
+            // to the next record.  Every draw re-runs the read-only
+            // pipeline/descriptor/VB assembly — PIN/UNPIN stay
+            // per-submission so re-assembly cannot leak pins.  Each
+            // stride step is bounds-checked against the resolved
+            // operand extent exactly like the first fetch.
+            if (rec_is_ind_draw && ind_loop_q && ind_left_q != 32'd0) begin
+              automatic logic [63:0] nbase =
+                  ind_base_q + {32'h0, ind_stride_q};
+              automatic logic [63:0] noff  = nbase - ind_xb_q;
+              automatic logic [63:0] xsz   = {32'h0, ind_xs_q};
+              automatic logic [63:0] nl    = {32'h0, ind_len_q};
+              if (noff > xsz || xsz - noff < nl) begin
+                lost_q     <= 1'b1;
+                ind_loop_q <= 1'b0;
+                state_q    <= StUnpReq;
+              end else begin
+                ind_left_q  <= ind_left_q - 32'd1;
+                ind_base_q  <= nbase;
+                ind_nb_q    <= 3'((32'(ind_len_q) +
+                                  (nbase[2] ? 32'd4 : 32'd0) + 7) >> 3);
+                ind_i_q     <= '0;
+                state_q     <= StIndRd;
+              end
+            end else begin
+              ind_loop_q <= 1'b0;
+              state_q    <= StNextBuf;
+            end
           end
 
           // ---- §7b/5a-ii + §12.3 F5: dispatch assembly ---------------
@@ -3317,11 +3372,17 @@ module g6lc_apu_cmdexec
                 // §5a G3b-iii: the bound buffer's resolved aperture
                 // base carries the record's u64 offset (imm[2:3]);
                 // the operand must fit inside the operand extent —
-                // else the submission is lost, never a silent fetch
+                // else the submission is lost, never a silent fetch.
+                // lenb is the Vk*IndirectCommand byte size: indexed
+                // draws fetch 20B, non-indexed draws 16B (incl. the
+                // Vulkan 1.2 Count variants — same command layout),
+                // dispatch 12B.
                 automatic logic [4:0]  lenb =
                     ind_idx_q ? 5'd20 :
-                    rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_EXT)
+                    (rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_EXT) ||
+                     rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_COUNT_EXT))
                         ? 5'd16 : 5'd12;
                 automatic logic [63:0] ib =
                     64'(xb) + {32'h0, rec_q.imm[2]};
@@ -3334,6 +3395,23 @@ module g6lc_apu_cmdexec
                   ind_nb_q   <= 3'((32'(lenb) +
                                     (ib[2] ? 32'd4 : 32'd0) + 7) >> 3);
                   ind_i_q    <= '0;
+                  // multi-draw-indirect: only the non-Count draw
+                  // ctypes carry a real drawCount in imm[0] (the Count
+                  // variants hold maxDrawCount and need the countBuffer
+                  // read first — still single-draw here).  stride is
+                  // imm[1]; the loop re-arms StIndRd at
+                  // ind_base + i*stride while ind_left_q > 0.
+                  ind_xb_q     <= xb;
+                  ind_xs_q     <= xs;
+                  ind_len_q    <= lenb;
+                  ind_stride_q <= rec_q.imm[1];
+                  if (rec_is_ind_draw && rec_q.imm[0] > 32'd1) begin
+                    ind_loop_q <= 1'b1;
+                    ind_left_q <= rec_q.imm[0] - 32'd1;
+                  end else begin
+                    ind_loop_q <= 1'b0;
+                    ind_left_q <= '0;
+                  end
                   state_q    <= StIndRd;
                 end
               end else if (xf_for_q == 2'd1) begin
