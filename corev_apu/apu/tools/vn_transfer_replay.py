@@ -221,6 +221,13 @@ class TransferReplay:
                     if any(s < d + dn and d < s + sn
                            for s, _, sn in ranges for _, d, dn in ranges):
                         raise ValueError('replay copy regions overlap across source/destination')
+                elif name == 'vkCmdSetDeviceMask':
+                    # Single-device group (vkEnumeratePhysicalDeviceGroups reports
+                    # one device, no subset allocation): deviceMask must be the
+                    # full group mask.  Pure state — no work operation emitted.
+                    if (record['imm'][0] != 1 or any(record['imm'][1:]) or
+                            record.get('payload_words', 0) or any(record['handle'])):
+                        raise ValueError('device mask exceeds single-device group')
                 else:
                     raise ValueError('unsupported replay command: ' + name)
 

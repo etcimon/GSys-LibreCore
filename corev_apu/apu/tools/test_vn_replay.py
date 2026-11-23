@@ -144,6 +144,25 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(self.state.aperture.read(self.owner.base + 2048, 1024),
                          b'abcd' * 256)
 
+    def test_set_device_mask_validates_single_device_group(self):
+        # vkCmdSetDeviceMask is pure state for a single-device group: the
+        # mask must be the full group mask (bit0).  It emits no work op but
+        # must be admitted (not 'unsupported') and out-of-group masks refuse.
+        self.begin()
+        self.command('vkCmdSetDeviceMask', commandBuffer=self.CB, deviceMask=1)
+        self.end()
+        job = self.enqueue()
+        self.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertFalse(job.operations)
+
+    def test_set_device_mask_rejects_out_of_group_mask(self):
+        self.begin()
+        self.command('vkCmdSetDeviceMask', commandBuffer=self.CB, deviceMask=3)
+        self.end()
+        with self.assertRaises(ValueError):
+            self.enqueue()
+
     def test_begin_and_idle_wait_for_actual_replay_retirement(self):
         self.recorded()
         self.enqueue()
