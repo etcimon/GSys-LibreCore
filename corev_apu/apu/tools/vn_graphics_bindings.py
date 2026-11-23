@@ -3,7 +3,7 @@
 """Recording-scoped graphics binding operands; no work leases or draw execution."""
 from dataclasses import dataclass
 
-from vn_descriptor_operands import buffer_descriptor
+from vn_descriptor_operands import buffer_descriptor, push_buffer_descriptor
 from vn_graphics_dynamic import validate_recording
 from vn_graphics_pipelines import operand as pipeline_operand
 from vn_image_operands import image_descriptor
@@ -33,6 +33,9 @@ class GraphicsBindings:
         self.front, self.kinds = self.context.frontend, engine.golden.KIND
         self.device = recording.device
         self.pipeline, self.sets, self.push, self.position = None, {}, {}, 0
+        # vkCmdPushDescriptorSet{,2}: command-buffer-local descriptor writes
+        # keyed by (set_index, binding, array_element); later writes win.
+        self.push_descriptors = {}
 
     def _template(self, record):
         layout = record.get('native_pipeline_layout')
@@ -74,6 +77,9 @@ class GraphicsBindings:
         elif name in ('vkCmdBindDescriptorSets', 'vkCmdBindDescriptorSets2') \
                 and record['imm'][0] == 0:
             self._bind(record)
+        elif name in ('vkCmdPushDescriptorSet', 'vkCmdPushDescriptorSet2') \
+                and record['imm'][0] == 0:
+            self._push_descriptors(record)
         elif (name in ('vkCmdPushConstants', 'vkCmdPushConstants2') and
                 record['imm'][0] and not record['imm'][0] & ~0x11):
             self._push(record)
@@ -135,6 +141,69 @@ class GraphicsBindings:
                     staged[stage, index] = value, template.push
         self.push.update(staged)
 
+    @staticmethod
+    def _push_stride(dtype):
+        # per-element union payload words, mirroring vn_golden._upd_stride:
+        # buffer types {buffer:2,offset:2,range:2}=6, image types
+        # {sampler:2,imageView:2,imageLayout:1}=5, texel {view:2}=2.
+        if dtype in (6, 7, 8, 9):
+            return 6
+        if dtype <= 3:
+            return 5
+        if dtype in (4, 5):
+            return 2
+        return 0
+
+    def _push_descriptors(self, record):
+        # vkCmdPushDescriptorSet{,2}: imm = [bindPoint, set, writeCount];
+        # pay streams each VkWriteDescriptorSet as
+        # [dstBinding][dstArrayElement][descriptorCount][descriptorType]
+        # then descriptorCount * stride union words (dstSet is a LOOKUP
+        # handle -> record handles, semantically ignored for push writes).
+        bind_point, set_index, write_count = record['imm'][:3]
+        if (bind_point != 0 or not 0 <= set_index < 4 or
+                not 0 < write_count <= 16):
+            raise ValueError('push descriptor bind point/set/write count exceeds profile')
+        length, base = record.get('payload_words', -1), record['imm'][7]
+        if not 0 <= length or base <= 0 or base + length > self.front.pay_words:
+            raise ValueError('push descriptor payload exceeds record-local bounds')
+        data = [self.front.pay[base + i] for i in range(length)]
+        cursor = 0
+        for _ in range(write_count):
+            if cursor + 4 > len(data):
+                raise ValueError('push descriptor write header is truncated')
+            dst_binding, dst_array = data[cursor], data[cursor + 1]
+            desc_count, dtype = data[cursor + 2], data[cursor + 3]
+            cursor += 4
+            stride = self._push_stride(dtype)
+            if (not 0 < desc_count <= 256 or stride == 0 or
+                    not 0 <= dst_binding < 256 or
+                    cursor + desc_count * stride > len(data)):
+                raise ValueError('push descriptor write/type/count exceeds profile')
+            for j in range(desc_count):
+                w = data[cursor:cursor + stride]
+                cursor += stride
+                if stride == 6:
+                    elem = (w[0] | w[1] << 32, w[2] | w[3] << 32,
+                            w[4] | w[5] << 32)
+                elif stride == 5:
+                    elem = (w[0] | w[1] << 32, w[2] | w[3] << 32, w[4])
+                else:
+                    elem = (w[0] | w[1] << 32,)
+                self.push_descriptors[(set_index, dst_binding,
+                                       dst_array + j)] = (dtype, elem)
+        if cursor != len(data):
+            raise ValueError('push descriptor payload has trailing words')
+
+    def _push_operand(self, entry, resource, element):
+        dtype, elem = entry
+        if dtype in (6, 7):
+            buffer_id, offset, size = elem
+            return push_buffer_descriptor(
+                self.engine, self.context_id, buffer_id, offset, size,
+                resource.binding, resource.descriptor_set, element, dtype)
+        raise ValueError('push descriptor type exceeds bounded graphics profile')
+
     def resolve(self):
         validate_recording(self.engine, self.context_id, self.recording)
         if self.pipeline is None:
@@ -149,17 +218,28 @@ class GraphicsBindings:
         for requirement in snapshot.resources:
             bindings, push = [], [0] * 64
             for resource in requirement.bindings:
-                bound = self.sets.get(resource.descriptor_set)
-                if bound is None or not bound[1].compatible(snapshot.layout, resource.descriptor_set):
-                    raise ValueError('graphics binding set is missing or disturbed/incompatible')
-                descriptor, layout = self._dataset(bound[0])
-                if layout['native_signature'] != snapshot.layout.sets[resource.descriptor_set]:
-                    raise ValueError('graphics binding descriptor signature changed')
-                dynamic = bound[2].get(resource.binding, (0,) * resource.count)
-                if len(dynamic) < resource.count:
-                    raise ValueError('graphics binding dynamic offsets exceed bound layout')
+                pushed = {}
                 for element in range(resource.count):
-                    if resource.kind in (6, 7):
+                    pe = self.push_descriptors.get(
+                        (resource.descriptor_set, resource.binding, element))
+                    if pe is not None:
+                        pushed[element] = pe
+                descriptor = layout = dynamic = None
+                if len(pushed) < resource.count:
+                    bound = self.sets.get(resource.descriptor_set)
+                    if bound is None or not bound[1].compatible(
+                            snapshot.layout, resource.descriptor_set):
+                        raise ValueError('graphics binding set is missing or disturbed/incompatible')
+                    descriptor, layout = self._dataset(bound[0])
+                    if layout['native_signature'] != snapshot.layout.sets[resource.descriptor_set]:
+                        raise ValueError('graphics binding descriptor signature changed')
+                    dynamic = bound[2].get(resource.binding, (0,) * resource.count)
+                    if len(dynamic) < resource.count:
+                        raise ValueError('graphics binding dynamic offsets exceed bound layout')
+                for element in range(resource.count):
+                    if element in pushed:
+                        operand = self._push_operand(pushed[element], resource, element)
+                    elif resource.kind in (6, 7):
                         operand = buffer_descriptor(self.engine, self.context_id, descriptor,
                             resource.binding, element, dynamic_offset=dynamic[element],
                             set_index=resource.descriptor_set)

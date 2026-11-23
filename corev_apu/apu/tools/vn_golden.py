@@ -5557,7 +5557,8 @@ class FrontModel(ObjectTable, PayloadMemory):
                     # (vertex..fragment = 0x1F), compute = bit5 (0x20).  Bits
                     # above 0x3F (mesh/task/ray/accel) and a graphics+compute
                     # mix are outside the bounded single-bind-point profile.
-                    if ct == session['T'].get('vkCmdBindDescriptorSets2', -1):
+                    if ct in (session['T'].get('vkCmdBindDescriptorSets2', -1),
+                              session['T'].get('vkCmdPushDescriptorSet2', -1)):
                         sf = rec['imm'][0] & 0xFFFFFFFF
                         gfx, cmp_ = sf & 0x1F, sf & 0x20
                         if (not sf or sf & ~0x3F or (gfx and cmp_)):
@@ -5681,7 +5682,9 @@ class FrontModel(ObjectTable, PayloadMemory):
                                 session['T'].get('vkCmdResolveImage2', -1),
                                 session['T']['vkCmdClearColorImage'],
                                 session['T'][
-                                    'vkCmdClearDepthStencilImage']):
+                                    'vkCmdClearDepthStencilImage'],
+                                session['T'].get('vkCmdPushDescriptorSet', -1),
+                                session['T'].get('vkCmdPushDescriptorSet2', -1)):
                         # §12.3 C/5a + C/5b + G1c/G2a: xfer and
                         # dynamic-state operand payloads stream
                         # verbatim — the engine replays them from the

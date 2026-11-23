@@ -3427,6 +3427,80 @@ class DrawReplayTests(unittest.TestCase):
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())
         self.assertEqual(self.f.owner.work_refs, 0)
 
+    def test_fragment_push_descriptor_overrides_bound_ubo(self):
+        # end-to-end: vkCmdPushDescriptorSet writes a buffer descriptor
+        # inline; the pushed PUB (0.25) overrides the bound DSET->UBO (0.5)
+        # for set0/binding0 so FragmentShade broadcasts the pushed value.
+        bound, pushed = 0.5, 0.25
+        PUB = 0x7A0000003000
+        self.r.layout(((0, 6, 1, 16),))
+        self.f.command('vkDestroyShaderModule', device=self.w.DEVICE,
+                       shaderModule=self.FS2)
+        self.module(self.FS2, fs_program('color', ubo=True))
+        for buf, off in ((self.UBO, 2048), (PUB, 2304)):
+            self.f.command('vkCreateBuffer', device=self.w.DEVICE, pBuffer=buf,
+                pCreateInfo=self.w.structure('VkBufferCreateInfo', pNext=[], flags=0,
+                    size=256, usage=0x10, sharingMode=0, queueFamilyIndexCount=0,
+                    pQueueFamilyIndices=[]))
+            self.f.command('vkBindBufferMemory', device=self.w.DEVICE, buffer=buf,
+                           memory=self.w.MEMORY, memoryOffset=off)
+        self.f.command('vkCreateDescriptorPool', device=self.w.DEVICE,
+            pDescriptorPool=self.POOL,
+            pCreateInfo=self.w.structure('VkDescriptorPoolCreateInfo', pNext=[],
+                flags=1, maxSets=1, poolSizeCount=1, pPoolSizes=[
+                    self.w.structure('VkDescriptorPoolSize', type=6,
+                                     descriptorCount=1)]))
+        self.f.command('vkAllocateDescriptorSets', device=self.w.DEVICE,
+            pDescriptorSets=[self.DSET], pAllocateInfo=self.w.structure(
+                'VkDescriptorSetAllocateInfo', pNext=[],
+                descriptorPool=self.POOL, descriptorSetCount=1,
+                pSetLayouts=[self.r.DSL]))
+        self.f.command('vkUpdateDescriptorSets', device=self.w.DEVICE,
+            descriptorWriteCount=1, descriptorCopyCount=0, pDescriptorCopies=[],
+            pDescriptorWrites=[self.w.structure('VkWriteDescriptorSet', pNext=[],
+                dstSet=self.DSET, dstBinding=0, dstArrayElement=0,
+                descriptorCount=1, descriptorType=6, pTexelBufferView=[],
+                pImageInfo=[], pBufferInfo=[self.w.structure(
+                    'VkDescriptorBufferInfo', buffer=self.UBO, offset=0,
+                    range=4)])])
+        self.upload(self.ndc_triangle())
+        self.f.state.aperture.write(self.f.owner.base + 2048,
+                                    struct.pack('<f', bound))
+        self.f.state.aperture.write(self.f.owner.base + 2304,
+                                    struct.pack('<f', pushed))
+        self.pipeline()
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdBindDescriptorSets', commandBuffer=self.f.CB,
+            pipelineBindPoint=0, layout=self.g.PL, firstSet=0,
+            descriptorSetCount=1, pDescriptorSets=[self.DSET],
+            dynamicOffsetCount=0, pDynamicOffsets=[])
+        self.f.command('vkCmdPushDescriptorSet', commandBuffer=self.f.CB,
+            pipelineBindPoint=0, layout=self.g.PL, set=0,
+            descriptorWriteCount=1,
+            pDescriptorWrites=[self.w.structure('VkWriteDescriptorSet', pNext=[],
+                dstSet=self.DSET, dstBinding=0, dstArrayElement=0,
+                descriptorCount=1, descriptorType=6, pTexelBufferView=[],
+                pImageInfo=[], pBufferInfo=[self.w.structure(
+                    'VkDescriptorBufferInfo', buffer=PUB, offset=0,
+                    range=4)])])
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        want = self.e.golden.img_clear_texel(
+            self.e.model, did,
+            struct.unpack('<4I', struct.pack('<4f', pushed, pushed, pushed, pushed)))
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), want)
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
     def test_fragment_dynamic_ubo_offset_draw(self):
         # end-to-end dynamic offset: a UNIFORM_BUFFER_DYNAMIC (type 8)
         # descriptor bound with pDynamicOffsets=[256] shifts the shader's

@@ -105,3 +105,78 @@ def buffer_descriptor(engine, context_id, descriptor_set, binding, element=0,
     return DescriptorOperand(ShaderBinding(
         owner, binding_offset + offset + dynamic_offset, size, binding,
         set_index, 6 if uniform else 7, element), tuple(references), validate)
+
+
+def push_buffer_descriptor(engine, context_id, buffer_id, offset, size,
+                           binding, set_index, element, dtype):
+    """vkCmdPushDescriptorSet{,2} buffer write -> DescriptorOperand.
+
+    A pushed VkDescriptorBufferInfo names a VkBuffer plus byte offset/range
+    directly: there is no descriptor set, layout row, or aperture provenance —
+    only the buffer's own memory binding.  ``dtype`` is the raw
+    VkDescriptorType (6 uniform / 7 storage buffer); dynamic buffer types are
+    not admitted in this bounded profile."""
+    context = engine.contexts[context_id]
+    if not engine.transfers._live(context):
+        raise KeyError('descriptor context is unavailable')
+    front, kinds = context.frontend, engine.golden.KIND
+    references = []
+
+    def resolve(handle, name):
+        status, slot, entry = front.resolve(handle, kinds[name])
+        if status != 'OK' or entry['ctx'] != context_id:
+            raise KeyError('push descriptor operand generation/context is stale')
+        canonical = entry['gen'] << 16 | slot
+        references.append((canonical, kinds[name]))
+        return entry
+
+    if (dtype not in (6, 7) or
+            type(binding) is not int or not 0 <= binding < 256 or
+            type(element) is not int or element < 0 or
+            type(set_index) is not int or not 0 <= set_index < 4 or
+            type(offset) is not int or offset < 0 or
+            type(size) is not int or size <= 0):
+        raise ValueError('invalid push descriptor buffer index/range/type')
+    resource = resolve(buffer_id, 'VkBuffer')
+    ms = resource.get('bind_mem', -1)
+    if not 0 <= ms < front.SLOTS:
+        raise KeyError('push descriptor buffer has no memory binding')
+    memory_handle = ((resource['bind_mgen'] & 0xFFFF) << 16) | (ms & 0xFFFF)
+    memory = resolve(memory_handle, 'VkDeviceMemory')
+    binding_offset = resource.get('bind_off', 0) & 0xFFFFFFFF
+    buffer_size = resource.get('size', 0)
+    parent = resource['parent']
+    device = front.ent[parent] if 0 <= parent < front.SLOTS else None
+    if device is None or memory.get('parent') != parent:
+        raise ValueError('push descriptor operands belong to different devices')
+    resolve(device['gen'] << 16 | parent, 'VkDevice')
+    uniform = dtype == 6
+    limits = engine.model.profile['limits']
+    alignment = limits['minUniformBufferOffsetAlignment' if uniform else
+                       'minStorageBufferOffsetAlignment']
+    maximum = limits['maxUniformBufferRange' if uniform else 'maxStorageBufferRange']
+    if (not resource.get('native_usage', 0) & (0x10 if uniform else 0x20) or
+            offset % alignment or size % 4 or size > maximum or
+            offset + size > buffer_size or
+            binding_offset + offset + size > memory['size']):
+        raise ValueError('push descriptor type/usage/alignment/range exceeds logical resource')
+
+    def validate():
+        if not engine.transfers._live(context):
+            raise KeyError('push descriptor context retired during resolution')
+        if (resource.get('bind_mem', -1) != ms or
+                resource.get('bind_mgen', 0) != (memory_handle >> 16) or
+                resource.get('bind_off', 0) != binding_offset or
+                resource.get('size', 0) != buffer_size):
+            raise KeyError('push descriptor buffer binding changed during resolution')
+        for handle, kind in references:
+            if front.resolve(handle, kind)[0] != 'OK':
+                raise KeyError('push descriptor operand retired during resolution')
+
+    validate()
+    owner = engine.memory(context_id, memory_handle)
+    if owner.base is None:
+        raise ValueError('push descriptor memory is unbacked')
+    return DescriptorOperand(ShaderBinding(
+        owner, binding_offset + offset, size, binding,
+        set_index, 6 if uniform else 7, element), tuple(references), validate)

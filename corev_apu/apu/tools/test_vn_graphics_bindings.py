@@ -123,6 +123,29 @@ class BindingTests(unittest.TestCase):
                 pDescriptorSets=[self.SET] if sets else [],
                 dynamicOffsetCount=len(offsets), pDynamicOffsets=list(offsets)))
 
+    def push_desc(self, *, cmd='vkCmdPushDescriptorSet', set_index=0,
+                  binding=0, array=0, count=1, dtype=6, buffer=None,
+                  offset=0, size=128, stage=0x11, layout=None):
+        # vkCmdPushDescriptorSet{,2}: the write's dstSet is a LOOKUP handle
+        # (ignored semantically); set/binding/array select the slot the
+        # pushed VkDescriptorBufferInfo overlays onto bound descriptor sets.
+        writes = [self.w.structure('VkWriteDescriptorSet', pNext=[],
+            dstSet=self.SET, dstBinding=binding, dstArrayElement=array,
+            descriptorCount=count, descriptorType=dtype, pTexelBufferView=[],
+            pImageInfo=[], pBufferInfo=[self.w.structure('VkDescriptorBufferInfo',
+                buffer=buffer if buffer is not None else self.f.BUFFER,
+                offset=offset, range=size)])]
+        if cmd.endswith('2'):
+            self.command(cmd, commandBuffer=self.f.CB,
+                pPushDescriptorSetInfo=self.w.structure('VkPushDescriptorSetInfo',
+                    pNext=[], stageFlags=stage, layout=layout or self.g.PL,
+                    set=set_index, descriptorWriteCount=1,
+                    pDescriptorWrites=writes))
+        else:
+            self.command(cmd, commandBuffer=self.f.CB, pipelineBindPoint=0,
+                layout=layout or self.g.PL, set=set_index,
+                descriptorWriteCount=1, pDescriptorWrites=writes)
+
     def replay(self):
         for name, record in self.names[self.state.position:]:
             self.state.replay(name, record)
@@ -207,6 +230,71 @@ class BindingTests(unittest.TestCase):
         vs, fs = self.state.resolve().stages
         self.assertEqual((vs.push[0], fs.push[1]), (7, 9))
         self.assertEqual((vs.push[1], fs.push[0], vs.push[2], fs.push[2]), (0, 0, 0, 0))
+
+    def test_push_descriptor_overrides_bound_buffer(self):
+        # the bound set supplies BUFFER@offset0/range128; the push write to
+        # set0/binding0 carries offset512, which must win at resolve().
+        self.prepare(dtype=6, count=1)
+        self.bind()
+        self.push_desc(offset=512)
+        self.replay()
+        result = self.state.resolve()
+        for stage in result.stages:
+            self.assertEqual((stage.bindings[0].offset, stage.bindings[0].kind),
+                             (512, 6))
+        result.validate()
+
+    def test_push_descriptor_set2_matches_base_record_shape(self):
+        # vkCmdPushDescriptorSet2 swaps pipelineBindPoint for stageFlags in
+        # the VkPushDescriptorSetInfo2 wrapper; the decoder folds graphics
+        # stageFlags to bind point 0 and streams the same write payload, so
+        # _push_descriptors replays it identically to the base command.
+        self.prepare(dtype=6, count=1)
+        self.bind()
+        self.push_desc(cmd='vkCmdPushDescriptorSet2', offset=512)
+        self.replay()
+        result = self.state.resolve()
+        for stage in result.stages:
+            self.assertEqual((stage.bindings[0].offset, stage.bindings[0].kind),
+                             (512, 6))
+        result.validate()
+
+    def test_push_descriptor_without_bound_set(self):
+        # a push write covering every element satisfies the binding with no
+        # vkCmdBindDescriptorSets at all — pushed descriptors are independent
+        # command-buffer state, not a descriptor-set mutation.
+        self.prepare(dtype=6, count=1)
+        self.bind(sets=False)
+        self.push_desc(offset=256)
+        self.replay()
+        result = self.state.resolve()
+        for stage in result.stages:
+            self.assertEqual((stage.bindings[0].offset, stage.bindings[0].kind),
+                             (256, 6))
+        result.validate()
+
+    def test_push_descriptor_storage_buffer_kind(self):
+        # dtype 7 (STORAGE_BUFFER) pushes a kind-7 operand; pushing it onto a
+        # uniform-buffer binding must be refused by the kind cross-check.
+        self.prepare(dtype=6, count=1)
+        self.bind()
+        self.push_desc(dtype=7, offset=512)
+        self.replay()
+        with self.assertRaises(ValueError):
+            self.state.resolve()
+
+    def test_push_descriptor_out_of_range_set_is_ignored(self):
+        # a push targeting a set index the layout does not declare stores
+        # state that resolve() never consults — it must not fault.
+        self.prepare(dtype=6, count=1)
+        self.bind()
+        self.push_desc(set_index=3, offset=512)
+        self.replay()
+        result = self.state.resolve()
+        for stage in result.stages:
+            self.assertEqual((stage.bindings[0].offset, stage.bindings[0].kind),
+                             (0, 6))
+        result.validate()
 
     def test_undefined_push_word_is_refused(self):
         self.prepare(push=True)
