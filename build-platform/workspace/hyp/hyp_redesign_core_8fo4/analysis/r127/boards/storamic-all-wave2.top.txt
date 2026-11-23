@@ -1,0 +1,18 @@
+# delay-v50 budget=8.0 fo4_ps=20.0 modules=16 board-worst=45.0 (regtoreg)
+module                       live    any k  class                    line |    rr    ir    ro    io
+g6lc_storamic_axi_memory     Y      45.0 rr plain                  L312   |  45.0     -  30.2  23.2
+g6lc_storamic_regs           Y      40.9 rr independent_lhs_bundle L431   |  40.9  35.4  14.2  35.5
+g6lc_storamic_virtio_blk     Y      31.6 rr independent_lhs_bundle L300   |  31.6     -   9.3   4.0
+g6lc_storamic_virtio_segchk  Y      29.0 ir plain                  L47    |  22.7  29.0  12.5  15.9
+g6lc_storamic_virtio_ring    Y      28.0 rr independent_lhs_bundle L223   |  28.0   6.2   9.8  19.0
+g6lc_storamic_virtio_mmio    Y      27.5 rr independent_lhs_bundle L199   |  27.5  10.4  16.6  25.3
+g6lc_storamic_slot_mux       Y      26.8 io independent_lhs_bundle L76    |  26.8  10.2  24.2  26.8
+g6lc_storamic_axi_req_check  Y      21.7 io plain                  L63    |     -     -     -  21.7
+g6lc_storamic_discovery      Y      19.3 rr independent_lhs_bundle L154   |  19.3     -  18.2  15.7
+g6lc_storamic_discovery_set  Y      12.5 rr exclusive_case_mux     L94    |  12.5     -   2.7   5.0
+g6lc_storamic_store_guard    Y      11.6 io independent_lhs_bundle L65    |  11.6   5.0   6.8  11.6
+g6lc_storamic_axi_refuse     Y       9.1 rr independent_lhs_bundle L52    |   9.1     -   2.5   7.5
+g6lc_storamic_virtio_dev     Y       6.5 rr exclusive_case_mux     L166   |   6.5   3.0   5.0   5.5
+g6lc_storamic_top            Y       6.5 rr exclusive_case_mux     L72    |   6.5     -     -   3.0
+g6lc_storamic_sync           Y       4.5 rr exclusive_case_mux     L25    |   4.5     -   2.5     -
+g6lc_storamic_axi_lanes      Y       3.3 io under_budget           L25    |     -     -     -   3.3

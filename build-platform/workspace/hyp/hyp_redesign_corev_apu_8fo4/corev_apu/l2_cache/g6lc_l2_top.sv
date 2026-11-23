@@ -980,23 +980,31 @@ assign mst_req_o  = slv_req_i;
   // A head retire moves rd up and collect_cnt down together (position
   // unchanged); only a finished collect advances it. The add + wrap leaves
   // the fill-beat path; the old expression is the every-cycle reference.
-  logic [MSHR_W-1:0] collect_pos_q;
-  logic              collect_done;
+  logic [MSHR_W-1:0] collect_pos_q, issue_pos_q;
+  logic              collect_done, issue_done;
   always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) collect_pos_q <= '0;
-    else if (collect_done) collect_pos_q <= fifo_inc(collect_pos_q);
+    if (!rst_ni) begin
+      collect_pos_q <= '0;
+      issue_pos_q   <= '0;
+    end else begin
+      if (collect_done) collect_pos_q <= fifo_inc(collect_pos_q);
+      if (issue_done)   issue_pos_q   <= fifo_inc(issue_pos_q);
+    end
   end
   assign collect_pos    = collect_pos_q;
+  assign issue_pos      = issue_pos_q;
   //pragma translate_off
   always_ff @(posedge clk_i) begin
     if (rst_ni) begin
       g6lc_r127_l2_collect_pos_eq: assert (collect_pos_q ===
           fifo_wrap((MSHR_W + 1)'(fifo_rd_q) + collect_cnt_q))
         else $error("g6lc_l2_top: equiv collector position");
+      g6lc_r127_l2_issue_pos_eq: assert (issue_pos_q ===
+          fifo_wrap((MSHR_W + 1)'(fifo_rd_q) + issued_cnt_q))
+        else $error("g6lc_l2_top: equiv issue position");
     end
   end
   //pragma translate_on
-  assign issue_pos      = fifo_wrap((MSHR_W + 1)'(fifo_rd_q) + issued_cnt_q);
   assign collect_idx    = fifo_q[collect_pos];
   assign issue_idx      = fifo_q[issue_pos];
   // An issued-but-not-yet-collected fill burst is outstanding on the R
@@ -1524,6 +1532,7 @@ assign mst_req_o  = slv_req_i;
     issued_cnt_d  = issued_cnt_q;
     collect_cnt_d = collect_cnt_q;
     collect_done  = 1'b0;
+    issue_done    = 1'b0;
     bfid_rpend_d  = bfid_rpend_q;
     bfid_timer_d  = bfid_timer_q;
     serve_turn_d  = serve_turn_q;
@@ -2065,6 +2074,7 @@ assign mst_req_o  = slv_req_i;
       if (mst_resp_i.ar_ready) begin
         fill_state_d[issue_idx] = F_FILLING;
         issued_cnt_d            = issued_cnt_d + 1'b1;
+        issue_done              = 1'b1;
       end
     end
     fill_ar_hold_d = fill_ar_offer && !mst_resp_i.ar_ready;

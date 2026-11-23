@@ -1,0 +1,3 @@
+# delay-v50 budget=8.0 fo4_ps=20.0 modules=1 board-worst=37.4 (regtoreg)
+module                       live    any k  class                    line |    rr    ir    ro    io
+g6lc_storamic_axi_memory     Y      37.4 rr plain                  L291   |  37.4   1.4  30.2  23.2

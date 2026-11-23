@@ -1,0 +1,4 @@
+# delay-v50 budget=8.0 fo4_ps=20.0 modules=2 board-worst=37.0 (regtoreg)
+module                       live    any k  class                    line |    rr    ir    ro    io
+g6lc_server_prefetcher       Y      37.0 rr plain                  L172   |  37.0   0.5  29.5  35.7
+g6lc_l2_pf                   Y      34.6 rr plain                  L292   |  34.6     -   2.0  22.0

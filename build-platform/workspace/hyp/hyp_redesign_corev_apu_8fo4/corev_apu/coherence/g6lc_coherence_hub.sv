@@ -1439,34 +1439,14 @@ assign mem_req_o            = core_req_i[0];
     assign inv_others  = ~({{NC-1{1'b0}}, 1'b1} << aw_winner);
     assign inv_wr_cand = (POLICY == COH_BROADCAST) ? inv_others : (sf_present & inv_others);
 
-    always_comb begin
-      inv_new        = '0;
-      inv_new_target = '0;
-      inv_wr_target  = '0;
-      if (aw_fire && aw_may_invalidate) begin
-        inv_new.valid     = 1'b1;
-        inv_new.dcache    = 1'b1;
-        inv_new.icache    = 1'b0;
-        inv_new.all_ways  = 1'b0;
-        inv_new.line_addr = coh_line_tag(core_req_i[aw_winner].aw.addr, LINE_BYTES);
-        inv_wr_target  = inv_wr_cand;
-        inv_new_target = inv_wr_cand;
-      end
-      // Union LR-kill victims (they need D$ inv of the reserved line)
-      if (lr_kill_v) begin
-        inv_new.valid     = 1'b1;
-        inv_new.dcache    = 1'b1;
-        inv_new.line_addr = lr_kill_line;
-        inv_new_target    = inv_new_target | lr_kill_cores;
-      end
-    end
-
-    // Filter effectiveness, one event per invalidating write: hit = the
-    // filter spared at least one non-writer core, overapprox = the write had
-    // to target every other core. Same definition for FILTERED and OOO; a
-    // BROADCAST hub reports every invalidating write as overapprox.
-    assign sf_hit  = aw_fire && aw_may_invalidate && (inv_wr_target != inv_others);
-    assign sf_over = aw_fire && aw_may_invalidate && (inv_wr_target == inv_others);
+    // A118: inv_new / inv_new_target / inv_wr_target always_comb removed
+    // (retention capture uses inv_wr_cand/lr_kill directly; PMU sf_hit/sf_over
+    // already gate on aw_fire && aw_may_invalidate so they read inv_wr_cand
+    // directly, cutting 6.7 FO4 off the aw_fire cone).
+    logic inv_wr_spared;
+    assign inv_wr_spared = (inv_wr_cand != inv_others);
+    assign sf_hit  = aw_fire && aw_may_invalidate &&  inv_wr_spared;
+    assign sf_over = aw_fire && aw_may_invalidate && !inv_wr_spared;
 
     // Retention of an accepted write's invalidation obligation (A106 decouple):
     // every invalidating AW / LR-kill captures into inv_pend_q (guaranteed

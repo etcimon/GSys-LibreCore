@@ -1,0 +1,3 @@
+# delay-v50 budget=8.0 fo4_ps=20.0 modules=1 board-worst=46.8 (regtoreg)
+module                       live    any k  class                    line |    rr    ir    ro    io
+g6lc_l2_top                  Y      46.8 rr plain                  L2278  |  46.8  43.2  38.1  38.6

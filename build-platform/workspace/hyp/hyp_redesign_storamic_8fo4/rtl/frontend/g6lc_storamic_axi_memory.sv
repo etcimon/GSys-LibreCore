@@ -294,6 +294,24 @@ module g6lc_storamic_axi_memory #(
                                           alloc_base[b +: LW];
   end
 
+  // A136 registered per-region derived constants (reg_end_q = base + bytes,
+  // reg_delta_q = offset - base). active_map only changes on map commit, at
+  // least 1 cycle before any AW/AR completes its walk and reaches MIdle;
+  // removes the 12.0-FO4 64-bit subtractor ahead of the address adder.
+  logic [64:0] reg_end_q   [Regions];
+  logic [63:0] reg_delta_q [Regions];
+  for (genvar ri = 0; ri < Regions; ri++) begin : gen_reg_cache
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        reg_end_q[ri]   <= {1'b0, RegionMap[ri].base} + {1'b0, RegionMap[ri].bytes};
+        reg_delta_q[ri] <= RegionMap[ri].offset - RegionMap[ri].base;
+      end else begin
+        reg_end_q[ri]   <= {1'b0, active_map[ri].base} + {1'b0, active_map[ri].bytes};
+        reg_delta_q[ri] <= active_map[ri].offset - active_map[ri].base;
+      end
+    end
+  end
+
   // A122 PushSelect + A105/A146: parallel W and R region lookup directly off flops.
   logic        pick_wr_beat;
   logic [63:0] r_word_aligned, beat_word_c;
@@ -306,16 +324,12 @@ module g6lc_storamic_axi_memory #(
   assign pick_wr_beat   = want_write && (!want_read || mq.prefer_write);
   assign r_word_aligned = rq.addr & ~64'(Bytes - 1);
   for (genvar ri = 0; ri < Regions; ri++) begin : gen_reg_lk
-    logic [64:0] reg_end_i;
-    logic [63:0] reg_delta_i;
-    assign reg_end_i      = {1'b0, active_map[ri].base} + {1'b0, active_map[ri].bytes};
-    assign reg_delta_i    = active_map[ri].offset - active_map[ri].base;
-    assign w_reg_cand[ri] = wq.word + reg_delta_i;
-    assign r_reg_cand[ri] = r_word_aligned + reg_delta_i;
+    assign w_reg_cand[ri] = wq.word + reg_delta_q[ri];
+    assign r_reg_cand[ri] = r_word_aligned + reg_delta_q[ri];
     assign w_reg_hit[ri]  = ({1'b0, active_map[ri].base} <= {1'b0, wq.word}) &&
-                            ({1'b0, wq.word} < reg_end_i);
+                            ({1'b0, wq.word} < reg_end_q[ri]);
     assign r_reg_hit[ri]  = ({1'b0, active_map[ri].base} <= {1'b0, r_word_aligned}) &&
-                            ({1'b0, r_word_aligned} < reg_end_i);
+                            ({1'b0, r_word_aligned} < reg_end_q[ri]);
   end
   always_comb begin : p_reg_pick
     w_reg_slot = '0; w_reg_addr = '0;

@@ -1,0 +1,11 @@
+# delay-v50 budget=8.0 fo4_ps=20.0 modules=10 board-worst=26.9 (regtoreg)
+module                       live    any k  class                    line |    rr    ir    ro    io
+g6lc_storamic_sim_mem        Y      26.9 rr independent_lhs_bundle L225   |  26.9   8.8  23.5  18.4
+g6lc_storamic_durable_store  Y      23.6 ro plain                  L151   |  21.4   8.5  23.6  15.1
+g6lc_storamic_ctrl_bridge    Y      22.7 ro plain                  L149   |  20.2  22.2  22.7  20.2
+g6lc_storamic_dma_axi        Y      21.4 rr plain                  L75    |  21.4     -  18.4   9.6
+g6lc_storamic_axi_gate       Y      19.5 rr plain                  L90    |  19.5     -   8.8  12.7
+g6lc_storamic_dmi_sberror    Y       9.2 rr independent_lhs_bundle L97    |   9.2   1.0   8.3   8.3
+g6lc_storamic_cpu_pause      Y       8.5 rr exclusive_case_mux     L71    |   8.5     -   5.4   4.4
+g6lc_storamic_model_store    Y       7.8 ir under_budget           L26    |   4.5   7.8   5.5     -
+g6lc_storamic_attach         Y       2.0 io under_budget           L251   |     -     -     -   2.0

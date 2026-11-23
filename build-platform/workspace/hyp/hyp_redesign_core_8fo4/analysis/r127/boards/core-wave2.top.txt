@@ -1,0 +1,35 @@
+# delay-v50 budget=8.0 fo4_ps=20.0 modules=240 board-worst=36.3 (regtoreg)
+module                       live    any k  class                    line |    rr    ir    ro    io
+instr_queue                  Y      43.2 ro plain                  L268   |  26.8     -  43.2  15.2
+issue_read_operands          Y      40.0 io plain                  L1268  |  14.5  25.5  10.0  40.0
+g6lc_ptw_leg_decode          Y      38.2 io exclusive_case_mux     L154   |     -     -     -  38.2
+g6lc_zicclsm                 Y      38.0 io plain                  L119   |  18.7  35.8  25.7  38.0
+g6lc_iq                      Y      37.1 io plain                  L272   |   4.5  32.3     -  37.1
+g6lc_ptw                     Y      36.0 io independent_lhs_bundle L553   |  36.0  27.7  20.7  36.0
+load_unit                    Y      35.5 ro plain                  L1766  |  34.8  34.2  35.5  29.4
+csr_regfile                  Y      34.9 rr plain                  L3398  |  34.9  33.5  19.2  29.9
+g6lc_rename_read             Y      34.8 io plain                  L246   |     -     -     -  34.8
+instr_realign                Y      34.5 rr plain                  L569   |  34.5   4.0   2.5  12.3
+aes                          Y      32.9 ro plain                  L345   |  27.9  29.5  32.9  24.0
+alu                          Y      32.9 rr plain                  L949   |  32.9  24.0  26.6  26.0
+g6lc_fe_override             Y      32.5 rr plain                  L239   |  32.5     -  32.5  13.6
+g6lc_bp_ckpt                 Y      32.3 rr plain                  L430   |  32.3  14.3  30.3  15.2
+g6lc_iq_arb                  Y      32.2 rr plain                  L672   |  32.2     -  31.8  25.9
+wt_axi_adapter               Y      32.0 rr plain                  L774   |  32.0  17.5   9.8  14.0
+g6lc_fp_zfa_round            Y      31.9 io plain                  L86    |     -     -     -  31.9
+g6lc_fp_zfa                  Y      31.5 ir plain                  L367   |  21.3  31.5  20.4  20.6
+wt_dcache_wbuffer            Y      31.4 rr plain                  L1110  |  31.4   4.5  28.4  19.7
+g6lc_rename_recover          Y      31.2 io independent_lhs_bundle L590   |  27.7  31.2   5.0  31.2
+g6lc_ooo_dispatch            Y      30.8 ro plain                  L1376  |  24.4   9.6  30.8  11.3
+g6lc_mmu                     Y      30.4 ro plain                  L811   |  11.0   5.0  30.4  24.6
+g6lc_iq_bank                 Y      30.1 rr plain                  L1297  |  30.1   5.2  30.1  20.4
+g6lc_decode_s3               Y      30.1 io plain                  L410   |     -     -     -  30.1
+g6lc_fe_redirect             Y      30.0 ro exclusive_case_mux     L184   |   5.5  19.8  30.0  24.4
+g6lc_lsq                     Y      29.6 ir plain                  L586   |  11.5  29.6   2.5  24.6
+wt_dcache_missunit           Y      29.6 io plain                  L605   |  27.7  15.2  23.1  29.6
+perf_counters                Y      29.4 io independent_lhs_bundle L535   |  21.1  29.4  21.6  29.4
+g6lc_tlb                     Y      28.6 rr plain                  L803   |  28.6   2.0     -   9.6
+multiplier                   Y      28.2 io exclusive_case_mux     L678   |  28.2  25.5     -  28.2
+
+# clock rule (live reg->reg): g6lc_ptw 36.0 L553, csr_regfile 34.9 L3398, load_unit 34.8 L654, instr_realign 34.5 L569, alu 32.9 L949, g6lc_fe_override 32.5 L239, g6lc_bp_ckpt 32.3 L430, g6lc_iq_arb 32.2 L672, wt_axi_adapter 32.0 L774, wt_dcache_wbuffer 31.4 L1110, g6lc_iq_bank 30.1 L1297, g6lc_tlb 28.6 L803, multiplier 28.2 L678, csr_buffer 28.2 L144
+# not elaborated (board floor): hpdcache_ctrl_pe 75.8, hpdcache_mshr 56.5, g6lc_ai_exec 45.6, bht 42.2, g6lc_shared_tlb 36.3, copro_alu 34.0, fpnew_fma_multi 33.3, g6lc_freelist 32.6, g6lc_hpdcache_if_adapter 32.3, hpdcache_cmo 31.6, axi_adapter_arbiter 31.5, macro_decoder 31.2, g6lc_slice_dispatch 30.2, hpdcache_amo 28.5, g6lc_regfile_fpga 27.6, hpdcache_wbuf 27.6, g6lc_issue_barrier 27.4, g6lc_rrip_repl 27.3, hpdcache_miss_handler 27.2, instr_decoder 27.1, hpdcache_ctrl 26.9, miss_handler 26.5, axi_adapter 25.9, hwpf_stride 25.4

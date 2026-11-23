@@ -1,0 +1,22 @@
+# delay-v50 budget=8.0 fo4_ps=20.0 modules=35 board-worst=71.5 (regtoreg)
+module                       live    any k  class                    line |    rr    ir    ro    io
+g6lc_ai_fp_dot               Y     271.5 io independent_lhs_bundle L87    |     -     -     - 271.5
+g6lc_ai_cluster_set          Y      71.5 rr independent_lhs_bundle L68    |  71.5     -     -     -
+g6lc_ai_gemm_arplan          Y      59.0 rr independent_lhs_bundle L283   |  59.0     -   8.1  31.5
+g6lc_ai_gemm_seq             Y      42.9 rr plain                  L2589  |  42.9  27.7   4.0  28.5
+g6lc_ai_gemm_fp32_norm       Y      42.4 io plain                  L181   |     -     -     -  42.4
+g6lc_ai_island_top           Y      39.6 io exclusive_case_mux     L2241  |  35.6  31.5  22.8  39.6
+g6lc_ai_pe_dot_float_pipe    Y      37.2 rr plain                  L794   |  37.2  27.4     -  28.5
+g6lc_ai_gemm_fp32_align      Y      36.7 io plain                  L52    |     -     -     -  36.7
+g6lc_ai_cluster_tile         Y      31.9 rr independent_lhs_bundle L135   |  31.9     -   1.0  22.0
+g6lc_ai_fp_mac               Y      31.6 rr plain                  L54    |  31.6     -   4.4  26.5
+g6lc_ai_gemm_store_plan      Y      30.6 rr plain                  L126   |  30.6   2.0   1.4  13.5
+g6lc_ai_policy_subcode       Y      30.4 rr independent_lhs_bundle L203   |  30.4  25.3     -  14.1
+g6lc_ai_desc_fetch           Y      29.5 rr independent_lhs_bundle L234   |  29.5   8.5   5.7   8.1
+g6lc_ai_desc_engine          Y      29.4 io independent_lhs_bundle L579   |  29.4   4.5  18.0  29.4
+g6lc_ai_pmu_rate             Y      28.9 rr independent_lhs_bundle L2503  |  28.9     -   1.0  12.3
+g6lc_ai_cap_window           Y      28.8 ir plain                  L161   |   4.5  28.8     -  23.5
+g6lc_ai_policy_topology      Y      27.8 rr independent_lhs_bundle L110   |  27.8  19.4     -  15.4
+g6lc_ai_inval_queue          Y      26.3 io plain                  L170   |  19.8  26.3  10.8  26.3
+g6lc_ai_cluster_dispatch     Y      25.6 io independent_lhs_bundle L625   |  24.6   3.5   5.8  25.6
+g6lc_ai_dram_timing          Y      24.6 rr independent_lhs_bundle L172   |  24.6     -   3.0   4.0

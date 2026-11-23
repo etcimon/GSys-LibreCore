@@ -417,3 +417,59 @@ parallel emit-eval) + r127-y/z (unmeasured-module sweep) + r127-v (hub demux)
 remaining row ≥~28 FO4 is contract/floor/dead as tabulated. Contract batch =
 the not-done set; each needs dedicated implementation + module bench +
 remote gating.
+
+---
+
+## Wave 1 + Tier 2 + Storamic LiteDRAM-Replacement FO4 Campaign (`c21fd1b8c` + follow-on)
+
+Re-measured HEAD (`sv-timing` `delay-v50`, `5000 MHz / fo4_ps=20 / margin=0.2`,
+`budget=8.0 FO4`) across `hyp_redesign_core_8fo4`, `hyp_redesign_corev_apu_8fo4`,
+and the new `hyp_redesign_storamic_8fo4` + `hyp_redesign_corev_apu_8fo4/storamic/`
+trees (pulled from `sv-timing` emits in `storamic/{storamic-fo4,corev_apu-storamic-fo4}/`,
+checkpointing deferred via `StoramicCheckpointEn=0` / `CheckpointRequested=0`).
+
+### Headline Scoreboard (Baseline → Current HEAD)
+
+- **Core live clock rule (`reg→reg`):** **51.6 → `36.0 FO4`** (`g6lc_ptw` L553; −30%)
+- **Core live overall worst (any path):** **86.7 / 76.6 → `43.2 FO4`** (`instr_queue` `ro`; −50%)
+- **APU live worst (`reg→reg`):** **138.8 → `52.2 FO4`** (`g6lc_coherence_hub`; −62%, −86.6 FO4)
+- **Storamic (`hyp_redesign_storamic_8fo4`, non-checkpoint):** **175.5 `io` / 166.1 `rr` → `40.9 FO4`** (`g6lc_storamic_regs` 40.9, `g6lc_storamic_axi_memory` **37.4 `rr` / 30.2 `ro` / 23.2 `io`**; −77%)
+- **APU Storamic (`hyp_redesign_corev_apu_8fo4/storamic/`, non-checkpoint):** **31.1 → `26.9 FO4`** (all non-checkpoint modules ≤ 26.9 FO4)
+
+### Implemented Module Deltas (ALGORITHMS-EXPERTS.md Transforms)
+
+| Tree | Module | Baseline → Final (FO4) | Transform & Contract Note |
+|---|---|---:|---|
+| Core | `g6lc_fp_zfa` / `g6lc_fp_zfa_round` | 76.6 / 86.7 → **31.5 / 31.9** | A10 narrow 11b biased exp + thermometer masks + A146 byte mux + A40/A123 internal 2-stage decoupled pipe behind `fpu_wrap` handshake (0 caller edits) |
+| Core | `g6lc_ooo_dispatch` | 59.9 → **30.8** | A134 registered `iss_amocas_q` + A146 byte-sliced `issue_op_c_o` (0 contract change) |
+| Core | `g6lc_zicclsm` | 51.6 `rr` → **18.7 `rr`** (`io` 38.0) | A136 pre-aligned `b0_aligned` + 8-byte mux + output-side `finish_load` across `hold_r_q` (0 contract change) |
+| Core | `g6lc_decode_s3` | 44.1 → **30.1** (`io`) | A39 opcode-disjoint `sf_ill`/`hv_ill` + balanced 2-level OR tree (0 contract change) |
+| Core | `g6lc_tlb` | 41.9 → **28.6** (`rr`) | A135 hoist `vpn_to_store`/`fill_tag_bits` + A140 prefix-OR `fill_ovl_first` (0 contract change) |
+| Core | `issue_read_operands` | 41.5 → **40.0** (`io`, `ir` 25.5) | A118 `v_raw` off `\|wb_hit` + A119 `genvar` prefix-OR `lsu_mem_grant` (0 contract change) |
+| Core | `g6lc_rename_read` | 40.2 → **34.8** (`io`) | A140 pow2 bit-slice/shift for `ckpt_slot` (0 contract change) |
+| Core | `wt_dcache_wbuffer` | 37.7 `ro` → **31.4 `rr` / 28.4 `ro`** | A140/A146 `genvar` prefix-OR isolates + per-slot/byte `gen_fixup_out` (0 contract change) |
+| Core | `aes` / `csr_regfile` | 35.5 / 35.3 → **32.9 / 34.9** | A10 single-byte AES32 GF MixColumns; A105/A134 read-time `mstatus.sd`/`vsstatus.sd` (0 contract change) |
+| APU | `g6lc_l2_pf` | 138.8 → **34.6** (`rr`) | A136 registered running `cand_off_q`/`cand_in_page_q` + A118/A135 row-local constant-index `st_d[s]` (0 contract change) |
+| APU | `g6lc_server_prefetcher` | 74.5 → **37.0** (`rr`) | A136 `exp_addr` + A118 parallel match/alloc + 1-cycle speculative training tap (demand AR 0-cycle bypass) |
+| APU | `g6lc_coherence_hub` | 62.2 → **52.2** (`rr`, `io` 36.1) | A106 removed 0-cycle bypass around `inv_pend_q`; A118 direct pair-OR `two_free_slots`, unconditional `!inv_pend_valid_q` capture, dead `inv_new`/`inv_wr_target` removal; A38/A122 `gen_starve_cnt` off `aw_pick_oh`/`ar_pick_oh` |
+| APU | `g6lc_l2_top` | L3 54.5 / L2 50.1 → **46.8 / 45.3** (`ro` 38.1 / 37.8) | A118 read `victim_way` directly; A140 flat `genvar` `pf_way`/`victim_way`/`inst_oh`; A136 registered `issue_pos_q` (0 contract change) |
+| APU | `g6lc_ai_gemm_seq` | 49.6 → **41.5** (`rr`) | A118 unconditional C-bank read indices (`c_r0_bank`/`c_r1_bank`/`c_rx_bank`) + A122 `PushSelect` store-pair math (0 contract change) |
+| APU | `g6lc_ai_island_top` / `desc_engine` | 43.2 / 34.8 → **35.6 `rr` (39.6 `io`) / 29.4** | A38/A146 split 1-bit submit control out of 512-bit `submit_desc_mux`; per-byte selects on `check_addr_o`/`check_len_o`/`cpl_push_ticket` |
+| APU | `g6lc_l2_mshr` | 39.8 → **29.1** (`rr`) | A105 `count_d` delta + A135 row-local constant-index `mem_d[i]` (0 contract change) |
+| APU | `g6lc_ai_pe_dot_float_pipe` | 37.2 (r127-ab 80.2) → **28.6** (`rr`) | A118 removed redundant 640-bit `final_bfp_sum != 0` mux ahead of `bfp_mant_exp_to_fp32` (0 contract change) |
+| Storamic | `g6lc_storamic_axi_memory` + `axi_lanes` + `axi_req_check` | 175.5 `io` / 166.1 `rr` → **37.4 `rr` / 30.2 `ro` / 23.2 `io`** (`axi_lanes` 3.3, `axi_req_check` 21.7) | Extracted `g6lc_storamic_axi_decode.sv` (3-bit lanes, 13-bit within-page check, bitwise WRAP); A105 parallel sequence allocator + A146 byte-sliced 33b muxes; A122/A136 registered `reg_end_q`/`reg_delta_q` + parallel W/R lookup; A38 4-channel state decomposition (`wq`/`rq`/`mq`/`sq`) |
+| Storamic | `g6lc_storamic_regs` | 129.1 → **40.9** (`rr`) | A140 flat `genvar` leading-valid encoder replacing 120-FO4 `n_regions_of()` loop |
+| Storamic | `g6lc_storamic_virtio_blk` + `virtio_segchk` | 112.7 → **31.6** (`segchk` 29.0 `ir` / 22.7 `rr`) | Extracted 3-stage pipelined balanced-tree `g6lc_storamic_virtio_segchk.sv` settling during `SHdr+SParse` (0 extra cycles) |
+| Storamic | `g6lc_storamic_slot_mux` / `discovery` | 30.9 / 30.1 → **26.8 / 19.3** | A146 per-byte replicated selects on 64-bit readback/descriptor outputs |
+| APU Storamic | `ctrl_bridge` / `dma_axi` / `durable_store` / `axi_gate` | 31.1 / 28.8 / 28.1 / 26.8 → **22.7 / 21.4 / 23.6 / 19.5** | A146 byte-sliced `lresp.r.data`/`r_data_d`; A134 registered `up_owns_q`; A140 parallel `stg_match` CAM; A105 single-stage `+1/-1/0` counter delta mux; wired into `g6lc_ai_dram_backend.sv` + `Flist.hyp8_apu` |
+
+### Verification Evidence
+
+- **Verilator 5.020 `--lint-only -Werror-LATCH`:** `g6lc_core` (`rc=0`), `g6lc_ai_island_top` (`rc=0`), `wrap_l2_top` (`rc=0`), `g6lc_ai_dram_backend` (`StoramicEn=0` and `StoramicEn=1`, both `rc=0`), `g6lc_storamic_top` / `virtio_dev` / `slot_mux` / `discovery` / `attach` / `durable_store` / `wrap_sto_soc` (all `rc=0`).
+- **Directed benches (`--assert -Werror-LATCH`):**
+  - `verif/tb/storamic/` against redesigned hyp8 trees: **10/10 PASS** (`tb_g6lc_storamic`, `model`, `map`, `regs`, `virtio_blk` 1609 checks, `virtio_dev` 163 checks, `discovery` 19 checks, `ctrl_bridge` 134 checks, `dma_axi` 129 checks, `durable_store` 88 checks).
+  - `run_hub_bench.sh` (`HUB_GEOMS="4:2 1:2"`): **14/14 PASS** (`fail=0`; `nc=4` scenario 5 remains a pre-existing TB `invalidation_ready=2'b11` width defect).
+  - `verif/tb/ai_island/run-pe-dot-float-pipe.sh`: **PASS** (`5028/5028` checks, unchanged latency).
+  - `L2TB_MODE=units`: **UNITS PASS**.
+- **Remaining not-done contract/knob work:** default-off pipelining knobs (`PtwDecodeStage=1`, `Fp32Pipe2=1`, `AesPipe3=1`, `IqSteerStages=2`, `LoadExPubStages=2`), `instr_queue` `ro` 43.2, `g6lc_coherence_hub` AW-grant→`aw_fire` 52.2, `g6lc_l2_top` 46.8/45.3, `g6lc_storamic_regs` 40.9, and deferred Storamic checkpointing (`StoramicCheckpointEn=1`).
+- Curated board summaries saved in `analysis/r127/boards/*-wave2.top.txt`.

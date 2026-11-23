@@ -1,0 +1,3 @@
+# delay-v50 budget=8.0 fo4_ps=20.0 modules=1 board-worst=52.2 (regtoreg)
+module                       live    any k  class                    line |    rr    ir    ro    io
+g6lc_coherence_hub           Y      52.2 rr plain                  L908   |  52.2     -  50.6  36.1
