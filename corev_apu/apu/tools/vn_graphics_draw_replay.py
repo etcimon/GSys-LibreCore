@@ -27,7 +27,8 @@ from vn_graphics_state import (DYNAMIC_PRIMITIVE_RESTART,
                                DYNAMIC_DEPTH_WRITE_ENABLE,
                                DYNAMIC_DEPTH_COMPARE_OP,
                                DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE,
-                               DYNAMIC_DEPTH_BOUNDS)
+                               DYNAMIC_DEPTH_BOUNDS,
+                               DYNAMIC_DEPTH_BIAS_ENABLE, DYNAMIC_DEPTH_BIAS)
 
 
 def _push(stages):
@@ -195,6 +196,20 @@ def operation(engine, context_id, plan, remember, guards):
             bmin, bmax = struct.unpack('<2f', struct.pack('<2I',
                 *plan.bounds))
         bounds = (bmin, bmax) if bounds_enable else None
+    # vkCmdSetDepthBiasEnable / vkCmdSetDepthBias override the pipeline depth
+    # bias only when the pipeline declared the matching VkDynamicState;
+    # unset commands keep the create-info (const,clamp,slope) triple.
+    depth_bias = None
+    if fixed.depth_bias is not None:
+        dbe, bconst, bclamp, bslope = fixed.depth_bias
+        if (DYNAMIC_DEPTH_BIAS_ENABLE in fixed.dynamic and
+                plan.depth_bias_enable is not None):
+            dbe = plan.depth_bias_enable
+        if (DYNAMIC_DEPTH_BIAS in fixed.dynamic and
+                plan.depth_bias is not None):
+            bconst, bclamp, bslope = struct.unpack('<3f',
+                struct.pack('<3I', *plan.depth_bias))
+        depth_bias = (bconst, bclamp, bslope) if dbe else None
     fetch = Fetch(indexed, plan.indices, vertices, direct, indirect,
                   restart)
     viewport = struct.unpack('<6f', struct.pack('<6I', *plan.viewport))
@@ -211,7 +226,7 @@ def operation(engine, context_id, plan, remember, guards):
                   write_mask=fixed.color_masks[location],
                   logic_op=fixed.logic_op, discard=discard,
                   extra_targets=extra_targets,
-                  bounds=bounds, depth_bias=fixed.depth_bias,
+                  bounds=bounds, depth_bias=depth_bias,
                   depth_clamp=fixed.depth_clamp, poly_mode=fixed.poly_mode,
                   topology=fixed.topology, depth_fmt=depth_fmt,
                   stencil=fixed.stencil, blend_extra=fixed.blend_extra)

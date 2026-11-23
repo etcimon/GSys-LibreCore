@@ -1902,6 +1902,8 @@ class DrawReplayTests(unittest.TestCase):
         'vkCmdSetDepthCompareOp': 1000267008,
         'vkCmdSetDepthBoundsTestEnable': 1000267009,
         'vkCmdSetDepthBounds': 5,
+        'vkCmdSetDepthBiasEnable': 1000377002,
+        'vkCmdSetDepthBias': 3,
     }
 
     def dyn_depth_prepared(self, commands, depth_load=0, depth_clear=None,
@@ -2764,6 +2766,68 @@ class DrawReplayTests(unittest.TestCase):
         for x, y in ((0, 0), (4, 1)):
             self.assertEqual(self.read_texel(x, y), self.clear_texel())
             self.assertAlmostEqual(self.read_depth(x, y), 1.0, places=6)
+
+    def test_draw_dynamic_depth_bias_disable_unbiases(self):
+        # vkCmdSetDepthBiasEnable(0) overrides create-info depthBiasEnable=1:
+        # the +0.25 constant bias that lifted z_win 0.5->0.75 (failing LESS
+        # against the 0.6 seed) is removed, so unbiased 0.5 passes and
+        # commits 0.5.
+        self.upload(self.ndc_triangle())
+        self.seed_depth(0.6)
+        self.dyn_depth_prepared(
+            [('vkCmdSetDepthBiasEnable', dict(depthBiasEnable=0))],
+            compare=1, write=1, depth_test=1, bias=(0.25, 0.0, 0.0))
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.fc_texel(x, y))
+            self.assertAlmostEqual(self.read_depth(x, y), 0.5, places=6)
+
+    def test_draw_dynamic_depth_bias_revalue(self):
+        # vkCmdSetDepthBias(0,0,0) overrides the create-info +0.25 constant:
+        # z_win stays 0.5 (not the biased 0.75), so the stored depth is the
+        # unbiased value against the 1.0 seed.
+        self.upload(self.ndc_triangle())
+        self.seed_depth(1.0)
+        self.dyn_depth_prepared(
+            [('vkCmdSetDepthBias',
+              dict(depthBiasConstantFactor=self.fbits(0.0),
+                   depthBiasClamp=self.fbits(0.0),
+                   depthBiasSlopeFactor=self.fbits(0.0)))],
+            compare=1, write=1, depth_test=1, bias=(0.25, 0.0, 0.0))
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.fc_texel(x, y))
+            self.assertAlmostEqual(self.read_depth(x, y), 0.5, places=6)
+
+    def test_draw_dynamic_depth_bias_enable_on_disabled(self):
+        # vkCmdSetDepthBiasEnable(1) + vkCmdSetDepthBias(0.25,0,0) on a
+        # pipeline whose create-info left bias off re-enables and re-values
+        # the bias: z_win 0.5 is lifted to 0.75, failing LESS against the
+        # 0.6 seed — no colour, depth keeps 0.6.
+        self.upload(self.ndc_triangle())
+        self.seed_depth(0.6)
+        self.dyn_depth_prepared(
+            [('vkCmdSetDepthBiasEnable', dict(depthBiasEnable=1)),
+             ('vkCmdSetDepthBias',
+              dict(depthBiasConstantFactor=self.fbits(0.25),
+                   depthBiasClamp=self.fbits(0.0),
+                   depthBiasSlopeFactor=self.fbits(0.0)))],
+            compare=1, write=1, depth_test=1, bias=None)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        for x, y in ((0, 0), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.clear_texel())
+            self.assertAlmostEqual(self.read_depth(x, y), 0.6, places=6)
 
     # ---- bounded MRT (two colour attachments) end-to-end ----
     # fs_program2 emits loc0=vcol, loc1=const; the single Writeback stage

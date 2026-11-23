@@ -45,9 +45,13 @@ class GraphicsState:
     # rasterization (vertex shading still runs; zero fragments reach
     # writeback).  0 keeps normal rasterization.
     discard: int = 0
-    # optional bounded depth bias: (constantFactor, clamp, slopeFactor)
-    # fp32 triple when depthBiasEnable=1; the raster stage folds the
-    # per-triangle slope term in and adds the result to window depth.
+    # optional bounded depth bias: (depthBiasEnable, constantFactor, clamp,
+    # slopeFactor) fp32 triple kept whenever rasterization state exists so a
+    # dynamic VK_DYNAMIC_STATE_DEPTH_BIAS(_ENABLE) can re-enable or re-tune
+    # a bias the create-info left off; the (const,clamp,slope) triple is
+    # emitted only while the effective enable is set.  The per-triangle
+    # slope term is evaluated in the raster stage; r is 1.0 for the D32
+    # depth format this profile admits.
     depth_bias: object = None
     # depthClampEnable: 1 skips the near/far depth-range clip and clamps
     # each fragment's window depth into the viewport range; 0 keeps the
@@ -92,8 +96,10 @@ DYNAMIC_DEPTH_TEST_ENABLE = 1000000000 + (268 - 1) * 1000 + 6
 DYNAMIC_DEPTH_WRITE_ENABLE = 1000000000 + (268 - 1) * 1000 + 7
 DYNAMIC_DEPTH_COMPARE_OP = 1000000000 + (268 - 1) * 1000 + 8
 DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE = 1000000000 + (268 - 1) * 1000 + 9
+DYNAMIC_DEPTH_BIAS_ENABLE = 1000000000 + (378 - 1) * 1000 + 2
 # base VkDynamicState enums (vk.xml <enums> values, not extension offsets)
 DYNAMIC_DEPTH_BOUNDS = 5
+DYNAMIC_DEPTH_BIAS = 3
 _DYNAMIC_ADMITTED = frozenset((DYNAMIC_PRIMITIVE_RESTART,
                              DYNAMIC_RASTERIZER_DISCARD,
                              DYNAMIC_CULL_MODE, DYNAMIC_FRONT_FACE,
@@ -101,7 +107,8 @@ _DYNAMIC_ADMITTED = frozenset((DYNAMIC_PRIMITIVE_RESTART,
                              DYNAMIC_DEPTH_WRITE_ENABLE,
                              DYNAMIC_DEPTH_COMPARE_OP,
                              DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE,
-                             DYNAMIC_DEPTH_BOUNDS))
+                             DYNAMIC_DEPTH_BOUNDS,
+                             DYNAMIC_DEPTH_BIAS_ENABLE, DYNAMIC_DEPTH_BIAS))
 
 
 def validate(engine, fields, blobs, render_pass, subpass=0):
@@ -207,17 +214,15 @@ def validate(engine, fields, blobs, render_pass, subpass=0):
     # fp32 triple retained when depthBiasEnable=1.  The per-triangle
     # slope term is evaluated in the raster stage; r is 1.0 for the D32
     # depth format this profile admits.
-    depth_bias = None
     dbe = one('depthBiasEnable')
     if dbe not in (0, 1):
         raise ValueError('graphics fixed depthBiasEnable exceeds profile')
-    if dbe:
-        depth_bias = tuple(
-            struct.unpack('<f', struct.pack('<I', one(name)))[0]
-            for name in ('depthBiasConstantFactor', 'depthBiasClamp',
-                         'depthBiasSlopeFactor'))
-        if not all(math.isfinite(v) for v in depth_bias):
-            raise ValueError('graphics fixed depth bias exceeds profile')
+    depth_bias = (dbe,) + tuple(
+        struct.unpack('<f', struct.pack('<I', one(name)))[0]
+        for name in ('depthBiasConstantFactor', 'depthBiasClamp',
+                     'depthBiasSlopeFactor'))
+    if dbe and not all(math.isfinite(v) for v in depth_bias[1:]):
+        raise ValueError('graphics fixed depth bias exceeds profile')
     dcl = one('depthClampEnable')
     if dcl not in (0, 1):
         raise ValueError('graphics fixed depthClampEnable exceeds profile')

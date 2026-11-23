@@ -109,13 +109,15 @@ class GraphicsStateTests(unittest.TestCase):
         self.assertEqual(snapshot.fixed.restart, 1)
 
     def test_depth_bias_state_is_retained(self):
-        # depthBiasEnable=1 retains the (constantFactor, clamp,
-        # slopeFactor) fp32 triple; the factors are wire fp32 bit patterns.
+        # depthBiasEnable=1 retains (enable, constantFactor, clamp,
+        # slopeFactor): the enable flag leads so a dynamic
+        # VK_DYNAMIC_STATE_DEPTH_BIAS can re-window a disabled bias; the
+        # factors are wire fp32 bit patterns.
         f32 = lambda v: struct.unpack('<I', struct.pack('<f', v))[0]
         snapshot = self.pipeline({'pRasterizationState': dict(
             depthBiasEnable=1, depthBiasConstantFactor=f32(0.25),
             depthBiasClamp=f32(1.0), depthBiasSlopeFactor=f32(0.0))})
-        self.assertEqual(snapshot.fixed.depth_bias, (0.25, 1.0, 0.0))
+        self.assertEqual(snapshot.fixed.depth_bias, (1, 0.25, 1.0, 0.0))
         self.refuses({'pRasterizationState': dict(depthBiasEnable=2)})
 
     def test_depth_clamp_state_is_retained(self):

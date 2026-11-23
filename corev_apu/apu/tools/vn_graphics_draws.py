@@ -45,6 +45,8 @@ class DrawPlan(Recording):
     depth_compare: object
     bounds_test: object
     bounds: object
+    depth_bias_enable: object
+    depth_bias: object
     vertices: tuple
     indices: object
     references: tuple
@@ -60,7 +62,8 @@ _BOOL_ATTR = {'primitive_restart': 'restart',
               'depth_test': 'depth_test',
               'depth_write': 'depth_write',
               'depth_compare': 'depth_compare',
-              'bounds_test': 'bounds_test'}
+              'bounds_test': 'bounds_test',
+              'depth_bias_enable': 'depth_bias_enable'}
 
 
 class GraphicsDraws:
@@ -79,6 +82,7 @@ class GraphicsDraws:
         self.restart = self.discard = self.cull = self.front_face = None
         self.depth_test = self.depth_write = self.depth_compare = None
         self.bounds_test = self.bounds = None
+        self.depth_bias_enable = self.depth_bias = None
         self.vertices, self.index_source = {}, None
         self.pass_state = None
         self.subpass = 0
@@ -352,4 +356,5 @@ class GraphicsDraws:
                 self.cull, self.front_face,
                 self.depth_test, self.depth_write, self.depth_compare,
                 self.bounds_test, self.bounds,
+                self.depth_bias_enable, self.depth_bias,
                 vertices, indices, references, validate))

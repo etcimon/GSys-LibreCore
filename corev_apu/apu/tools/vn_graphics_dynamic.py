@@ -32,6 +32,7 @@ _SCALAR_DYNAMIC = {
     'vkCmdSetDepthWriteEnable': ('depth_write', 0, 1),
     'vkCmdSetDepthCompareOp': ('depth_compare', 0, 7),
     'vkCmdSetDepthBoundsTestEnable': ('bounds_test', 0, 1),
+    'vkCmdSetDepthBiasEnable': ('depth_bias_enable', 0, 1),
 }
 _BOOL_DYNAMIC = {n: k for n, (k, _lo, _hi) in _SCALAR_DYNAMIC.items()}
 
@@ -40,6 +41,7 @@ _BOOL_DYNAMIC = {n: k for n, (k, _lo, _hi) in _SCALAR_DYNAMIC.items()}
 # DynamicCommand tuple verbatim; semantic float/range checks run per kind.
 _VECTOR_DYNAMIC = {
     'vkCmdSetDepthBounds': ('bounds', 2),
+    'vkCmdSetDepthBias': ('depth_bias', 3),
 }
 
 
@@ -57,9 +59,13 @@ def capture(engine, current, name, record):
         if (any(record['imm'][count:]) or record['pay'] or record['chain']):
             raise ValueError('graphics dynamic %s exceeds profile' % kind)
         values = tuple(record['imm'][:count])
-        if kind == 'bounds':
-            lo, hi = struct.unpack('<2f', struct.pack('<2I', *values))
-            if not (math.isfinite(lo) and math.isfinite(hi) and lo <= hi):
+        if kind in ('bounds', 'depth_bias'):
+            floats = struct.unpack('<%df' % count,
+                                   struct.pack('<%dI' % count, *values))
+            if not all(math.isfinite(v) for v in floats):
+                raise ValueError(
+                    'graphics dynamic %s floats exceed profile' % kind)
+            if kind == 'bounds' and not floats[0] <= floats[1]:
                 raise ValueError('graphics dynamic bounds floats exceed profile')
         return DynamicCommand(*recording_identity(engine, current, record),
                               kind, values)
