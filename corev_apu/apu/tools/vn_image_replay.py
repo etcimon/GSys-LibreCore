@@ -6,8 +6,16 @@ from vn_transfer_executor import Transfer
 
 
 class ImageReplay:
-    NAMES = frozenset(('vkCmdCopyBufferToImage', 'vkCmdCopyImageToBuffer', 'vkCmdCopyImage',
+    # The *2 (VK_KHR_copy_commands2) forms carry the same operands inside a
+    # Vk*Info2 struct; the decoder strips the struct headers so the record
+    # is identical to the base command — replay maps them to the base path.
+    NAMES = frozenset(('vkCmdCopyBufferToImage', 'vkCmdCopyBufferToImage2',
+                       'vkCmdCopyImageToBuffer', 'vkCmdCopyImageToBuffer2',
+                       'vkCmdCopyImage', 'vkCmdCopyImage2',
                        'vkCmdClearColorImage'))
+    _BASE = {'vkCmdCopyBufferToImage2': 'vkCmdCopyBufferToImage',
+             'vkCmdCopyImageToBuffer2': 'vkCmdCopyImageToBuffer',
+             'vkCmdCopyImage2': 'vkCmdCopyImage'}
 
     def __init__(self, engine, remember, payload, extent, operations):
         self.engine, self.remember, self.payload = engine, remember, payload
@@ -69,6 +77,7 @@ class ImageReplay:
             self.operations.append(Transfer('copy', destination, target, size, source, start))
 
     def replay(self, name, record):
+        name = self._BASE.get(name, name)
         if name == 'vkCmdClearColorImage':
             self._clear(record)
             return

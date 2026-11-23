@@ -103,6 +103,77 @@ class ImageTests(unittest.TestCase):
         self.assertEqual(self.f.state.aperture.read(base + 4352 + 68, 12), bytes(range(136, 148)))
         self.assertEqual(self.f.state.aperture.read(base + 4352 + 16, 48), b'\0' * 48)
 
+    def test_copy_commands2_replay_identically_to_base(self):
+        # VK_KHR_copy_commands2 wraps the same operands in a Vk*Info2 struct;
+        # the decoder strips the headers so each *2 record is identical to its
+        # base command. Mirror the proven base round-trip with *2 commands.
+        self.create(initial_layout=1)
+        base = self.f.owner.base
+        source = bytes(range(64))
+        self.f.state.aperture.write(base, source)
+        self.f.state.aperture.write(base + 4096, b'P' * 256)
+        sub = self.w.structure('VkImageSubresourceLayers', aspectMask=1, mipLevel=0,
+                               baseArrayLayer=0, layerCount=1)
+        img = self.w.structure('VkOffset3D', x=1, y=1, z=0)
+        ext = self.w.structure('VkExtent3D', width=3, height=2, depth=1)
+        # buffer->image region: bufferRowLength=5, bufferImageHeight=0, image at (1,1)
+        b2i = self.w.structure('VkBufferImageCopy2', bufferOffset=0,
+            bufferRowLength=5, bufferImageHeight=0, imageSubresource=sub,
+            imageOffset=img, imageExtent=ext)
+        i2b = self.w.structure('VkBufferImageCopy2', bufferOffset=512,
+            bufferRowLength=7, bufferImageHeight=0, imageSubresource=sub,
+            imageOffset=img, imageExtent=ext)
+        img_reg2 = self.w.structure('VkImageCopy2', srcSubresource=sub,
+            srcOffset=self.w.structure('VkOffset3D', x=2, y=1, z=0),
+            dstSubresource=sub,
+            dstOffset=self.w.structure('VkOffset3D', x=1, y=0, z=0), extent=ext)
+        self.f.begin()
+        self.f.command('vkCmdCopyBufferToImage2', commandBuffer=self.f.CB,
+            pCopyBufferToImageInfo=self.w.structure('VkCopyBufferToImageInfo2',
+                pNext=[], srcBuffer=self.f.BUFFER, dstImage=self.IMAGE,
+                dstImageLayout=1, regionCount=1, pRegions=[b2i]))
+        self.f.command('vkCmdCopyImageToBuffer2', commandBuffer=self.f.CB,
+            pCopyImageToBufferInfo=self.w.structure('VkCopyImageToBufferInfo2',
+                pNext=[], srcImage=self.IMAGE, srcImageLayout=1,
+                dstBuffer=self.f.BUFFER, regionCount=1, pRegions=[i2b]))
+        self.f.end()
+        self.f.enqueue()
+        self.f.drain()
+        memory = self.f.state.aperture
+        # identical expectations to test_round_trip_preserves_image_and_buffer_row_padding
+        self.assertEqual(memory.read(base + 4096 + 68, 12), source[:12])
+        self.assertEqual(memory.read(base + 4096 + 132, 12), source[20:32])
+        self.assertEqual(memory.read(base + 4096 + 80, 48), b'P' * 48)
+        self.assertEqual(memory.read(base + 512, 12), source[:12])
+        self.assertEqual(memory.read(base + 540, 12), source[20:32])
+        self.assertEqual(memory.read(base + 524, 16), b'\0' * 16)
+
+    def test_copy_image2_preserves_subrectangles(self):
+        # vkCmdCopyImage2 (VK_KHR_copy_commands2) replays identically to base.
+        self.create(initial_layout=1)
+        self.create(self.SECOND, offset=4352, initial_layout=1)
+        base = self.f.owner.base
+        self.f.state.aperture.write(base + 4096, bytes(range(256)))
+        sub = self.w.structure('VkImageSubresourceLayers', aspectMask=1, mipLevel=0,
+                               baseArrayLayer=0, layerCount=1)
+        reg = self.w.structure('VkImageCopy2', srcSubresource=sub,
+            srcOffset=self.w.structure('VkOffset3D', x=2, y=1, z=0),
+            dstSubresource=sub,
+            dstOffset=self.w.structure('VkOffset3D', x=1, y=0, z=0),
+            extent=self.w.structure('VkExtent3D', width=3, height=2, depth=1))
+        self.f.begin()
+        self.f.command('vkCmdCopyImage2', commandBuffer=self.f.CB,
+            pCopyImageInfo=self.w.structure('VkCopyImageInfo2', pNext=[],
+                srcImage=self.IMAGE, srcImageLayout=1, dstImage=self.SECOND,
+                dstImageLayout=1, regionCount=1, pRegions=[reg]))
+        self.f.end()
+        self.f.enqueue()
+        self.f.drain()
+        # identical expectations to test_image_to_image_copy_preserves_subrectangles
+        self.assertEqual(self.f.state.aperture.read(base + 4352 + 4, 12), bytes(range(72, 84)))
+        self.assertEqual(self.f.state.aperture.read(base + 4352 + 68, 12), bytes(range(136, 148)))
+        self.assertEqual(self.f.state.aperture.read(base + 4352 + 16, 48), b'\0' * 48)
+
     def test_late_bad_region_is_rejected_before_any_image_write_or_pin(self):
         self.create(initial_layout=1)
         self.f.begin()
