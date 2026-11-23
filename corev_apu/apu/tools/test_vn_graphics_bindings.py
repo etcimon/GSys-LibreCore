@@ -146,6 +146,28 @@ class BindingTests(unittest.TestCase):
                 layout=layout or self.g.PL, set=set_index,
                 descriptorWriteCount=1, pDescriptorWrites=writes)
 
+    def push_image(self, *, cmd='vkCmdPushDescriptorSet', set_index=0,
+                   binding=0, array=0, count=1, dtype=3, sampler=0,
+                   view=None, layout=1, stage=0x11, pl=None):
+        # image-arm push write: VkDescriptorImageInfo{sampler,imageView,
+        # imageLayout} streams 5 words/element just like a bound image set.
+        writes = [self.w.structure('VkWriteDescriptorSet', pNext=[],
+            dstSet=self.SET, dstBinding=binding, dstArrayElement=array,
+            descriptorCount=count, descriptorType=dtype, pTexelBufferView=[],
+            pBufferInfo=[], pImageInfo=[self.w.structure('VkDescriptorImageInfo',
+                sampler=sampler, imageView=self.VIEW if view is None else view,
+                imageLayout=layout)] * count)]
+        if cmd.endswith('2'):
+            self.command(cmd, commandBuffer=self.f.CB,
+                pPushDescriptorSetInfo=self.w.structure('VkPushDescriptorSetInfo',
+                    pNext=[], stageFlags=stage, layout=pl or self.g.PL,
+                    set=set_index, descriptorWriteCount=1,
+                    pDescriptorWrites=writes))
+        else:
+            self.command(cmd, commandBuffer=self.f.CB, pipelineBindPoint=0,
+                layout=pl or self.g.PL, set=set_index,
+                descriptorWriteCount=1, pDescriptorWrites=writes)
+
     def replay(self):
         for name, record in self.names[self.state.position:]:
             self.state.replay(name, record)
@@ -295,6 +317,31 @@ class BindingTests(unittest.TestCase):
             self.assertEqual((stage.bindings[0].offset, stage.bindings[0].kind),
                              (0, 6))
         result.validate()
+
+    def test_push_image_descriptor_without_bound_set(self):
+        # a pushed VkDescriptorImageInfo supplies the storage-image operand
+        # with no vkCmdBindDescriptorSets — capture_source rebuilds the same
+        # ImageSource provenance a set write would record.
+        self.prepare(dtype=3, image=True)
+        self.bind(sets=False)
+        self.push_image(dtype=3)
+        self.replay()
+        result = self.state.resolve()
+        for stage in result.stages:
+            self.assertEqual((stage.bindings[0].kind, stage.bindings[0].offset),
+                             (3, 4096))
+        result.validate()
+
+    def test_push_image_descriptor_set2_and_kind_mismatch(self):
+        # the *2 form streams the identical image write; pushing a
+        # sampled-image (dtype 2) onto a storage-image (kind 3) binding
+        # must be refused by the kind cross-check.
+        self.prepare(dtype=3, image=True)
+        self.bind(sets=False)
+        self.push_image(cmd='vkCmdPushDescriptorSet2', dtype=2)
+        self.replay()
+        with self.assertRaises(ValueError):
+            self.state.resolve()
 
     def test_undefined_push_word_is_refused(self):
         self.prepare(push=True)

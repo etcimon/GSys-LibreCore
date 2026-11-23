@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from vn_descriptor_operands import buffer_descriptor, push_buffer_descriptor
 from vn_graphics_dynamic import validate_recording
 from vn_graphics_pipelines import operand as pipeline_operand
-from vn_image_operands import image_descriptor
+from vn_image_operands import image_descriptor, push_image_descriptor
 from vn_native_layouts import PipelineLayout
 
 
@@ -202,6 +202,11 @@ class GraphicsBindings:
             return push_buffer_descriptor(
                 self.engine, self.context_id, buffer_id, offset, size,
                 resource.binding, resource.descriptor_set, element, dtype)
+        if dtype in (0, 1, 2, 3):
+            sampler_id, view_id, image_layout = elem
+            return push_image_descriptor(
+                self.engine, self.context_id, dtype, view_id, sampler_id,
+                image_layout, resource.binding, resource.descriptor_set, element)
         raise ValueError('push descriptor type exceeds bounded graphics profile')
 
     def resolve(self):

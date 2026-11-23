@@ -124,6 +124,7 @@ def image_descriptor(engine, context_id, descriptor_set, binding, element=0, set
             descriptor['parent'] != descriptor['size'] & 0xFFFF):
         raise ValueError('image descriptor pool/layout/device mismatch')
     resolve(device['gen'] << 16 | parent, 'VkDevice')
+    sampler = None
     if source.sampler:
         sampler = resolve(source.sampler, 'VkSampler')
         if sampler['aux'] != source.sampler_aux:
@@ -132,6 +133,19 @@ def image_descriptor(engine, context_id, descriptor_set, binding, element=0, set
         signature = next(item for item in layout['native_signature'][1] if item[0] == binding)
         if source.sampler or source.sampler_aux != signature[4][element]:
             raise ValueError('image descriptor immutable sampler differs from layout')
+    return _image_source_operand(engine, context_id, context, source, binding,
+        set_index, element, parent, device, (address, descriptor), sampler,
+        references, entries, resolve)
+
+def _image_source_operand(engine, context_id, context, source, binding,
+                          set_index, element, parent, device, aperture,
+                          sampler, references, entries, resolve):
+    """Shared ImageSource -> ImageOperand tail for bound and pushed image
+    descriptors.  ``aperture`` is ``(address, descriptor_entry)`` for a
+    descriptor-set write (enables the aperture byte + set-liveness checks)
+    or ``None`` for a vkCmdPushDescriptorSet write, which carries the same
+    ImageSource provenance but no descriptor-set backing."""
+    front = context.frontend
     owner = None
     offset = size = width = height = pitch = fmt = swizzle = 0
     levels = 1
@@ -180,8 +194,10 @@ def image_descriptor(engine, context_id, descriptor_set, binding, element=0, set
         raise ValueError('image operand crosses devices')
 
     def validate():
-        if (not engine.transfers._live(context) or front.descriptor_sources.get(address) is not source or
-                front.dset_dead(descriptor)[0] or descriptor['aux'] & (1 << 31) or
+        aperture_dead = (aperture is not None and
+            (front.descriptor_sources.get(aperture[0]) is not source or
+             front.dset_dead(aperture[1])[0] or aperture[1]['aux'] & (1 << 31)))
+        if (not engine.transfers._live(context) or aperture_dead or
                 owner is not None and owner.deferred_free is not None):
             raise KeyError('image descriptor changed during admission')
         for handle, kind in references:
@@ -198,11 +214,68 @@ def image_descriptor(engine, context_id, descriptor_set, binding, element=0, set
             raise KeyError('image/view/memory provenance changed during admission')
 
     validate()
-    words = [front.apr64(address + index * 8) for index in range(4)]
-    actual = [word >> shift & 0xFFFFFFFF for word in words for shift in (0, 32)]
-    if actual != expected:
-        raise ValueError('image descriptor bytes differ from native provenance')
+    if aperture is not None:
+        words = [front.apr64(aperture[0] + index * 8) for index in range(4)]
+        actual = [word >> shift & 0xFFFFFFFF for word in words for shift in (0, 32)]
+        if actual != expected:
+            raise ValueError('image descriptor bytes differ from native provenance')
     validate()
     return ImageOperand(ImageBinding(owner, offset, size, width, height, pitch, fmt, swizzle,
         source.dtype, (source.sampler_aux & 0xFFFFFFFF, source.sampler_aux >> 32),
         binding, set_index, element, mips=levels), tuple(references), validate)
+
+
+def push_image_descriptor(engine, context_id, dtype, view_id, sampler_id,
+                          layout, binding, set_index, element):
+    """vkCmdPushDescriptorSet{,2} image write -> ImageOperand.
+
+    A pushed VkDescriptorImageInfo names sampler/imageView/imageLayout
+    directly; ``capture_source`` rebuilds the same ImageSource provenance a
+    descriptor-set write records, then the shared operand tail validates it
+    with no aperture or set-liveness checks (push writes have neither)."""
+    context = engine.contexts[context_id]
+    if not engine.transfers._live(context):
+        raise KeyError('push image descriptor context is unavailable')
+    front, kinds = context.frontend, engine.golden.KIND
+    references, entries = [], []
+
+    def resolve(value, name):
+        status, slot, entry = front.resolve(value, kinds[name])
+        if status != 'OK' or entry['ctx'] != context_id:
+            raise KeyError('push image operand generation/context is stale')
+        references.append((entry['gen'] << 16 | slot, kinds[name]))
+        entries.append(entry)
+        return entry
+
+    def probe(value, name):
+        status, slot, entry = front.resolve(value, kinds[name])
+        if status != 'OK' or entry['ctx'] != context_id:
+            raise KeyError('push image operand generation/context is stale')
+        return entry
+
+    if (type(dtype) is not int or dtype not in (0, 1, 2, 3) or
+            type(binding) is not int or not 0 <= binding < 256 or
+            type(element) is not int or not 0 <= element < 16 or
+            type(set_index) is not int or not 0 <= set_index < 4 or
+            type(layout) is not int or layout < 0):
+        raise ValueError('push image descriptor identity/index exceeds native profile')
+    source = capture_source(front, kinds, dtype, view_id, sampler_id, layout)
+    if source is None:
+        raise KeyError('push image descriptor has no typed native provenance')
+    sampler = None
+    if source.sampler:
+        sampler = resolve(source.sampler, 'VkSampler')
+        if sampler['aux'] != source.sampler_aux:
+            raise KeyError('push image descriptor sampler state changed')
+    if source.dtype:
+        anchor = probe(source.image, 'VkImage')
+    else:
+        anchor = sampler
+    parent = anchor['parent']
+    device = front.ent[parent] if 0 <= parent < front.SLOTS else None
+    if device is None:
+        raise ValueError('push image descriptor device is unavailable')
+    resolve(device['gen'] << 16 | parent, 'VkDevice')
+    return _image_source_operand(engine, context_id, context, source, binding,
+        set_index, element, parent, device, None, sampler,
+        references, entries, resolve)
