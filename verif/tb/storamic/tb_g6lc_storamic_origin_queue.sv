@@ -97,7 +97,8 @@ module tb_g6lc_storamic_origin_queue;
     .paddr_i(56'h1000), .ex_i(exception_in), .dtlb_hit_i(hit),
     .page_offset_i('0), .load_paddr_i('0), .load_paddr_valid_i(1'b0),
     .load_trans_id_i('0), .commit_tran_id_i('0), .oldest_live_tid_i('0),
-    .head_phys_pending_i(1'b0), .load_hart_i('0), .dcache_wbuffer_empty_i(1'b1),
+    .head_phys_pending_i(1'b0), .load_hart_i('0), .storamic_resync_i(1'b0),
+    .dcache_wbuffer_empty_i(1'b1),
     .page_offset_matches_o(), .page_offset_spec_only_o(), .st_fwd_valid_o(),
     .st_fwd_data_o(), .st_fwd_be_o(), .amo_req_o(), .amo_resp_i(amo_response),
     .req_port_i(response), .req_port_o(request)
