@@ -1222,14 +1222,17 @@ module g6lc_apu_cmdexec
                              kind: 6'(APU_VN_KIND_VK_IMAGE_VIEW),
                              default: '0};
         end
-        // G1c: graphics-pipeline ObjPay — 61-word state block fetched
-        // as four READN bursts {0..15},{16..31},{32..43},{48..60}; the
-        // w44..47 stage descriptors are read separately via pbr.  Each
-        // burst stays inside one 16-word ObjPay line (n<=16).  dr_pi_q
-        // is the segment base {0,16,32,48} at issue; the beats stream
-        // back on op_cpl_valid and StDrPayCpl decodes them by dr_pi_q.
+        // G1c: graphics-pipeline ObjPay — 70-word state block fetched
+        // as six READN bursts {0..15},{16..31},{32..43},{48..60},
+        // {61..63},{64..69}; the w44..47 stage descriptors are read
+        // separately via pbr.  Each burst stays inside one 16-word
+        // ObjPay line (n<=16, addr[3:0]+n<=16) — the P4 tail is split
+        // at the w63/w64 line boundary.  dr_pi_q is the segment base
+        // at issue; the beats stream back on op_cpl_valid and
+        // StDrPayCpl decodes them by dr_pi_q.
         // The 8-colour-attachment extension appends colour blend states
-        // for attachments 4..7 at w57..60 (w26..29 carry 0..3).
+        // for attachments 4..7 at w57..60 (w26..29 carry 0..3); P4 adds
+        // w61 dynmask + w62..69 vertex attrs 8..15.
         StDrPay: begin
           op_req_valid_o = 1'b1;
           if      (dr_pi_q == 7'd0)
@@ -1248,9 +1251,16 @@ module g6lc_apu_cmdexec
             op_req_o = '{op: APU_OBJPAY_OP_READN,
                          addr: rd_gpay_q + 32'd48, words: 32'd13,
                          default: '0};
-          else
+          else if (dr_pi_q == 7'd61)
+            // P4 tail w61..63: line-3 remainder (offset 13..15)
             op_req_o = '{op: APU_OBJPAY_OP_READN,
-                         addr: rd_gpay_q + 32'd61, words: 32'd9,
+                         addr: rd_gpay_q + 32'd61, words: 32'd3,
+                         default: '0};
+          else
+            // P4 tail w64..69: line-4 head (offset 0..5) — split from
+            // w61..63 so every READN stays inside one 16-word line
+            op_req_o = '{op: APU_OBJPAY_OP_READN,
+                         addr: rd_gpay_q + 32'd64, words: 32'd6,
                          default: '0};
         end
         // the internal render-pass CLEAR rides the work port with the
@@ -3905,7 +3915,11 @@ module g6lc_apu_cmdexec
                 rd_q.draw_idx <= draw_idx_q;
                 state_q <= StDrVbN;
               end else if (dr_pi_q == 7'd15 ||
-                           dr_pi_q == 7'd31) begin
+                           dr_pi_q == 7'd31 ||
+                           dr_pi_q == 7'd63) begin
+                // line-boundary: issue the next READN burst.  w63 ends
+                // the {61..63} burst so dr_pi_q 63->64 re-arms StDrPay
+                // for the {64..69} line-4 head.
                 dr_pi_q <= dr_pi_q + 7'd1;
                 state_q <= StDrPay;
               end else begin
