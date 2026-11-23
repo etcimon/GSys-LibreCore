@@ -548,6 +548,7 @@ module tb_g6lc_apu_cmdexec;
   logic [31:0] img2_h, view2_h, rp2_h, fb2_h, gpipe1_h;
   logic [31:0] qry_h, qry2_h, qry3_h;
   logic [31:0] cp_mem_h, cp_buf_h;
+  logic [31:0] ind_mem_h, ind_buf_h;
   localparam int QRY_EXT = 28672;   // result-extent word base in paymem
   // COPY dst aperture: dedicated memory at byte base 0x8000 -> apm
   // word 0x2000, kept clear of the shared buf0/buf1 region (0x4000)
@@ -1223,6 +1224,194 @@ module tb_g6lc_apu_cmdexec;
       submit(5'd15, 1, cbd[17], cb_h, 32'h0, 32'h0);
       wait_fence(15, 8000);
       check("mspf fence lost", flost[15] === 1'b1);
+      cases++;
+    end
+
+    // ---- multi-draw-indirect: drawCount=3, non-indexed (type 108) ----
+    // Reuses the S_E subpass-1 draw scaffolding (gpipe1_h/rp2_h/fb2_h).
+    // A dedicated aperture region (byte 0x9000 -> apm word 0x2400) holds
+    // three packed VkDrawIndirectCommand {vc=3,ic=1,fv=0,fi=0} at stride
+    // 16; the executor must re-arm StIndRd per draw and issue three
+    // DRAW_INDIRECT_EXT work items.
+    tb_drv = 1'b1;
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0070,
+          APU_VN_KIND_VK_DEVICE_MEMORY, .size(64'd256));
+    ind_mem_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETAUXHI, 64'h1000_0000_0000_0070,
+          APU_VN_KIND_VK_DEVICE_MEMORY,
+          .mask(32'hFFFF_FFFF), .value(32'h0000_9000));
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0071,
+          APU_VN_KIND_VK_BUFFER, .size(64'd256));
+    ind_buf_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETBIND, 64'h1000_0000_0000_0071,
+          APU_VN_KIND_VK_BUFFER, .size(64'd256),
+          .mem_id(64'h1000_0000_0000_0070));
+    // VkDrawIndirectCommand = {vertexCount,instanceCount,firstVertex,
+    // firstInstance} u32 x4 = 16B; three packed at byte stride 16 ->
+    // apm words 0x2400/0x2404/0x2408
+    for (int i = 0; i < 3; i++) begin
+      i_emem.apm[32'h2400 + i*4 + 0] = 32'd3;
+      i_emem.apm[32'h2400 + i*4 + 1] = 32'd1;
+      i_emem.apm[32'h2400 + i*4 + 2] = 32'd0;
+      i_emem.apm[32'h2400 + i*4 + 3] = 32'd0;
+    end
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[16], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT, gpipe1_h,
+                APU_VN_KIND_VK_PIPELINE, 0));
+    begin
+      apu_cmdrec_rec_t rr = mkrec(
+          APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT, rp2_h,
+          APU_VN_KIND_VK_RENDER_PASS, 0);
+      rr.handle[1] = fb2_h; rr.kind[1] = APU_VN_KIND_VK_FRAMEBUFFER;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0, rr, 16'd1);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_EXT, 0, 0, 0));
+    begin
+      apu_cmdrec_rec_t dr = mkrec(
+          APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_EXT, ind_buf_h,
+          APU_VN_KIND_VK_BUFFER, 32'd3);
+      dr.imm[1] = 32'd16;   // stride
+      dr.imm[2] = 32'd0;    // offset lo
+      dr.imm[3] = 32'd0;    // offset hi
+      cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0, dr);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_END_RENDER_PASS_EXT, 0, 0, 0));
+    cr_op(APU_CMDREC_OP_END, cbd[16], 0, '0);
+    tb_drv = 1'b0;
+    begin
+      int w0 = work_i, ndi = 0;
+      fclr[10] = 1'b1; @(negedge clk); fclr[10] = 1'b0; @(negedge clk);
+      submit(5'd10, 1, cbd[16], cb_h, 32'h0, 32'h0);
+      wait_fence(10, 8000);
+      for (int w = w0; w < work_i; w++)
+        if (got_work[w] == APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_EXT) ndi++;
+      check("mdi no lost", flost[10] === 1'b0);
+      check("mdi drawCount=3 work", ndi == 3);
+      cases++;
+    end
+
+    // ---- multi-draw-indirect indexed: drawCount=2, stride=20 (109) --
+    // VkDrawIndexedIndirectCommand is 20B {indexCount,instanceCount,
+    // firstIndex,vertexOffset,firstInstance}; exercises ind_idx_q, the
+    // 20-byte lenb and the indexed f_iw word mapping.  No index buffer
+    // is bound, so StDrIbN skips the IB resolve and the draw still
+    // issues — the count is what matters here.
+    tb_drv = 1'b1;
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0072,
+          APU_VN_KIND_VK_DEVICE_MEMORY, .size(64'd256));
+    ind_mem_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETAUXHI, 64'h1000_0000_0000_0072,
+          APU_VN_KIND_VK_DEVICE_MEMORY,
+          .mask(32'hFFFF_FFFF), .value(32'h0000_A000));
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0073,
+          APU_VN_KIND_VK_BUFFER, .size(64'd256));
+    ind_buf_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETBIND, 64'h1000_0000_0000_0073,
+          APU_VN_KIND_VK_BUFFER, .size(64'd256),
+          .mem_id(64'h1000_0000_0000_0072));
+    // two indexed commands at byte stride 20 -> apm 0x2800/0x2805
+    for (int i = 0; i < 2; i++) begin
+      i_emem.apm[32'h2800 + i*5 + 0] = 32'd8;   // indexCount
+      i_emem.apm[32'h2800 + i*5 + 1] = 32'd1;   // instanceCount
+      i_emem.apm[32'h2800 + i*5 + 2] = 32'd0;   // firstIndex
+      i_emem.apm[32'h2800 + i*5 + 3] = 32'd0;   // vertexOffset
+      i_emem.apm[32'h2800 + i*5 + 4] = 32'd0;   // firstInstance
+    end
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[16], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT, gpipe1_h,
+                APU_VN_KIND_VK_PIPELINE, 0));
+    begin
+      apu_cmdrec_rec_t rr = mkrec(
+          APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT, rp2_h,
+          APU_VN_KIND_VK_RENDER_PASS, 0);
+      rr.handle[1] = fb2_h; rr.kind[1] = APU_VN_KIND_VK_FRAMEBUFFER;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0, rr, 16'd1);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_EXT, 0, 0, 0));
+    begin
+      apu_cmdrec_rec_t dr = mkrec(
+          APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT, ind_buf_h,
+          APU_VN_KIND_VK_BUFFER, 32'd2);
+      dr.imm[1] = 32'd20;  // stride
+      dr.imm[2] = 32'd0;   // offset lo
+      dr.imm[3] = 32'd0;   // offset hi
+      cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0, dr);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_END_RENDER_PASS_EXT, 0, 0, 0));
+    cr_op(APU_CMDREC_OP_END, cbd[16], 0, '0);
+    tb_drv = 1'b0;
+    begin
+      int w0 = work_i, ndi = 0;
+      fclr[11] = 1'b1; @(negedge clk); fclr[11] = 1'b0; @(negedge clk);
+      submit(5'd11, 1, cbd[16], cb_h, 32'h0, 32'h0);
+      wait_fence(11, 8000);
+      for (int w = w0; w < work_i; w++)
+        if (got_work[w] ==
+            APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT) ndi++;
+      check("mdii no lost", flost[11] === 1'b0);
+      check("mdii drawCount=2 work", ndi == 2);
+      cases++;
+    end
+
+    // ---- single-draw-indirect baseline: drawCount=1 (type 108) ------
+    // Confirms the non-Count single-draw path is unchanged (ind_loop_q
+    // stays 0 -> one fetch, one work item, StDsDone -> StNextBuf).
+    tb_drv = 1'b1;
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0074,
+          APU_VN_KIND_VK_DEVICE_MEMORY, .size(64'd256));
+    ind_mem_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETAUXHI, 64'h1000_0000_0000_0074,
+          APU_VN_KIND_VK_DEVICE_MEMORY,
+          .mask(32'hFFFF_FFFF), .value(32'h0000_B000));
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0075,
+          APU_VN_KIND_VK_BUFFER, .size(64'd256));
+    ind_buf_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETBIND, 64'h1000_0000_0000_0075,
+          APU_VN_KIND_VK_BUFFER, .size(64'd256),
+          .mem_id(64'h1000_0000_0000_0074));
+    i_emem.apm[32'h2C00 + 0] = 32'd5;   // vertexCount
+    i_emem.apm[32'h2C00 + 1] = 32'd1;   // instanceCount
+    i_emem.apm[32'h2C00 + 2] = 32'd0;   // firstVertex
+    i_emem.apm[32'h2C00 + 3] = 32'd0;   // firstInstance
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[16], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT, gpipe1_h,
+                APU_VN_KIND_VK_PIPELINE, 0));
+    begin
+      apu_cmdrec_rec_t rr = mkrec(
+          APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT, rp2_h,
+          APU_VN_KIND_VK_RENDER_PASS, 0);
+      rr.handle[1] = fb2_h; rr.kind[1] = APU_VN_KIND_VK_FRAMEBUFFER;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0, rr, 16'd1);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_EXT, 0, 0, 0));
+    begin
+      apu_cmdrec_rec_t dr = mkrec(
+          APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_EXT, ind_buf_h,
+          APU_VN_KIND_VK_BUFFER, 32'd1);
+      dr.imm[1] = 32'd16;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0, dr);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_END_RENDER_PASS_EXT, 0, 0, 0));
+    cr_op(APU_CMDREC_OP_END, cbd[16], 0, '0);
+    tb_drv = 1'b0;
+    begin
+      int w0 = work_i, ndi = 0;
+      fclr[12] = 1'b1; @(negedge clk); fclr[12] = 1'b0; @(negedge clk);
+      submit(5'd12, 1, cbd[16], cb_h, 32'h0, 32'h0);
+      wait_fence(12, 8000);
+      for (int w = w0; w < work_i; w++)
+        if (got_work[w] == APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_EXT) ndi++;
+      check("sdi no lost", flost[12] === 1'b0);
+      check("sdi drawCount=1 work", ndi == 1);
       cases++;
     end
 

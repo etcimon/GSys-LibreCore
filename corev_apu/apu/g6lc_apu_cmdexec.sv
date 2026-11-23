@@ -2529,36 +2529,7 @@ module g6lc_apu_cmdexec
           end else if (work_ready_i && !pinq_full) begin
             outst_q <= outst_q + 8'h1 -
                        ((work_done_i && outst_q != 8'h0) ? 8'h1 : 8'h0);
-            // multi-draw-indirect: the just-issued draw consumed one
-            // Vk*IndirectCommand; while draws remain, re-arm the
-            // operand fetch at ind_base + stride instead of advancing
-            // to the next record.  Every draw re-runs the read-only
-            // pipeline/descriptor/VB assembly — PIN/UNPIN stay
-            // per-submission so re-assembly cannot leak pins.  Each
-            // stride step is bounds-checked against the resolved
-            // operand extent exactly like the first fetch.
-            if (rec_is_ind_draw && ind_loop_q && ind_left_q != 32'd0) begin
-              automatic logic [63:0] nbase =
-                  ind_base_q + {32'h0, ind_stride_q};
-              automatic logic [63:0] noff  = nbase - ind_xb_q;
-              automatic logic [63:0] xsz   = {32'h0, ind_xs_q};
-              automatic logic [63:0] nl    = {32'h0, ind_len_q};
-              if (noff > xsz || xsz - noff < nl) begin
-                lost_q     <= 1'b1;
-                ind_loop_q <= 1'b0;
-                state_q    <= StUnpReq;
-              end else begin
-                ind_left_q  <= ind_left_q - 32'd1;
-                ind_base_q  <= nbase;
-                ind_nb_q    <= 3'((32'(ind_len_q) +
-                                  (nbase[2] ? 32'd4 : 32'd0) + 7) >> 3);
-                ind_i_q     <= '0;
-                state_q     <= StIndRd;
-              end
-            end else begin
-              ind_loop_q <= 1'b0;
-              state_q    <= StNextBuf;
-            end
+            state_q <= StNextBuf;
           end
 
           // ---- §7b/5a-ii + §12.3 F5: dispatch assembly ---------------
@@ -3073,11 +3044,45 @@ module g6lc_apu_cmdexec
           StDsDone: if (work_done_i) begin
             if (dsd_skip_q != 8'h0)
               dsd_skip_q <= dsd_skip_q - 8'h1;
-            else
+            else if (lost_q)
               // §7b exception contract: a faulted work item retires
               // (undefined results) and execution continues with the
               // next record — only a submit-level failure aborts
-              state_q <= lost_q ? StUnpReq : StNextBuf;
+              state_q <= StUnpReq;
+            else if (rec_is_ind_draw && ind_loop_q &&
+                     ind_left_q != 32'd0) begin
+              // multi-draw-indirect: the just-retired draw consumed
+              // one Vk*IndirectCommand; while draws remain, re-arm the
+              // operand fetch at ind_base + stride instead of advancing
+              // to the next record.  Every draw re-runs the read-only
+              // pipeline/descriptor/VB assembly — PIN/UNPIN stay
+              // per-submission so re-assembly cannot leak pins.  Each
+              // stride step is bounds-checked against the resolved
+              // operand extent exactly like the first fetch.
+              automatic logic [63:0] nbase =
+                  ind_base_q + {32'h0, ind_stride_q};
+              automatic logic [63:0] noff  = nbase - ind_xb_q;
+              automatic logic [63:0] xsz   = {32'h0, ind_xs_q};
+              automatic logic [63:0] nl    = {32'h0, ind_len_q};
+              if (noff > xsz || xsz - noff < nl) begin
+                lost_q     <= 1'b1;
+                ind_loop_q <= 1'b0;
+                state_q    <= StUnpReq;
+              end else begin
+                ind_left_q  <= ind_left_q - 32'd1;
+                ind_base_q  <= nbase;
+                ind_nb_q    <= 3'((32'(ind_len_q) +
+                                  (nbase[2] ? 32'd4 : 32'd0) + 7) >> 3);
+                ind_i_q     <= '0;
+                state_q     <= StIndRd;
+              end
+            end else begin
+              ind_loop_q <= 1'b0;
+              // §7b exception contract: a faulted work item retires
+              // (undefined results) and execution continues with the
+              // next record — only a submit-level failure aborts
+              state_q <= StNextBuf;
+            end
           end
           StDrain: if (outst_q == 8'h0 ||
                        (outst_q == 8'h1 && work_done_i)) begin
