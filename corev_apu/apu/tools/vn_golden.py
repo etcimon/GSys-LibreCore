@@ -7764,7 +7764,7 @@ def gfx_fan_coverage(verts, vp, sc, cw, ch, front_ccw, cull):
     return cov
 
 
-def gfx_line_coverage(verts, vp, sc, cw, ch):
+def gfx_line_coverage(verts, vp, sc, cw, ch, stipple=None):
     """G1c reference rasterizer for one LINE_LIST segment — mirrors the
     g6lc_apu_rast S_LN_* integer path: the same f32 viewport transform +
     F2I RNE to 16.8 fixed, then vxi>>>8 to integer pixels and the
@@ -7772,6 +7772,9 @@ def gfx_line_coverage(verts, vp, sc, cw, ch):
     of both endpoints, scissor-clipped like S_LN_PIX.
 
     verts = [(x,y,z,w)]*2 in clip space; vp/sc as gfx_tri_coverage.
+    stipple = optional (enable, factor, pattern): when set, a candidate
+    emits only when bit (step//factor)&0xF of the 16-bit pattern is set —
+    the same per-primitive lstip_q sequence the raster applies.
     -> set of covered (px, py)."""
     vphw = _f32(_f32(vp[2]) * 0.5)
     vphh = _f32(_f32(vp[3]) * 0.5)
@@ -7797,11 +7800,19 @@ def gfx_line_coverage(verts, vp, sc, cw, ch):
     lx, ly = x0, y0
     scx, scy, scw, sch = sc
     cov = set()
+    fac = pat = 0
+    if stipple is not None:
+        _en, fac, pat = stipple
+        fac = fac or 1
+    step = 0
     while True:
-        # S_LN_PIX: emit when inside the scissor window
-        if not (lx < 0 or ly < 0 or lx < scx or ly < scy or
-                lx >= scx + scw or ly >= scy + sch):
+        # S_LN_PIX: emit when inside the scissor window and, when
+        # stippled, the pattern bit for this step is set
+        if (not (lx < 0 or ly < 0 or lx < scx or ly < scy or
+                 lx >= scx + scw or ly >= scy + sch) and
+                (stipple is None or (pat >> ((step // fac) & 0xF)) & 1)):
             cov.add((lx, ly))
+        step += 1
         # S_LN_STEP: terminate on the far endpoint, else Bresenham step
         if lx == x1 and ly == y1:
             break

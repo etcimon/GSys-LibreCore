@@ -95,6 +95,13 @@ class Raster:
     # unlike a restart sentinel which is skipped).  0/None means a
     # single-instance draw and keeps the contiguous fast path.
     instance_stride: int = 0
+    # optional line stipple (enable, factor, pattern): when set, each
+    # line primitive's Bresenham sequence is filtered by the 16-bit pattern
+    # — step i emits only when bit (i//factor)&0xF of `pattern` is set —
+    # matching the RTL S_LN_PIX stip_en/stip_pat/lstip_q sequence.  The
+    # step counter resets per primitive; point primitives never stipple.
+    # None keeps full unstippled coverage.
+    stipple: object = None
 
     @property
     def size(self):
@@ -559,8 +566,19 @@ class RasterRuntime:
         lerr = ldx - ldy
         lx, ly = x0, y0
         out = []
+        stip = self.operation.stipple
+        fac = pat = 0
+        if stip is not None:
+            _en, fac, pat = stip
+            fac = fac or 1
+        step = 0
         while True:
-            out.append((lx, ly))
+            # S_LN_PIX stipple: a candidate emits only when the pattern bit
+            # for this step is set; `step` counts every Bresenham candidate
+            # (scissor-clipped ones included) and resets per primitive.
+            if stip is None or (pat >> ((step // fac) & 0xF)) & 1:
+                out.append((lx, ly))
+            step += 1
             if lx == x1 and ly == y1:
                 break
             e2 = 2 * lerr

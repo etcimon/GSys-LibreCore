@@ -123,6 +123,10 @@ class DrawExec:
     # `extra_targets`: each entry is None (blendEnable=0) or the same
     # 11-tuple as `blend`.  Forwarded verbatim to the Writeback extras.
     blend_extra: object = None
+    # optional line stipple (enable, factor, pattern) forwarded to the
+    # raster stage: factor is the u8 repeat count (0 already folded to 1),
+    # pattern the 16-bit mask.  None keeps unstippled coverage.
+    stipple: object = None
 
     @property
     def size(self):
@@ -154,7 +158,7 @@ class DrawExecRuntime:
             b'\0' * (probe_count * RECORD_STRIDE), op.viewport, op.scissor,
             probe_count, op.flat, op.nopersp, op.front_ccw, op.cull,
             op.discard, op.depth_bias, op.depth_clamp, op.poly_mode,
-            op.topology))
+            op.topology, stipple=op.stipple))
         # single writeback probe: primary + MRT extras validate together so
         # every attachment's fmt/location/write_mask is admitted before any
         # work is published.
@@ -211,7 +215,7 @@ class DrawExecRuntime:
                                                op.depth_clamp,
                                                op.poly_mode,
                                                op.topology, restarts,
-                                               istride))
+                                               istride, stipple=op.stipple))
             return True
         if not self.raster.done:
             return True

@@ -54,6 +54,7 @@ class DrawPlan(Recording):
     stencil_write_mask: object
     stencil_reference: object
     blend_constants: object
+    stipple: object
     vertices: tuple
     indices: object
     references: tuple
@@ -96,6 +97,12 @@ class GraphicsDraws:
         self.stencil_test = self.stencil_op = self.stencil_compare_mask = None
         self.stencil_write_mask = self.stencil_reference = None
         self.blend_constants = None
+        # vkCmdSetLineStipple is dynamic-command state only (the static
+        # VkPipelineRasterizationLineStateCreateInfo pNext is not admitted
+        # and there is no SetLineStippleEnableEXT in the catalog): stipple
+        # carries (factor,pattern); the hardware ties the enable to the
+        # declared dynamic bit with an all-ones default pattern.
+        self.stipple = None
         # line width is bounded-inert: create-info requires exactly 1.0 and
         # the raster ignores width, so the dynamic command is validated and
         # consumed but carries no per-draw override into DrawPlan.
@@ -379,4 +386,5 @@ class GraphicsDraws:
                 self.stencil_test, self.stencil_op,
                 self.stencil_compare_mask, self.stencil_write_mask,
                 self.stencil_reference, self.blend_constants,
+                self.stipple,
                 vertices, indices, references, validate))

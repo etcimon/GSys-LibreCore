@@ -111,6 +111,14 @@ DYNAMIC_LINE_WIDTH = 2
 # base VkDynamicState enums (vk.xml <enums> values, not extension offsets)
 DYNAMIC_DEPTH_BOUNDS = 5
 DYNAMIC_DEPTH_BIAS = 3
+# VK_DYNAMIC_STATE_LINE_STIPPLE (ext 260 offset 0).  The bounded command
+# catalog carries only vkCmdSetLineStipple — there is no
+# vkCmdSetLineStippleEnableEXT — and the hardware ties stip_en to the
+# declared dynamic bit with default (factor=1, pattern=0xFFFF), an
+# all-ones no-op.  The static VkPipelineRasterizationLineStateCreateInfo
+# pNext is likewise not admitted (all createInfo pNext must be empty), so
+# stipple is dynamic-command state only.
+DYNAMIC_LINE_STIPPLE = 1000000000 + (260 - 1) * 1000 + 0
 _DYNAMIC_ADMITTED = frozenset((DYNAMIC_PRIMITIVE_RESTART,
                              DYNAMIC_RASTERIZER_DISCARD,
                              DYNAMIC_CULL_MODE, DYNAMIC_FRONT_FACE,
@@ -126,7 +134,8 @@ _DYNAMIC_ADMITTED = frozenset((DYNAMIC_PRIMITIVE_RESTART,
                              DYNAMIC_STENCIL_WRITE_MASK,
                              DYNAMIC_STENCIL_REFERENCE,
                              DYNAMIC_BLEND_CONSTANTS,
-                             DYNAMIC_LINE_WIDTH))
+                             DYNAMIC_LINE_WIDTH,
+                             DYNAMIC_LINE_STIPPLE))
 
 
 def validate(engine, fields, blobs, render_pass, subpass=0):

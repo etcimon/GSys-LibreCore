@@ -1989,6 +1989,53 @@ class DrawReplayTests(unittest.TestCase):
         self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
         self.f.end()
 
+    # vkCmdSetLineStipple dynamic-state wire value:
+    # VK_DYNAMIC_STATE_LINE_STIPPLE (ext 260 offset 0).  There is no
+    # SetLineStippleEnableEXT in the bounded catalog — the hardware ties
+    # stip_en to the declared dynamic bit and defaults the pattern to
+    # 0xFFFF (all-ones no-op), so stipple activates only via this command.
+    DYN_STIPPLE_STATE = {
+        'vkCmdSetLineStipple': 1000259000,
+    }
+
+    def stipple_prepared(self, commands, topology=1, vertex_count=4,
+                         poly_mode=0, verts=None, declare=True, **draw_kw):
+        # `commands` is a list of (name, kwargs) vkCmdSetLineStipple*
+        # records issued between bind and draw.  Stipple is dynamic-command
+        # state only — the static VkPipelineRasterizationLineStateCreateInfo
+        # pNext is not admitted.  `declare` controls whether the pipeline
+        # declares VK_DYNAMIC_STATE_LINE_STIPPLE: when declared but no
+        # command is issued the default (factor=1, pattern=0xFFFF)
+        # all-ones pattern is a no-op; when undeclared the command (if any)
+        # has no effect.
+        self.upload(verts if verts is not None else self.line_verts())
+        dynamic = [0, 1]
+        if declare:
+            dynamic.append(self.DYN_STIPPLE_STATE['vkCmdSetLineStipple'])
+        self.pipeline(topology=topology, poly_mode=poly_mode,
+                      dynamic=dynamic)
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        for name, kw in commands:
+            self.f.command(name, commandBuffer=self.f.CB, **kw)
+        self.draw(vertexCount=vertex_count, **draw_kw)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
+    def stipple_line_coverage(self, factor, pattern):
+        # expected covered framebuffer pixels for LINE_LIST under stipple:
+        # each segment is an independent primitive so the step counter
+        # resets per gfx_line_coverage call.
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        cov = set()
+        for seg in self.LINE_SEGS:
+            cov |= vn_golden.gfx_line_coverage(
+                seg, vp, sc, cw, ch, stipple=(1, factor, pattern))
+        return cov
+
     def indexed_coverage(self, clip, indices):
         # clip = per-vertex clip positions; indices select/reorder them
         # into TRIANGLE_LIST triples for the golden coverage union.
@@ -3046,6 +3093,124 @@ class DrawReplayTests(unittest.TestCase):
             [(-1.0, -1.0, 0.5, 1.0), (1.0, -1.0, 0.5, 1.0),
              (-1.0, 1.0, 0.5, 1.0)],
             (0.0, 0.0, 8.0, 4.0, 0.0, 1.0), (0, 0, 8, 4), 8, 4, True, 0)
+        self.check_fb_coverage(cov)
+
+    # ---- vkCmdSetLineStipple dynamic state ----
+    # vkCmdSetLineStipple is the only stipple command in the bounded catalog
+    # (no SetLineStippleEnableEXT; the static pNext is not admitted).  The
+    # hardware ties stip_en to the declared VK_DYNAMIC_STATE_LINE_STIPPLE
+    # bit and defaults (factor=1, pattern=0xFFFF) — an all-ones no-op — so
+    # stipple activates only when the command supplies a sparse pattern.
+    # The raster filters each line primitive's Bresenham sequence by
+    # pattern bit (step//factor)&0xF, resetting the counter per primitive;
+    # point primitives are exempt.
+
+    def run_stipple(self, commands, **kw):
+        self.stipple_prepared(commands, **kw)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+
+    def test_line_stipple_first_pixel_only(self):
+        # factor=1, pattern=0x0001: only step 0 of each segment emits
+        # (bit0 set, all others clear) -> one pixel per segment.
+        self.run_stipple([
+            ('vkCmdSetLineStipple', dict(lineStippleFactor=1,
+                                       lineStipplePattern=0x0001))])
+        cov = self.stipple_line_coverage(1, 0x0001)
+        self.assertTrue(cov)
+        self.check_fb_coverage(cov)
+        # stipple genuinely filtered: strictly fewer than unstippled and a
+        # proper subset of it
+        self.assertLess(len(cov), len(self.line_coverage()))
+        self.assertTrue(cov < self.line_coverage())
+
+    def test_line_stipple_default_pattern_is_noop(self):
+        # declaring LINE_STIPPLE but issuing no command leaves the default
+        # (factor=1, pattern=0xFFFF) all-ones pattern -> full coverage.
+        self.run_stipple([])
+        self.check_fb_coverage(self.line_coverage())
+
+    def test_line_stipple_all_ones_pattern_is_noop(self):
+        # an explicit all-ones pattern also leaves coverage untouched.
+        self.run_stipple([
+            ('vkCmdSetLineStipple', dict(lineStippleFactor=3,
+                                       lineStipplePattern=0xFFFF))])
+        self.check_fb_coverage(self.line_coverage())
+
+    def test_line_stipple_undeclared_state_ignored(self):
+        # vkCmdSetLineStipple on a pipeline that did NOT declare
+        # VK_DYNAMIC_STATE_LINE_STIPPLE has no effect (full coverage).
+        self.run_stipple([
+            ('vkCmdSetLineStipple', dict(lineStippleFactor=1,
+                                       lineStipplePattern=0x0001))],
+            declare=False)
+        self.check_fb_coverage(self.line_coverage())
+
+    def test_line_stipple_factor_repeats_pattern(self):
+        # factor=2 doubles each pattern bit's run: pattern 0x0003 emits
+        # steps 0,1 then skips until the next pair boundary.
+        self.run_stipple([
+            ('vkCmdSetLineStipple', dict(lineStippleFactor=2,
+                                       lineStipplePattern=0x0003))])
+        cov = self.stipple_line_coverage(2, 0x0003)
+        self.assertTrue(cov)
+        self.check_fb_coverage(cov)
+
+    def test_line_stipple_zero_factor_treated_as_one(self):
+        # factor=0 behaves as factor=1 (RTL stip_fac==0 -> divisor 1).
+        self.run_stipple([
+            ('vkCmdSetLineStipple', dict(lineStippleFactor=0,
+                                       lineStipplePattern=0x0001))])
+        cov = self.stipple_line_coverage(1, 0x0001)
+        self.assertTrue(cov)
+        self.check_fb_coverage(cov)
+
+    def test_point_list_not_stippled(self):
+        # POINT_LIST emits per-vertex pixels; stipple never applies to
+        # point primitives (RTL !poly_pt_q guard), so coverage is full.
+        col = (0.25, 0.5, 0.75, 1.0)
+        self.run_stipple([
+            ('vkCmdSetLineStipple', dict(lineStippleFactor=1,
+                                       lineStipplePattern=0x0001))],
+            topology=0, vertex_count=3,
+            verts=[((-1.0, -1.0), col), ((1.0, -1.0), col),
+                   ((-1.0, 1.0), col)])
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        cov = set()
+        for p in [(-1.0, -1.0, 0.5, 1.0), (1.0, -1.0, 0.5, 1.0),
+                  (-1.0, 1.0, 0.5, 1.0)]:
+            cov |= vn_golden.gfx_line_coverage([p, p], vp, sc, cw, ch)
+        # stipple commanded but point primitives are exempt: the executor
+        # still emits the full unstippled vertex-pixel coverage.
+        self.assertTrue(0 < len(cov) <= 3)
+        self.check_fb_coverage(cov)
+
+    def test_polygon_mode_line_edges_stippled(self):
+        # polygonMode LINE rasterizes each triangle edge as a Bresenham;
+        # stipple applies per edge (poly_pt_q=0) with the counter resetting
+        # per edge.  pattern 0x0001 keeps only each edge's first pixel.
+        col = (0.25, 0.5, 0.75, 1.0)
+        ndc = [((-1.0, -1.0), col), ((1.0, -1.0), col), ((-1.0, 1.0), col)]
+        clip = [(-1.0, -1.0, 0.5, 1.0), (1.0, -1.0, 0.5, 1.0),
+                (-1.0, 1.0, 0.5, 1.0)]
+        self.run_stipple([
+            ('vkCmdSetLineStipple', dict(lineStippleFactor=1,
+                                       lineStipplePattern=0x0001))],
+            topology=3, vertex_count=3, poly_mode=1, verts=ndc)
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        cov = set()
+        for i in range(3):
+            cov |= vn_golden.gfx_line_coverage(
+                [clip[i], clip[(i + 1) % 3]], vp, sc, cw, ch,
+                stipple=(1, 1, 0x0001))
+        # each edge keeps only its first-pixel step; stipple filtered the
+        # rest — a non-empty proper subset of the unstippled edge coverage
+        self.assertTrue(cov)
+        self.assertTrue(cov < self.poly_coverage(1))
         self.check_fb_coverage(cov)
 
     # ---- bounded MRT (two colour attachments) end-to-end ----

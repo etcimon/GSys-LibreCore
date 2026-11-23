@@ -52,6 +52,8 @@ _VECTOR_DYNAMIC = {
     'vkCmdSetStencilReference': ('stencil_reference', 2),
     # single fp32 line width in imm[0]; bounded to lineWidthRange=[1,1]
     'vkCmdSetLineWidth': ('line_width', 1),
+    # (lineStippleFactor u8-bounded, lineStipplePattern u16) raw immediates
+    'vkCmdSetLineStipple': ('stipple', 2),
 }
 
 
@@ -96,6 +98,12 @@ def capture(engine, current, name, record):
                 if not lo <= floats[0] <= hi:
                     raise ValueError(
                         'graphics dynamic line_width exceeds profile')
+        elif kind == 'stipple':
+            # (lineStippleFactor, lineStipplePattern): factor is u32 on the
+            # wire but the raster keeps an 8-bit repeat count (0 treated as
+            # 1), pattern is a 16-bit mask.
+            if not 0 <= values[0] <= 0xFF or not 0 <= values[1] <= 0xFFFF:
+                raise ValueError('graphics dynamic stipple exceeds profile')
         elif kind.startswith('stencil_') and kind != 'stencil_test':
             # faceMask is VkStencilFaceFlags {FRONT=1,BACK=2,BOTH=3}; the
             # trailing values are bounded VkStencilOp/VkCompareOp (0..7) or

@@ -34,7 +34,8 @@ from vn_graphics_state import (DYNAMIC_PRIMITIVE_RESTART,
                                DYNAMIC_STENCIL_COMPARE_MASK,
                                DYNAMIC_STENCIL_WRITE_MASK,
                                DYNAMIC_STENCIL_REFERENCE,
-                               DYNAMIC_BLEND_CONSTANTS)
+                               DYNAMIC_BLEND_CONSTANTS,
+                               DYNAMIC_LINE_STIPPLE)
 
 
 def _push(stages):
@@ -276,6 +277,20 @@ def operation(engine, context_id, plan, remember, guards):
         blend = reconst(blend)
         if blend_extra is not None:
             blend_extra = tuple(reconst(s) for s in blend_extra)
+    # vkCmdSetLineStipple drives line stipple and is the only stipple
+    # command in the bounded catalog (no SetLineStippleEnableEXT; the
+    # static VkPipelineRasterizationLineStateCreateInfo pNext is not
+    # admitted).  The hardware ties stip_en to the declared
+    # VK_DYNAMIC_STATE_LINE_STIPPLE bit and defaults (factor=1,
+    # pattern=0xFFFF) — an all-ones no-op — so stipple=(en,fac,pat)
+    # reaches the raster only while the dynamic state is declared;
+    # fac 0 behaves as 1 (RTL).
+    stipple = None
+    if DYNAMIC_LINE_STIPPLE in fixed.dynamic:
+        stip_fac, stip_pat = (1, 0xFFFF)
+        if plan.stipple is not None:
+            stip_fac, stip_pat = plan.stipple
+        stipple = (1, stip_fac if stip_fac else 1, stip_pat)
     fetch = Fetch(indexed, plan.indices, vertices, direct, indirect,
                   restart)
     viewport = struct.unpack('<6f', struct.pack('<6I', *plan.viewport))
@@ -295,7 +310,8 @@ def operation(engine, context_id, plan, remember, guards):
                   bounds=bounds, depth_bias=depth_bias,
                   depth_clamp=fixed.depth_clamp, poly_mode=fixed.poly_mode,
                   topology=topology, depth_fmt=depth_fmt,
-                  stencil=stencil, blend_extra=blend_extra)
+                  stencil=stencil, blend_extra=blend_extra,
+                  stipple=stipple)
     for ref, kind in plan.references:
         remember(ref, kind)
     guards.append(plan.validate)
