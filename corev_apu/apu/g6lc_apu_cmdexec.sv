@@ -612,10 +612,6 @@ module g6lc_apu_cmdexec
                         rec_q.ctype ==
                         32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_2_EXT) ||
                         rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_EXT) ||
-                        rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_2_EXT) ||
-                        rec_q.ctype ==
                         32'(APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT) ||
                         rec_q.ctype ==
                         32'(APU_VN_TYPE_VK_CMD_CLEAR_DEPTH_STENCIL_IMAGE_EXT);
@@ -626,9 +622,7 @@ module g6lc_apu_cmdexec
     wire xf_i2i_rec = rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT) ||
                       rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_2_EXT) ||
                       rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT) ||
-                      rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_2_EXT) ||
-                      rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_EXT) ||
-                      rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_2_EXT);
+                      rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_2_EXT);
     wire xf_dsclr_rec =
         rec_q.ctype ==
         32'(APU_VN_TYPE_VK_CMD_CLEAR_DEPTH_STENCIL_IMAGE_EXT);
@@ -1345,6 +1339,20 @@ module g6lc_apu_cmdexec
         default: ;
       endcase
     end
+
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+    // FSM transition trace for lost-submit bring-up (sim-only)
+    logic [7:0] st_prev_q;
+    always @(posedge clk_i) begin
+      st_prev_q <= state_q;
+      if (rst_ni && state_q != st_prev_q)
+        $display("[ST %0t] %0d->%0d ctype=%08h buf=%0d rec=%0d/%0d pay=%0d/%0d",
+                 $time, st_prev_q, state_q, rec_q.ctype, buf_i_q,
+                 rec_i_q, rec_n_q, pay_i_q, pay_n_q);
+    end
+`endif
+// pragma translate_on
 
     // ---- sequential --------------------------------------------------
     always_ff @(posedge clk_i or negedge rst_ni) begin
