@@ -12401,12 +12401,19 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # ~4 vertex batches) — exercises post-transform vertex reuse
         # across batches through the real shader path
         is_dixmesh = 'drawindxmesh' in gfx
+        # drawindxmd<N>: indexed multi-draw-indirect — N stride-stepped
+        # 20-byte VkDrawIndexedIndirectCommand structs; the u16 index
+        # list relocates to ib2+0x100 so it clears the command block.
+        is_ixmd = 'drawindxmd' in gfx
+        # drawindxcnt: vkCmdDrawIndexedIndirectCount — the indexed Count
+        # variant; stride-stepped commands + count u32 (ib2+0x180) +
+        # relocated index list (ib2+0x100) all share ib2.
+        is_ixcnt = 'drawindxcnt' in gfx
         is_drawind = 'drawind' in gfx and not is_drawindx
         # drawindmd<N>: multi-draw-indirect — N stride-stepped identical
         # VkDrawIndirectCommand structs issue N work items over the one
         # shared triangle footprint (identical draws union to a single
-        # coverage).  Indexed multi-draw is a follow-up (its u16 index
-        # list shares ib2 and would collide with the command block).
+        # coverage).
         _mdraw = 1
         if is_drawind and 'drawindmd' in gfx:
             _s = gfx.split('drawindmd', 1)[1]
@@ -12417,6 +12424,16 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 else:
                     break
             _mdraw = int(_n) if _n else 1
+        _imdraw = 1
+        if is_ixmd:
+            _s = gfx.split('drawindxmd', 1)[1]
+            _n = ''
+            for _c in _s:
+                if _c.isdigit():
+                    _n += _c
+                else:
+                    break
+            _imdraw = int(_n) if _n else 1
         # dindcnt: vkCmdDrawIndirectCount — the draw count is a u32 in
         # countBuffer (ib2 at buffer offset 0x100) clamped to maxDrawCount,
         # NOT a record operand.  _cdraw stride-stepped 16B command structs
@@ -16030,6 +16047,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             vmem_words += [0] * (0x301 - len(vmem_words)) + \
                 ([_icount, 1, 0, 0] * _mdraw if is_drawind
                  else [_icount, 1, 0, 0] * _cdraw if is_dcnt
+                 else [_icount, 1, 0, 0, 0] * _imdraw if is_ixmd
+                 else [_icount, 1, 0, 0, 0] * _cdraw if is_ixcnt
                  else [_icount, 1, 0, 0] + [0])
             if is_dcnt:
                 # countBuffer==ib2, countBufferOffset=0x100 -> vmem word
@@ -16041,6 +16060,16 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     _iw = [(_ix[i + 1] << 16) | _ix[i]
                            for i in range(0, _icount, 2)]
                     vmem_words += [0] * (0x308 - len(vmem_words)) + _iw
+                elif is_ixmd or is_ixcnt:
+                    # relocated index list: ib2+0x100 -> vmem word 0x340,
+                    # clear of the stride-stepped command block at 0x04
+                    vmem_words += [0] * (0x340 - len(vmem_words)) + \
+                        [0x0001_0000, 0x0000_0002]
+                    if is_ixcnt:
+                        # countBuffer==ib2, countBufferOffset=0x180 ->
+                        # vmem word 0x360 holds the clamped u32 count
+                        vmem_words += [0] * (0x360 - len(vmem_words)) + \
+                            [_ccount]
                 else:
                     vmem_words += [0] * (0x308 - len(vmem_words)) + \
                         [0x0001_0000, 0x0000_0002]
@@ -16272,7 +16301,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # the indexed indirect record
             ('vkCmdBindIndexBuffer', dict(
                 commandBuffer=cbdraw, buffer=X['ib2'],
-                offset=0x20, indexType=0)),
+                offset=(0x100 if (is_ixmd or is_ixcnt) else 0x20),
+                indexType=0)),
         ]) + [
             ([('vkCmdDrawIndirect', dict(
                 commandBuffer=cbdraw, buffer=X['ib2'], offset=4,
@@ -16281,6 +16311,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                  commandBuffer=cbdraw, buffer=X['ib2'], offset=4,
                  countBuffer=X['ib2'], countBufferOffset=0x100,
                  maxDrawCount=_cmax, stride=16))] if is_dcnt else
+             [('vkCmdDrawIndexedIndirectCount', dict(
+                 commandBuffer=cbdraw, buffer=X['ib2'], offset=4,
+                 countBuffer=X['ib2'], countBufferOffset=0x180,
+                 maxDrawCount=_cmax, stride=20))] if is_ixcnt else
+             [('vkCmdDrawIndexedIndirect', dict(
+                 commandBuffer=cbdraw, buffer=X['ib2'], offset=4,
+                 drawCount=_imdraw, stride=20))] if is_ixmd else
              [('vkCmdDrawIndexedIndirect', dict(
                  commandBuffer=cbdraw, buffer=X['ib2'], offset=4,
                  drawCount=1, stride=20))] if is_drawindx else
