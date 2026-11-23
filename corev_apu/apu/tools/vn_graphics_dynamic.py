@@ -33,6 +33,7 @@ _SCALAR_DYNAMIC = {
     'vkCmdSetDepthCompareOp': ('depth_compare', 0, 7),
     'vkCmdSetDepthBoundsTestEnable': ('bounds_test', 0, 1),
     'vkCmdSetDepthBiasEnable': ('depth_bias_enable', 0, 1),
+    'vkCmdSetPrimitiveTopology': ('topology', 0, 5),
 }
 _BOOL_DYNAMIC = {n: k for n, (k, _lo, _hi) in _SCALAR_DYNAMIC.items()}
 

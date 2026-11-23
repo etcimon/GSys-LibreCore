@@ -97,6 +97,7 @@ DYNAMIC_DEPTH_WRITE_ENABLE = 1000000000 + (268 - 1) * 1000 + 7
 DYNAMIC_DEPTH_COMPARE_OP = 1000000000 + (268 - 1) * 1000 + 8
 DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE = 1000000000 + (268 - 1) * 1000 + 9
 DYNAMIC_DEPTH_BIAS_ENABLE = 1000000000 + (378 - 1) * 1000 + 2
+DYNAMIC_PRIMITIVE_TOPOLOGY = 1000000000 + (268 - 1) * 1000 + 2
 # base VkDynamicState enums (vk.xml <enums> values, not extension offsets)
 DYNAMIC_DEPTH_BOUNDS = 5
 DYNAMIC_DEPTH_BIAS = 3
@@ -108,7 +109,8 @@ _DYNAMIC_ADMITTED = frozenset((DYNAMIC_PRIMITIVE_RESTART,
                              DYNAMIC_DEPTH_COMPARE_OP,
                              DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE,
                              DYNAMIC_DEPTH_BOUNDS,
-                             DYNAMIC_DEPTH_BIAS_ENABLE, DYNAMIC_DEPTH_BIAS))
+                             DYNAMIC_DEPTH_BIAS_ENABLE, DYNAMIC_DEPTH_BIAS,
+                             DYNAMIC_PRIMITIVE_TOPOLOGY))
 
 
 def validate(engine, fields, blobs, render_pass, subpass=0):

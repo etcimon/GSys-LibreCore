@@ -28,7 +28,8 @@ from vn_graphics_state import (DYNAMIC_PRIMITIVE_RESTART,
                                DYNAMIC_DEPTH_COMPARE_OP,
                                DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE,
                                DYNAMIC_DEPTH_BOUNDS,
-                               DYNAMIC_DEPTH_BIAS_ENABLE, DYNAMIC_DEPTH_BIAS)
+                               DYNAMIC_DEPTH_BIAS_ENABLE, DYNAMIC_DEPTH_BIAS,
+                               DYNAMIC_PRIMITIVE_TOPOLOGY)
 
 
 def _push(stages):
@@ -210,6 +211,13 @@ def operation(engine, context_id, plan, remember, guards):
             bconst, bclamp, bslope = struct.unpack('<3f',
                 struct.pack('<3I', *plan.depth_bias))
         depth_bias = (bconst, bclamp, bslope) if dbe else None
+    # vkCmdSetPrimitiveTopology overrides the pipeline input-assembly
+    # topology only when the pipeline declared VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY;
+    # unset keeps the create-info value (bounded to the 0..5 primitive set).
+    topology = fixed.topology
+    if (DYNAMIC_PRIMITIVE_TOPOLOGY in fixed.dynamic and
+            plan.topology is not None):
+        topology = plan.topology
     fetch = Fetch(indexed, plan.indices, vertices, direct, indirect,
                   restart)
     viewport = struct.unpack('<6f', struct.pack('<6I', *plan.viewport))
@@ -228,7 +236,7 @@ def operation(engine, context_id, plan, remember, guards):
                   extra_targets=extra_targets,
                   bounds=bounds, depth_bias=depth_bias,
                   depth_clamp=fixed.depth_clamp, poly_mode=fixed.poly_mode,
-                  topology=fixed.topology, depth_fmt=depth_fmt,
+                  topology=topology, depth_fmt=depth_fmt,
                   stencil=fixed.stencil, blend_extra=fixed.blend_extra)
     for ref, kind in plan.references:
         remember(ref, kind)

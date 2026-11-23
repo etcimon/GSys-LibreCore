@@ -1925,6 +1925,21 @@ class DrawReplayTests(unittest.TestCase):
         self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
         self.f.end()
 
+    def dyn_topology_prepared(self, primitive_topology):
+        # vkCmdSetPrimitiveTopology dynamic state: the pipeline declares
+        # VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY (wire 1000267002) so the command
+        # value overrides the create-info input-assembly topology.
+        self.pipeline(topology=3, dynamic=[0, 1, 1000267002])
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdSetPrimitiveTopology', commandBuffer=self.f.CB,
+                       primitiveTopology=primitive_topology)
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
     def indexed_coverage(self, clip, indices):
         # clip = per-vertex clip positions; indices select/reorder them
         # into TRIANGLE_LIST triples for the golden coverage union.
@@ -2828,6 +2843,28 @@ class DrawReplayTests(unittest.TestCase):
         for x, y in ((0, 0), (4, 1)):
             self.assertEqual(self.read_texel(x, y), self.clear_texel())
             self.assertAlmostEqual(self.read_depth(x, y), 0.6, places=6)
+
+    def test_draw_dynamic_primitive_topology_point_list(self):
+        # vkCmdSetPrimitiveTopology(POINT_LIST) overrides create-info
+        # TRIANGLE_LIST: the three vertices emit one fragment each instead
+        # of a filled triangle — coverage matches the point-list oracle.
+        col = (0.25, 0.5, 0.75, 1.0)
+        self.upload([((-1.0, -1.0), col), ((1.0, -1.0), col),
+                     ((-1.0, 1.0), col)])
+        self.dyn_topology_prepared(0)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        stats = job.drawexec_stats[job.operation - 1]
+        self.assertGreater(stats['records'], 0)
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        cov = set()
+        for p in [(-1.0, -1.0, 0.5, 1.0), (1.0, -1.0, 0.5, 1.0),
+                  (-1.0, 1.0, 0.5, 1.0)]:
+            cov |= vn_golden.gfx_line_coverage([p, p], vp, sc, cw, ch)
+        self.check_fb_coverage(cov)
 
     # ---- bounded MRT (two colour attachments) end-to-end ----
     # fs_program2 emits loc0=vcol, loc1=const; the single Writeback stage
