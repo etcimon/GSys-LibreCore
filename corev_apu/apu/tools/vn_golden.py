@@ -12440,6 +12440,14 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # fill ib2; the stored count selects how many actually issue.
         is_dcnt = 'dindcnt' in gfx
         _cdraw, _cmax, _ccount = 4, 4, 2
+        # dindcntz: stored count=0 -> the executor issues no draw work and
+        # allocates no raster scratch; dindcntx: stored count=9 > maxDrawCount
+        # -> clamped to 4 draws.  Both exercise the count-buffer clamp the
+        # cmdexec unit bench covers, end-to-end through the tape.
+        if 'dindcntz' in gfx:
+            _ccount = 0
+        elif 'dindcntx' in gfx:
+            _ccount = 9
         # statvp: pipeline carries a static pViewportState and the
         # command buffer emits NO SetViewport/SetScissor — coverage must
         # come from the ObjPay-baked viewport/scissor (the CTS

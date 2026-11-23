@@ -187,6 +187,10 @@ python3 $G --graphics-session ue_gpos_drawindxcnt_1 1
 # clamped to maxDrawCount=4; stored count=2 issues two stride-stepped
 # draws over the shared triangle footprint
 python3 $G --graphics-session ue_gpos_dindcnt_1 1
+# dindcntz/dindcntx: count-buffer edges — stored 0 issues no draw work
+# (no raster scratch); stored 9 clamps to maxDrawCount=4 draws
+python3 $G --graphics-session ue_gpos_dindcntz_1 1
+python3 $G --graphics-session ue_gpos_dindcntx_1 1
 python3 $G --graphics-session ue_gpos_blend_1    1
 # BGRA colour-write-mask pair: B8G8R8A8_UNORM attachment (vkfmt 44)
 # stores bytes [B,G,R,A]; cwmr keeps logical R only (mask 0x1), cwmb
