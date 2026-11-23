@@ -66,6 +66,20 @@ def replay(images, record, name, *, compute=False, device=None):
     from vn_image_barriers import scope, WORDS
     golden = images.engine.golden
     imm = record['imm']
+    if name == 'vkCmdSetEvent2':
+        # synchronization2: the VkDependencyInfo barrier payload replays
+        # through the shared sync2 barrier path (per-barrier u64
+        # stage/access masks), then the event signals at this stream
+        # position — in-order execution makes the signal observe the
+        # barrier ordering work.
+        from vn_image_barriers import replay_sync2
+        replay_sync2(images, record, compute=compute, device=device)
+        _, entry = images.remember(record['handle'][0],
+                                   golden.KIND['VkEvent'])
+        if device is not None and entry['parent'] != device:
+            raise ValueError('event signal crosses command-buffer devices')
+        images.operations.append(EventSignal((entry,), True))
+        return
     if name in ('vkCmdSetEvent', 'vkCmdResetEvent', 'vkCmdResetEvent2'):
         if (record.get('payload_words', 0) != 0 or
                 any(imm[1:7]) or imm[7] or any(record['handle'][1:])):

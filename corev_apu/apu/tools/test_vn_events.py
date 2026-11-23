@@ -64,6 +64,49 @@ class EventTests(unittest.TestCase):
                     aspectMask=1, baseMipLevel=0, levelCount=0xFFFFFFFF,
                     baseArrayLayer=0, layerCount=0xFFFFFFFF))] * images)
 
+    def dependency_info(self, *, memory=0, buffers=0, images=0,
+                        src=0x1000, dst=0x400,
+                        src_access=0x800, dst_access=0x100,
+                        old_layout=0, new_layout=1):
+        # VkDependencyInfo carrying synchronization2 per-barrier u64
+        # stage/access masks (Vk*Barrier2 structs).
+        return self.w.structure(
+            'VkDependencyInfo', dependencyFlags=0,
+            memoryBarrierCount=memory,
+            pMemoryBarriers=[self.w.structure(
+                'VkMemoryBarrier2', pNext=[], srcStageMask=src,
+                srcAccessMask=src_access, dstStageMask=dst,
+                dstAccessMask=dst_access)] * memory,
+            bufferMemoryBarrierCount=buffers,
+            pBufferMemoryBarriers=[self.w.structure(
+                'VkBufferMemoryBarrier2', pNext=[], srcStageMask=src,
+                srcAccessMask=src_access, dstStageMask=dst,
+                dstAccessMask=dst_access,
+                srcQueueFamilyIndex=0xFFFFFFFF,
+                dstQueueFamilyIndex=0xFFFFFFFF, buffer=self.f.BUFFER,
+                offset=0, size=4096)] * buffers,
+            imageMemoryBarrierCount=images,
+            pImageMemoryBarriers=[self.w.structure(
+                'VkImageMemoryBarrier2', pNext=[], srcStageMask=src,
+                srcAccessMask=src_access, dstStageMask=dst,
+                dstAccessMask=dst_access, oldLayout=old_layout,
+                newLayout=new_layout,
+                srcQueueFamilyIndex=0xFFFFFFFF,
+                dstQueueFamilyIndex=0xFFFFFFFF, image=self.images.IMAGE,
+                subresourceRange=self.w.structure(
+                    'VkImageSubresourceRange', aspectMask=1, baseMipLevel=0,
+                    levelCount=0xFFFFFFFF, baseArrayLayer=0,
+                    layerCount=0xFFFFFFFF))] * images)
+
+    def pipeline_barrier2(self, **kwargs):
+        self.f.command('vkCmdPipelineBarrier2', commandBuffer=self.f.CB,
+                       pDependencyInfo=self.dependency_info(**kwargs))
+
+    def set_event2(self, event=None, **kwargs):
+        self.f.command('vkCmdSetEvent2', commandBuffer=self.f.CB,
+                       event=event or self.EVENT,
+                       pDependencyInfo=self.dependency_info(**kwargs))
+
     def status(self, event=None):
         self.f.command('vkSeekReplyCommandStreamMESA', position=0)
         self.f.command('vkGetEventStatus', device=self.w.DEVICE,
@@ -122,6 +165,66 @@ class EventTests(unittest.TestCase):
         self.f.end()
         with self.assertRaises(ValueError):
             self.f.enqueue()
+
+    def test_pipeline_barrier2_memory_buffer_barriers_replay(self):
+        # vkCmdPipelineBarrier2 carries per-barrier u64 stage/access masks
+        # inside VkDependencyInfo.  A memory+buffer barrier validates scope
+        # and retains one typed barrier Transfer for the buffer range.
+        self.f.begin()
+        self.pipeline_barrier2(memory=1, buffers=1)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertEqual([op.__class__.__name__ for op in job.operations],
+                         ['Transfer'])
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+
+    def test_pipeline_barrier2_image_barrier_replay(self):
+        self.images.create(usage=0x17)
+        self.f.begin()
+        self.pipeline_barrier2(memory=1, buffers=1, images=1)
+        self.f.end()
+        job = self.f.enqueue()
+        # memory validates scope only; buffer+image each retain a barrier op
+        self.assertEqual([op.__class__.__name__ for op in job.operations],
+                         ['Transfer', 'Transfer'])
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+
+    def test_pipeline_barrier2_rejects_sync2_high_mask_bits(self):
+        # a stage/access mask with hi-32 bits set (sync2-only stages such as
+        # COPY/RESOLVE) is outside the bounded coherent profile.
+        self.f.begin()
+        self.pipeline_barrier2(memory=1, src=0x100000000)
+        self.f.end()
+        with self.assertRaises(ValueError):
+            self.f.enqueue()
+
+    def test_pipeline_barrier2_rejects_bad_stage_and_range(self):
+        for kwargs in (dict(memory=1, src=0x10),
+                       dict(memory=1, dst_access=0x20),
+                       dict(buffers=1, dst=0x1000)):
+            self.f.begin()
+            self.pipeline_barrier2(**kwargs)
+            self.f.end()
+            with self.assertRaises(ValueError, msg=str(kwargs)):
+                self.f.enqueue()
+            self.assertFalse(self.e.transfers.active)
+            self.assertFalse(self.e.replay.held)
+
+    def test_set_event2_signals_after_barrier_ordering(self):
+        # vkCmdSetEvent2 signals the event once the dependencyInfo barrier
+        # ordering retires; a buffer barrier contributes a Transfer op
+        # ahead of the EventSignal.
+        self.f.begin()
+        self.set_event2(buffers=1)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertEqual([op.__class__.__name__ for op in job.operations],
+                         ['Transfer', 'EventSignal'])
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertEqual(job.event_stats[1], {'signaled': True})
 
     def test_wait_blocks_until_host_set_event_releases(self):
         self.f.begin()

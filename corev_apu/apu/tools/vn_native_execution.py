@@ -14,7 +14,10 @@ from vn_stream_task import StreamTask
 from vn_transfer_executor import TransferExecutor
 from vn_transfer_replay import TransferReplay
 from vn_native_submit import NativeSubmissions, check_submission_modes
-from vn_image_barriers import FIELDS as BARRIER_FIELDS, capture as capture_barrier
+from vn_image_barriers import (FIELDS as BARRIER_FIELDS,
+                               capture as capture_barrier,
+                               capture_sync2 as capture_sync2_barrier,
+                               sync2_fields)
 from vn_native_layouts import capture as capture_layout, attach as attach_layout
 from vn_native_pipelines import capture as capture_pipeline, attach as attach_pipeline
 from vn_native_rendering import capture as capture_rendering, attach as attach_rendering
@@ -72,6 +75,15 @@ def load_decoder(native_timeline=False):
             'vkCmdWaitEvents', {'fields': []})
         wait['fields'] = list(dict.fromkeys(
             list(wait.get('fields', ())) + list(BARRIER_FIELDS)))
+        # synchronization2 barriers: per-barrier u64 stage/access masks
+        # inside VkDependencyInfo.  PipelineBarrier2/SetEvent2 take the
+        # singular (pointer-transparent) form; WaitEvents2 takes the
+        # pDependencyInfos array form, so its paths carry that prefix.
+        for _cmd in ('vkCmdPipelineBarrier2', 'vkCmdSetEvent2'):
+            profile.setdefault('keep', {})[_cmd] = {
+                'fields': sync2_fields()}
+        profile.setdefault('keep', {})['vkCmdWaitEvents2'] = {
+            'fields': sync2_fields('pDependencyInfos.')}
         profile.setdefault('keep', {})['vkCmdBeginConditionalRenderingEXT'] = {
             'fields': ['buffer', 'offset', 'flags']}
     model = generator.Model(profile)
@@ -198,6 +210,10 @@ class LinearExecution:
         render_pass = capture_pass(self, current, name, command, record)
         if self.submissions.enabled and name == 'vkCmdPipelineBarrier':
             capture_barrier(self, current.frontend, record)
+        elif self.submissions.enabled and name in ('vkCmdPipelineBarrier2',
+                                                    'vkCmdSetEvent2'):
+            # singular pDependencyInfo: barrier structs lead the payload
+            capture_sync2_barrier(self, current.frontend, record)
         elif self.submissions.enabled and name == 'vkCmdWaitEvents':
             # retained payload leads with 2 words per event id; the
             # barrier structs follow verbatim after capture canonicalizes

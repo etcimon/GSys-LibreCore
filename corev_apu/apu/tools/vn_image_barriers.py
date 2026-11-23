@@ -19,6 +19,44 @@ IMAGE_FIELDS = tuple('pImageMemoryBarriers.' + field for field in (
 FIELDS = MEMORY_FIELDS + BUFFER_FIELDS + IMAGE_FIELDS
 WORDS = 13
 
+# synchronization2 (vkCmdPipelineBarrier2/SetEvent2/WaitEvents2): every
+# barrier carries its own u64 src/dst stage+access masks inside a
+# VkDependencyInfo struct.  Pointer hops are transparent for the singular
+# pDependencyInfo form, so the keep paths name the barrier arrays
+# directly; the plural pDependencyInfos array on WaitEvents2 prefixes
+# every path with 'pDependencyInfos.'.  Word counts per staged element
+# (KEEP stages each u64 as lo,hi and each u32/HANDLE as one/two words):
+#   memory  8  = 4 u64 masks
+#   buffer 16  = 4 u64 masks + srcQF + dstQF + buffer(u64) + offset(u64)
+#                 + size(u64)
+#   image  19  = 4 u64 masks + old/new layout + srcQF + dstQF + image(u64)
+#                 + 5 subresourceRange u32s
+SYNC2_MASKS = ('srcStageMask', 'srcAccessMask',
+               'dstStageMask', 'dstAccessMask')
+SYNC2_BUFFER = SYNC2_MASKS + ('srcQueueFamilyIndex',
+                              'dstQueueFamilyIndex', 'buffer', 'offset',
+                              'size')
+SYNC2_IMAGE = SYNC2_MASKS + ('oldLayout', 'newLayout',
+                             'srcQueueFamilyIndex', 'dstQueueFamilyIndex',
+                             'image') + tuple(
+                                 'subresourceRange.' + f for f in (
+                                     'aspectMask', 'baseMipLevel',
+                                     'levelCount', 'baseArrayLayer',
+                                     'layerCount'))
+SYNC2_MEMORY_WORDS = 8
+SYNC2_BUFFER_WORDS = 16
+SYNC2_IMAGE_WORDS = 19
+
+
+def sync2_fields(prefix=''):
+    """Keep paths for one VkDependencyInfo barrier set.  `prefix` is
+    '' for the transparent singular pDependencyInfo and
+    'pDependencyInfos.' for the WaitEvents2 array form."""
+    p = lambda n: prefix + n
+    return ([p('pMemoryBarriers.' + f) for f in SYNC2_MASKS] +
+            [p('pBufferMemoryBarriers.' + f) for f in SYNC2_BUFFER] +
+            [p('pImageMemoryBarriers.' + f) for f in SYNC2_IMAGE])
+
 
 def capture(engine, front, record, base=0):
     memory, buffers, images = record['imm'][3:6]
@@ -40,6 +78,52 @@ def capture(engine, front, record, base=0):
                 raise KeyError('barrier refers to a stale or foreign resource')
             data[p:p + 2] = [entry['gen'] << 16 | slot, 0]
     record['pay'] = data
+
+
+def capture_sync2(engine, front, record, base=0):
+    """Resolve the embedded VkBuffer/VkImage ids inside staged
+    synchronization2 barrier payloads to {gen,slot} record handles.
+    record['imm'][1:4] carry memory/buffer/image barrier counts; the pay
+    layout is [memory 8w][buffer 16w][image 19w] per element."""
+    memory, buffers, images = record['imm'][1], record['imm'][2], \
+        record['imm'][3]
+    counts = (memory, buffers, images)
+    if (record['chain'] or base < 0 or base > len(record['pay']) or
+            any(c < 0 for c in counts) or sum(counts) > 16 or
+            len(record['pay']) - base !=
+            memory * SYNC2_MEMORY_WORDS +
+            buffers * SYNC2_BUFFER_WORDS +
+            images * SYNC2_IMAGE_WORDS):
+        raise ValueError('sync2 barrier capture count/chain exceeds profile')
+    data = list(record['pay'])
+    off = base + memory * SYNC2_MEMORY_WORDS
+    for i in range(buffers):
+        p = off + i * SYNC2_BUFFER_WORDS + 10
+        value = data[p] | data[p + 1] << 32
+        status, slot, entry = front.resolve(
+            value, engine.golden.KIND['VkBuffer'])
+        if status != 'OK' or entry['ctx'] != front.ctx:
+            raise KeyError('sync2 buffer barrier refers to stale/foreign resource')
+        data[p:p + 2] = [entry['gen'] << 16 | slot, 0]
+    off += buffers * SYNC2_BUFFER_WORDS
+    for i in range(images):
+        p = off + i * SYNC2_IMAGE_WORDS + 12
+        value = data[p] | data[p + 1] << 32
+        status, slot, entry = front.resolve(
+            value, engine.golden.KIND['VkImage'])
+        if status != 'OK' or entry['ctx'] != front.ctx:
+            raise KeyError('sync2 image barrier refers to stale/foreign resource')
+        data[p:p + 2] = [entry['gen'] << 16 | slot, 0]
+    record['pay'] = data
+
+
+def _sync2_mask(lo, hi):
+    """Fold a staged u64 mask word-pair to an int, fail-closing the
+    synchronization2-only high bits the bounded coherent profile does not
+    model (mirrors the ResetEvent2 imm[1:7]==0 discipline)."""
+    if hi:
+        raise ValueError('sync2 barrier mask exceeds coherent profile')
+    return lo
 
 
 def scope(stage, access, *, compute=False, shader=True, image=False):
@@ -145,3 +229,102 @@ def replay(images, record, *, compute=False, device=None, offset=0):
         if r[2] != 0 and r[2] != cur:
             raise ValueError('image barrier oldLayout does not match current layout')
         entry['layout'] = r[3]
+
+
+def replay_sync2(images, record, *, compute=False, device=None):
+    """Replay a synchronization2 barrier record (vkCmdPipelineBarrier2 /
+    SetEvent2 / WaitEvents2 dependency payload).  imm[0]=dependencyFlags,
+    imm[1:4]=memory/buffer/image barrier counts; pay holds per-barrier
+    u64 stage/access masks plus the buffer/image handle+range fields."""
+    imm = record['imm']
+    memory, buffers, count = imm[1], imm[2], imm[3]
+    if (imm[0] or any(n < 0 for n in (memory, buffers, count)) or
+            memory + buffers + count > 16):
+        raise ValueError('sync2 dependency/barrier count exceeds coherent profile')
+    length = (memory * SYNC2_MEMORY_WORDS +
+              buffers * SYNC2_BUFFER_WORDS + count * SYNC2_IMAGE_WORDS)
+    if record.get('payload_words') != length:
+        raise ValueError('sync2 barrier payload is not retained exactly')
+    data = images.payload(record, length) if length else []
+    if buffers + count > images._remaining():
+        raise MemoryError('sync2 barrier operation budget exhausted')
+    for i in range(memory):
+        r = data[i * SYNC2_MEMORY_WORDS:(i + 1) * SYNC2_MEMORY_WORDS]
+        scope(_sync2_mask(r[0], r[1]), _sync2_mask(r[2], r[3]),
+              compute=compute)
+        scope(_sync2_mask(r[4], r[5]), _sync2_mask(r[6], r[7]),
+              compute=compute)
+    off = memory * SYNC2_MEMORY_WORDS
+    for i in range(buffers):
+        r = data[off + i * SYNC2_BUFFER_WORDS:
+                 off + (i + 1) * SYNC2_BUFFER_WORDS]
+        scope(_sync2_mask(r[0], r[1]), _sync2_mask(r[2], r[3]),
+              compute=compute)
+        scope(_sync2_mask(r[4], r[5]), _sync2_mask(r[6], r[7]),
+              compute=compute)
+        if r[8] != 0xFFFFFFFF or r[9] != 0xFFFFFFFF:
+            raise ValueError('sync2 buffer barrier ownership transfer exceeds profile')
+        resource = {'handle': [r[10] | r[11] << 32]}
+        _, entry = images.remember(
+            resource['handle'][0], images.engine.golden.KIND['VkBuffer'])
+        if device is not None and entry['parent'] != device:
+            raise ValueError('sync2 buffer barrier crosses command-buffer devices')
+        owner, binding, capacity = images.extent(resource, 0)
+        offset = r[12] | r[13] << 32
+        size = r[14] | r[15] << 32
+        if size == (1 << 64) - 1:
+            size = capacity - offset
+        if offset >= capacity or not size or size > capacity - offset:
+            raise ValueError('sync2 buffer barrier range exceeds logical buffer')
+        images.operations.append(Transfer('barrier', owner, binding + offset, 0))
+    off += buffers * SYNC2_BUFFER_WORDS
+    for i in range(count):
+        r = data[off + i * SYNC2_IMAGE_WORDS:
+                 off + (i + 1) * SYNC2_IMAGE_WORDS]
+        src_stage = _sync2_mask(r[0], r[1])
+        src_access = _sync2_mask(r[2], r[3])
+        dst_stage = _sync2_mask(r[4], r[5])
+        dst_access = _sync2_mask(r[6], r[7])
+        scope(src_stage, src_access, compute=compute, image=True)
+        scope(dst_stage, dst_access, compute=compute, image=True)
+        old_layout, new_layout = r[8], r[9]
+        if (r[10] != 0xFFFFFFFF or r[11] != 0xFFFFFFFF or
+                old_layout not in ((0, 1, 5, 6, 7, 8) if compute else
+                                   (0, 1, 2, 5, 6, 7, 8)) or
+                new_layout not in ((1, 5, 6, 7) if compute else
+                                   (1, 2, 5, 6, 7))):
+            raise ValueError('unsupported sync2 image access/layout/queue-family transition')
+        for access, layout in ((src_access, old_layout),
+                               (dst_access, new_layout)):
+            if (access & 0x40 and layout != 1 or
+                    access & 0x20 and layout not in (1, 5) or
+                    layout == 5 and access & ~0x8020 or
+                    access & 0x180 and layout not in (1, 2) or
+                    layout == 2 and access & ~0x8180):
+                raise ValueError('sync2 image shader access incompatible with layout')
+        resource = {'handle': [r[12] | r[13] << 32]}
+        _, entry = images.remember(
+            resource['handle'][0], images.engine.golden.KIND['VkImage'])
+        if device is not None and entry['parent'] != device:
+            raise ValueError('sync2 image barrier crosses command-buffer devices')
+        usage = entry['aux'] >> 54
+        access = src_access | dst_access
+        if (access & 0x40 and not usage & 8 or access & 0x20 and not usage & 12 or
+                access & 0x180 and not usage & 16 or
+                5 in (old_layout, new_layout) and not usage & 4 or
+                2 in (old_layout, new_layout) and not usage & 16):
+            raise ValueError('sync2 image shader access exceeds image usage')
+        image = images._image(resource, 0)
+        aspect, mip, levels, layer, layers = r[14:19]
+        levels = image['mips'] - mip if levels == 0xFFFFFFFF else levels
+        layers = image['layers'] - layer if layers == 0xFFFFFFFF else layers
+        if (aspect != 1 or not 0 < levels <= image['mips'] or
+                mip + levels > image['mips'] or not 0 < layers <= image['layers'] or
+                layer + layers > image['layers']):
+            raise ValueError('sync2 image barrier subresource range exceeds image')
+        images.operations.append(
+            Transfer('barrier', image['owner'], image['binding'], 0))
+        cur = entry.get('layout', 0)
+        if old_layout != 0 and old_layout != cur:
+            raise ValueError('sync2 image barrier oldLayout does not match current layout')
+        entry['layout'] = new_layout

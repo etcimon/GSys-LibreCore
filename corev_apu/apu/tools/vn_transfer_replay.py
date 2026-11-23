@@ -4,7 +4,8 @@
 """Bounded internal command-buffer replay; not wire GPU/profile admission."""
 from vn_transfer_executor import Transfer
 from vn_image_replay import ImageReplay
-from vn_image_barriers import replay as replay_image_barrier
+from vn_image_barriers import (replay as replay_image_barrier,
+                               replay_sync2 as replay_sync2_barrier)
 from vn_event_replay import replay as replay_event
 from vn_query_replay import replay as replay_query
 from vn_conditional_replay import replay as replay_conditional
@@ -171,8 +172,11 @@ class TransferReplay:
                                        remember, append, guards)
                 elif name == 'vkCmdPipelineBarrier':
                     replay_image_barrier(images, record, compute=compute, device=pool['parent'])
+                elif name == 'vkCmdPipelineBarrier2':
+                    replay_sync2_barrier(images, record, compute=compute,
+                                         device=pool['parent'])
                 elif name in ('vkCmdSetEvent', 'vkCmdResetEvent', 'vkCmdWaitEvents',
-                              'vkCmdResetEvent2'):
+                              'vkCmdResetEvent2', 'vkCmdSetEvent2'):
                     replay_event(images, record, name, compute=compute,
                                  device=pool['parent'])
                 elif name in ('vkCmdBeginConditionalRenderingEXT',
