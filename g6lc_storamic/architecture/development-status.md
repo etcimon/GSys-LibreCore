@@ -1561,3 +1561,42 @@ counts unchanged. Run tags are in `completion-plan.md`.
 Known and left as is: without a Storamic role `g6lc64_smt2` still fails the
 hazard firmware (tohost 33). That run is part of the stage as the isolation
 witness and is logged in `AGENTS-todo.md` for the SMT owners.
+
+## Checkpoint widening W0 + W1: refusal closure and single-core L2/L3 (2026-11-22)
+
+Scope: single-hart, single-core, in-order WT core with L2 (flop tags) and L2+L3
+(SRAM tags, inclusive, posted writes, write-update, L2+L3 prefetchers, CMO).
+Outside-folder edits are tracked in `hyp8-port-ledger.md` section 5b.
+
+- **W0 refusal closure (`config_pkg.sv`).** `g6lc_storamic_origin_supported` now
+  requires `NrCores <= 1`, `!AiCfg.MatrixEn`, and `!ServerPrefetchEn`, closing
+  multi-core, AI-island, and server-prefetcher configs until their own steps
+  qualify.
+- **W1 L2/L3 drain and resync (`g6lc_l2_tag`, `g6lc_l2_top`, `g6lc_l3_top`,
+  `g6lc_cluster`).**
+  - Bypass `AxPROT` is now captured and forwarded on `S_BYPASS_AR`/`S_BYPASS_AW`
+    (cacheable line fills keep `3'b000`), so CPU control-page commands retain
+    their origin across L2 and L3.
+  - During pause, L2/L3 prefetchers are quiesced (`l2_quiesce_i`); once core 0
+    drains, new L2 slave AR/AW acceptance is blocked (`l2_block_slv_i`) so
+    in-flight L2/L3 writes, fills, and reads drain monotonically to full
+    `l2_idle_o` / `l3_idle_o`.
+  - On pause release, `g6lc_cluster` holds core 0 paused while L2 and L3 walk
+    all sets (`0..NUM_SETS-1`, 1 set/cycle, in parallel across both flop and
+    SRAM tag arrays), then releases core 0 to run its C5 L1 resync.
+  - Every non-Storamic build ties the new inputs to `0` so it is unchanged.
+- **Harness / runner fixes.** `run_native_c2.Ctx.__init__` now pins
+  `CVA6_REPO_DIR`/`CVA6_HOME` to the extracted snapshot so `Flist.cva6` cannot
+  inherit `/opt/testharness/repo`. Backfilled the 11 `RVZimop..RVZabha: bit'(0)`
+  fields missed by `89d3dadd0` across the 30 older `core/include/*_config_pkg.sv`
+  packages. Re-validated `storamic_tools.json` against the installed PGO
+  Verilator `350e57f2` (`storamic-tools37-validate`).
+
+Evidence: remote run `storamic-c53a18704013` (`origin-profile` +
+`native-ckpt-l2l3`, runner identity check): 7/7 cases pass (`l2-flow` 128 L2
+hits, `l2-oracle-expect-b` tohost 16, `l2-cold-recovery` 137 L2 hits / 1
+preload, `l2-virtio-inflight` 354 L2 hits, `l3-flow` 128 L2 / 3 L3 hits,
+`l3-cold-recovery` 138 L2 / 3 L3 hits / 1 preload, `l3-debug-refused` with
+`sberror=2`), all 3 mutants killed (`w1-no-l2-inval` tohost 16, `w2-no-l3-inval`
+tohost 16, `w3-no-l2-prot` tohost 2 with 0 commands issued).
+

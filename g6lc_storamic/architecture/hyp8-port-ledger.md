@@ -171,6 +171,33 @@ textually or structurally identical to before (`native-fixes` checks this).
 Qualification to repeat: `native-fixes`, and the SBA cases of `native-c2` and
 `native-ckpt`.
 
+### 5b. Checkpoint widening W0 + W1: single-core L2/L3 (2026-11-22)
+
+Refusal gaps closed in `g6lc_storamic_origin_supported` (`NrCores <= 1`,
+`!AiCfg.MatrixEn`, `!ServerPrefetchEn`), and L2/L3 below one in-order WT hart
+implemented and qualified (`storamic-c53a18704013`, `origin-profile` +
+`native-ckpt-l2l3`). All pause/quiesce/inval-all inputs tie to `0` when
+Storamic is off; `AxPROT` bypass preservation is an AXI4 fix that carries
+`3'b000` in every non-Storamic build.
+
+| Main-tree file | Content | hyp8 counterpart | Status |
+|---|---|---|---|
+| `core/include/config_pkg.sv` | `g6lc_storamic_origin_supported`: adds `NrCores <= 1`, `!AiCfg.MatrixEn`, `!ServerPrefetchEn` | hyp8 `core/include/config_pkg.sv` | not ported |
+| `core/include/build_config_pkg.sv` | `G6LC_STORAMIC_L2` / `G6LC_STORAMIC_L3` qualification overlays (auto-infers L2/L3 geometry + `WtAxiAllocEn`, `L2PostedWriteEn`, `L2WriteUpdateEn`, `L2CmoEn`, `L2PrefetchEn`, and under L3 `L2TagSramEn`/`L3InclusiveEn`/`L3PrefetchEn`) | hyp8 `build_config_pkg.sv` | not ported |
+| `core/include/*_config_pkg.sv` (30 pkgs) | Backfill the 11 `RVZimop..RVZabha: bit'(0)` fields missed by commit `89d3dadd0` (generic build fix, not Storamic-specific) | check hyp8 target packages | not ported |
+| `corev_apu/l2_cache/g6lc_l2_tag.sv` | `inval_set_i` / `inval_set_index_i`: clears all ways' valid (and `pf_q`) bits in one set per cycle in both `gen_tag_flop` and `gen_tag_sram` (no 32K-flop synchronous clear fanout) | hyp8 `corev_apu/l2_cache/g6lc_l2_tag.sv` | not ported |
+| `corev_apu/l2_cache/g6lc_l2_top.sv` | Bypass `AxPROT` capture/forwarding (`prot_q` on `S_BYPASS_AR`/`S_BYPASS_AW`; cacheable fills keep `3'b000`); `l2_quiesce_i` (suppresses `g6lc_l2_pf`), `l2_block_slv_i` (blocks new slave AR/AW once core drained), `l2_idle_o` (full idle: write-idle + `S_IDLE` + MSHRs/rdtrk/bfid/wr_inval/pf_probe/inval_all empty), `l2_inval_all_i` / `l2_inval_all_done_o` (1-set/cycle walk once idle) | hyp8 `corev_apu/l2_cache/g6lc_l2_top.sv` | not ported |
+| `corev_apu/l3_cache/g6lc_l3_top.sv` | Pass-through of `l3_quiesce_i`, `l3_block_slv_i`, `l3_idle_o`, `l3_inval_all_i`, `l3_inval_all_done_o` | hyp8 `corev_apu/l3_cache/g6lc_l3_top.sv` | not ported |
+| `corev_apu/src/g6lc_cluster.sv` | `gen_sto_llc_resync` (when `STO_PAUSE_EN && HAS_LLC`): quiesces L2/L3 prefetchers during pause, blocks new L2 slave AR/AW once core 0 drains, includes `l2_all_idle && l3_all_idle && !incl_inv_busy` in `storamic_drained_o`, and on release holds core 0 paused while L2 and L3 walk all sets in parallel before core 0's C5 L1 resync runs | hyp8 `corev_apu/src/g6lc_cluster.sv` | not ported |
+| `corev_apu/tb/ariane_testharness.sv` | `llc_invals` / `l2_hits` / `l3_hits` in `STORAMIC_CKPT_STATE`, copy-phase `llc_not_idle` independent oracle | hyp8 `corev_apu/tb/g6lc_testharness.sv` | not ported |
+| `verif/tb/g6lc_uncore_lint_tops.sv`, `verif/tb/l2/*.sv`, `verif/tb/l2/formal/g6lc_l2_top_fpv.sv` | Tie-offs for the new L2/L3/tag ports (Verilator 5.008 rejects default values on module inputs) | hyp8 equivalents if any | not ported |
+
+hyp8-specific design notes for W1:
+- `g6lc_l2_top` / `g6lc_l2_tag` / `g6lc_l3_top` are structurally close to hyp8's copies; check whether hyp8's L2 has any extra pipeline stage on `S_IDLE`/`S_TAG` before porting `l2_idle_o` and `prot_q`.
+- `ServerPrefetchEn` remains refused in `g6lc_storamic_origin_supported` until `g6lc_server_prefetcher.sv` receives a `quiesce_i`/`pf_idle_o` port (deferred to avoid colliding with another session's uncommitted fix there).
+
+Qualification to repeat: `origin-profile`, `native-ckpt-l2l3` (7 cases + mutants `w1-no-l2-inval`, `w2-no-l3-inval`, `w3-no-l2-prot`).
+
 ## 6. Suggested port order
 
 1. Section 1 (config), with every hook still absent: hyp8 must elaborate and

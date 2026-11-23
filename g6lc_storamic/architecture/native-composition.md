@@ -6,10 +6,11 @@ that does not bind **all** of the owners below.
 
 ## 1. Bounded profile
 
-One hart, in-order, WT cache, no AI/APU, `g6lc_storamic_origin_supported`
-true, harness define `G6LC_STORAMIC_CKPT` (implies `G6LC_STORAMIC`,
-`G6LC_STORAMIC_MODEL`, `StoramicCheckpointEn`). Main memory **is** the
-checkpointed model RAM. RAM size is reduced for simulation
+One hart, one core, in-order, WT cache (with or without L2/L3 and L2/L3
+prefetchers; W1), no AI/APU, no `ServerPrefetchEn`,
+`g6lc_storamic_origin_supported` true, harness define `G6LC_STORAMIC_CKPT`
+(implies `G6LC_STORAMIC`, `G6LC_STORAMIC_MODEL`, `StoramicCheckpointEn`). Main
+memory **is** the checkpointed model RAM. RAM size is reduced for simulation
 (`G6LC_STORAMIC_CKPT_WORDS`, default 2**15 words = 256 KiB) because save and
 restore are word-serial and `TimeoutCycles >= words*32+64`.
 

@@ -529,6 +529,10 @@ def main():
         from run_native_ckpt import run as run_native_ckpt
         run_native_ckpt(data, out, stages, manifest, builds, outcomes,
                         verilator, build_model)
+    if set(stages) & {"native-ckpt-l2l3"}:
+        from run_native_ckpt_l2l3 import run as run_native_ckpt_l2l3
+        run_native_ckpt_l2l3(data, out, stages, manifest, builds, outcomes,
+                             verilator, build_model)
     if set(stages) & {"native-fixes"}:
         from run_native_fixes import run as run_native_fixes
         run_native_fixes(data, out, stages, manifest, builds, outcomes,

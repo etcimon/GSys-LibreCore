@@ -309,7 +309,13 @@ class Ctx:
         self.out = Path(out)
         self.verilator = verilator
         self.vroot = verilator_root
-        self.env = env
+        # Pin CVA6_REPO_DIR / CVA6_HOME to this isolated snapshot (not an
+        # inherited remote /opt/testharness/repo) so Flist.cva6 and Makefile
+        # incdirs resolve strictly inside self.src (incl. mutant trees).
+        self.env = dict(env)
+        self.env["CVA6_REPO_DIR"] = str(self.src)
+        self.env["CVA6_HOME"] = str(self.src)
+        self.env.pop("HPDCACHE_DIR", None)
         self.models = {}   # tag -> Path to Variane_testharness
         self.builds = []   # build_model records
         self.results = {}

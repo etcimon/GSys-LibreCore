@@ -38,12 +38,22 @@ module tb_g6lc_storamic_origin_profile;
     check(!g6lc_storamic_origin_supported(cfg), "no-io");
     cfg = scalar(); cfg.NrHarts = 2;
     check(!g6lc_storamic_origin_supported(cfg), "smt-unqualified");
+    cfg = scalar(); cfg.NrCores = 2;
+    check(!g6lc_storamic_origin_supported(cfg), "multicore-unqualified");
     cfg = scalar(); cfg.OoOEn = 1;
     check(!g6lc_storamic_origin_supported(cfg), "ooo-unqualified");
     cfg = scalar(); cfg.RVH = 1;
     check(!g6lc_storamic_origin_supported(cfg), "virtual-unqualified");
     cfg = scalar(); cfg.DCacheType = WB;
     check(!g6lc_storamic_origin_supported(cfg), "wb-unqualified");
+    cfg = scalar(); cfg.AiCfg.MatrixEn = 1;
+    check(!g6lc_storamic_origin_supported(cfg), "ai-island-unqualified");
+    cfg = scalar(); cfg.ServerPrefetchEn = 1;
+    check(!g6lc_storamic_origin_supported(cfg), "server-pf-unqualified");
+    cfg = scalar(); cfg.L2En = 1;
+    check(g6lc_storamic_origin_supported(cfg), "l2-single-core-qualified");
+    cfg = scalar(); cfg.L2En = 1; cfg.L3En = 1;
+    check(g6lc_storamic_origin_supported(cfg), "l2l3-single-core-qualified");
     for (int p = 0; p < 4; p++)
       for (int v = 0; v < 2; v++)
         for (int d = 0; d < 2; d++) begin

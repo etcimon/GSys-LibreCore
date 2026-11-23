@@ -2,12 +2,12 @@
   "kind": "storamic-tools-record",
   "qualification": true,
   "verilator": {
-    "head": "44063db83db8887f9c1d37aefa831f970dd67ec0",
-    "verilator": "/opt/testharness/toolchains/verilator-v5.008-g6lc-44063db8-pgo/runtime/bin/verilator",
-    "runtime_json": "/opt/testharness/runs/storamic-tools36-validate/output/runtime.json",
-    "runtime_header_sha256": "e900ec451629715860e4faffdce5127f5f118ddcaa433125b79f12d3cbb718f8",
-    "compiler_sha256": "d219b63fc4f8fcba45deef3c6a1672c526f66ec11873da941bc2194cd84dd24e",
-    "note": "tools36 profile-use runtime; staged source verified file-by-file == tools/verilator@44063db83 (5184/5184); simulatorPgo + unroll 256/131072 match tools35"
+    "head": "350e57f24026664d6e6a93fb951f3035cbd96b2f",
+    "verilator": "/opt/testharness/toolchains/verilator-v5.008-g6lc-350e57f2-wtd36acfe7-pgo/runtime/bin/verilator",
+    "runtime_json": "/opt/testharness/runs/storamic-tools37-validate/output/runtime.json",
+    "runtime_header_sha256": "1248bcd5fbaec2640ef0ef0422a54d948618bb154c0f16a881b78b09b47786a4",
+    "compiler_sha256": "f83804579425101d74c35bf782a4de6bd9b72bae46c229ff04ba2bc6204c8d27",
+    "note": "tools37 PGO runtime (verilator-v5.008-g6lc-350e57f2-wtd36acfe7-pgo); positive/negative assertion + packed-NBA + BLKANDNBLK + UNOPTFLAT canaries validated in storamic-tools37-validate"
   },
   "yosys": {
     "head": "5f1ebc2941020b71e46e77339363b3e31235f113",
