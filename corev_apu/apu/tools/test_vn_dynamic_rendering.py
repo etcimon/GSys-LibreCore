@@ -433,6 +433,42 @@ class DynamicDrawTests(draw_fixture.DrawReplayTests):
         self.assertEqual(self.read_mrt_texel(7, 3), clear1)
         self.assertEqual(self.f.owner.work_refs, 0)
 
+    def test_dynamic_rendering_attachment_index_commands_noop(self):
+        # vkCmdSetRenderingAttachmentLocations and
+        # vkCmdSetRenderingInputAttachmentIndices are recognised no-ops in the
+        # bounded profile: the fragment model has no input-attachment read path
+        # and the attachment-location permutation is deferred. Issued inside
+        # the render block they must neither fault replay nor perturb the draw.
+        s = self.w.structure
+        self.upload(self.ndc_triangle())
+        self.dyn_pipeline()
+        self.begin_rendering()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.draw()
+        self.f.command('vkCmdSetRenderingAttachmentLocations',
+            commandBuffer=self.f.CB,
+            pLocationInfo=s('VkRenderingAttachmentLocationInfo', pNext=[],
+                colorAttachmentCount=1, pColorAttachmentLocations=[0]))
+        self.f.command('vkCmdSetRenderingInputAttachmentIndices',
+            commandBuffer=self.f.CB,
+            pInputAttachmentIndexInfo=s('VkRenderingInputAttachmentIndexInfo',
+                pNext=[], colorAttachmentCount=1,
+                pColorAttachmentInputIndices=[0],
+                pDepthInputAttachmentIndex=0xFFFFFFFF,
+                pStencilInputAttachmentIndex=0xFFFFFFFF))
+        self.f.command('vkCmdEndRendering', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.fc_texel(x, y))
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
 
 if __name__ == '__main__':
     unittest.main()
