@@ -179,13 +179,13 @@ class DynamicRenderingTests(unittest.TestCase):
 class DynamicDrawTests(draw_fixture.DrawReplayTests):
     """End-to-end vkCmdBeginRendering -> vkCmdDraw -> vkCmdEndRendering."""
 
-    def dyn_pipeline(self, formats=(37,)):
+    def dyn_pipeline(self, formats=(37,), depth_fmt=0, ds=None):
         s = self.w.structure
         pri = s('VkPipelineRenderingCreateInfo', pNext=[], viewMask=0,
                 colorAttachmentCount=len(formats),
                 pColorAttachmentFormats=list(formats),
-                depthAttachmentFormat=0, stencilAttachmentFormat=0,
-                renderPass=0, subpass=0)
+                depthAttachmentFormat=depth_fmt,
+                stencilAttachmentFormat=0, renderPass=0, subpass=0)
         self.f.command('vkCreateGraphicsPipelines', device=self.w.DEVICE,
             pipelineCache=0, createInfoCount=1, pPipelines=[self.PIPE2],
             pCreateInfos=[s('VkGraphicsPipelineCreateInfo', pNext=[pri], flags=0,
@@ -223,7 +223,7 @@ class DynamicDrawTests(draw_fixture.DrawReplayTests):
                     pNext=[], flags=0, rasterizationSamples=1,
                     sampleShadingEnable=0, minSampleShading=0, pSampleMask=[],
                     alphaToCoverageEnable=0, alphaToOneEnable=0),
-                pDepthStencilState=None,
+                pDepthStencilState=ds,
                 pColorBlendState=s('VkPipelineColorBlendStateCreateInfo',
                     pNext=[], flags=0, logicOpEnable=0, logicOp=0,
                     attachmentCount=len(formats),
@@ -239,20 +239,27 @@ class DynamicDrawTests(draw_fixture.DrawReplayTests):
                 layout=self.g.PL, renderPass=0, subpass=0,
                 basePipelineHandle=0, basePipelineIndex=-1)])
 
-    def begin_rendering(self, load=1, clear=(0, 0, 0, 0x3F800000), view=None,
-                        depth=None, stencil=None):
+    def color_attachment(self, view=None, load=1,
+                         clear=(0, 0, 0, 0x3F800000), layout=2):
         s = self.w.structure
-        ca = s('VkRenderingAttachmentInfo', imageView=view or self.g.r.VIEW,
-            imageLayout=2, resolveMode=0, resolveImageView=0,
+        return s('VkRenderingAttachmentInfo', imageView=view or self.g.r.VIEW,
+            imageLayout=layout, resolveMode=0, resolveImageView=0,
             resolveImageLayout=0, loadOp=load, storeOp=0,
             clearValue=s('VkClearValue', color=s('VkClearColorValue',
                 uint32=list(clear))))
+
+    def begin_rendering(self, load=1, clear=(0, 0, 0, 0x3F800000), view=None,
+                        depth=None, stencil=None, colors=None):
+        s = self.w.structure
+        if colors is None:
+            colors = [self.color_attachment(view=view, load=load,
+                                            clear=clear)]
         self.f.command('vkCmdBeginRendering', commandBuffer=self.f.CB,
             pRenderingInfo=s('VkRenderingInfo', pNext=[], flags=0,
                 renderArea=s('VkRect2D', offset=s('VkOffset2D', x=0, y=0),
                     extent=s('VkExtent2D', width=8, height=4)),
-                layerCount=1, viewMask=0, colorAttachmentCount=1,
-                pColorAttachments=[ca], pDepthAttachment=depth,
+                layerCount=1, viewMask=0, colorAttachmentCount=len(colors),
+                pColorAttachments=colors, pDepthAttachment=depth,
                 pStencilAttachment=stencil))
 
     def dyn_depth_view(self, fmt=126):
@@ -287,8 +294,21 @@ class DynamicDrawTests(draw_fixture.DrawReplayTests):
             clearValue=s('VkClearValue', color=s('VkClearColorValue',
                 uint32=[dbits, stencil, 0, 0])))
 
-    def dyn_prepared(self, **kw):
-        self.dyn_pipeline()
+    def dyn_ds_state(self, compare=1, write=1, depth_test=1):
+        # VkPipelineDepthStencilStateCreateInfo for a plain depth test;
+        # stencilTestEnable=0 so front/back carry inert zeroed ops.
+        s = self.w.structure
+        z = dict(failOp=0, passOp=0, depthFailOp=0, compareOp=0,
+                 compareMask=0, writeMask=0, reference=0)
+        return s('VkPipelineDepthStencilStateCreateInfo', pNext=[], flags=0,
+            depthTestEnable=depth_test, depthWriteEnable=write,
+            depthCompareOp=compare, depthBoundsTestEnable=0,
+            stencilTestEnable=0,
+            front=s('VkStencilOpState', **z), back=s('VkStencilOpState', **z),
+            minDepthBounds=0, maxDepthBounds=0x3F800000)
+
+    def dyn_prepared(self, formats=(37,), depth_fmt=0, ds=None, **kw):
+        self.dyn_pipeline(formats=formats, depth_fmt=depth_fmt, ds=ds)
         self.begin_rendering(**kw)
         self.viewport()
         self.scissor()
@@ -359,6 +379,59 @@ class DynamicDrawTests(draw_fixture.DrawReplayTests):
         word = self.read_ds(0, 0)
         self.assertEqual(word >> 24 & 0xFF, 0xAB)
         self.assertEqual(word & 0xFFFFFF, 0xFFFFFF)  # depth 1.0 -> unorm24 max
+
+    def test_dynamic_rendering_depth_draw(self):
+        # D32_SFLOAT depth attachment + a VkPipelineRenderingCreateInfo
+        # pipeline declaring depthAttachmentFormat=126 and a LESS depth
+        # test: the loadOp=CLEAR fills depth to 1.0, the draw's z_win=0.5
+        # fragments pass and commit 0.5, the uncovered corner keeps 1.0.
+        self.dyn_depth_view(fmt=126)
+        self.upload(self.ndc_triangle())
+        self.dyn_prepared(depth_fmt=126, ds=self.dyn_ds_state(compare=1,
+            write=1, depth_test=1),
+            depth=self.depth_attachment(depth=1.0))
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertAlmostEqual(self.read_depth(x, y), 0.5, places=6)
+        self.assertAlmostEqual(self.read_depth(7, 3), 1.0, places=6)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_dynamic_rendering_mrt_draw(self):
+        # Two colour attachments via vkCmdBeginRendering: att0 = base VIEW
+        # (offset 4096), att1 = MRT_VIEW (offset MRT_OFF=4352), both fmt37.
+        # fs_program2 emits loc0=vcol, loc1=const; the synthesized RenderPass
+        # carries both attachments and the draw writes both targets.
+        self.g.r.image(handle=self.MRT_IMAGE, offset=self.MRT_OFF)
+        self.g.r.view(handle=self.MRT_VIEW, image=self.MRT_IMAGE)
+        self.f.command('vkDestroyShaderModule', device=self.w.DEVICE,
+                       shaderModule=self.FS2)
+        self.module(self.FS2, draw_fixture.fs_program2())
+        self.upload(self.ndc_triangle())
+        self.dyn_prepared(formats=(37, 37), colors=[
+            self.color_attachment(clear=(0, 0, 0, 0x3F800000)),
+            self.color_attachment(view=self.MRT_VIEW,
+                clear=(0, 0x3F800000, 0, 0x3F800000))])
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        c0 = self.mrt_texel(0.5, 0.25, 0.75, 1.0)    # fs_program2 loc0
+        c1 = self.mrt_texel(1.0, 0.0, 1.0, 1.0)      # fs_program2 loc1
+        clear0 = self.mrt_texel(0.0, 0.0, 0.0, 1.0)
+        clear1 = self.mrt_texel(0.0, 1.0, 0.0, 1.0)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), c0,
+                             'att0 (%d,%d)' % (x, y))
+            self.assertEqual(self.read_mrt_texel(x, y), c1,
+                             'att1 (%d,%d)' % (x, y))
+        self.assertEqual(self.read_texel(7, 3), clear0)
+        self.assertEqual(self.read_mrt_texel(7, 3), clear1)
+        self.assertEqual(self.f.owner.work_refs, 0)
 
 
 if __name__ == '__main__':
