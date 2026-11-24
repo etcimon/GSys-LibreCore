@@ -27314,6 +27314,25 @@ Receipt: `build-platform/workspace/build/storamic-review-30/FINAL-SV-30.md`.
   `VL_SIMD_PREFER_512` (16-word SIMD tier, gated by `__AVX512F__`) and the fork
   passes add the rest. All runs `maxulp=0` PASS; also verified
   `drawindxcnt_1` (52.5s) and `dindcntz_1` count=0 (48.5s).
+- [x] Wrote `verif/regress/remote/apu_vgsys_perf.lua` — a g6lc_tuning_driver.lua
+  policy for the core//corev_apu Verilator benches (vgsys/vgtop/shwave/vnfront),
+  driven by the tracedb hot-path methodology (`hyp8/tracedb` ingest -> sqlite
+  pc_sample/census -> query; hyp8-only today, so the *simulation-level* hot
+  paths act on generated-C++ structure instead). Adapts the hyp8 rule set to
+  the RTL differences: CVA6 in-order + Venus APU (no OoO ROB/rename -> drops
+  circular-age-compare) vs hyp8 OoO. Emits clock-skip sink opportunistic + all
+  five DFG peepholes (allowlisted, capability-gated downstream) + six sentinel
+  probes; overlay rules gated by `has_source()` (.sv basename) select
+  scatter-eq-mask/strided-bit-columns/packed-rows/packed-predicates/
+  tiled-columns/wide-mux-guard/assert-guard-hoist against the real hot units —
+  objmem/objtab CAM (`ec_tag_q`/`dc_id_q`/`hit_slot_q`), rast 2048-bit push
+  buses, vnfront fpnew pipes (`inp_pipe_ready`/`sel_nodes`/`__PVT__`/
+  `g_lane__BRA__`), cmdexec/dmaq/doneq, vgpages, tc_sram. `->assertOn()`/
+  `VL_ONEHOT` are in KNOWN_MARKERS so has_marker() gates assert-guard-hoist.
+  `--no-assert` deliberately not selected (benches need --assert); flags live
+  in apu_vlt_policy.py, this file is the overlay surface only. Inert until the
+  APU build adopts the g6lc_hyp8_tuning.py prepare() overlay flow; Unsupported
+  Layout is a graceful skip, not a wrong result.
 - [ ] Follow-ups: (a) sentinel observer needs a fork build newer than the remote
   `-clkskip` toolchain (`--dumpi-sentinel` absent there); the repo
   `tools/verilator@53c5c0be6` has it. (b) To activate the fork flags in the
@@ -27321,4 +27340,7 @@ Receipt: `build-platform/workspace/build/storamic-review-30/FINAL-SV-30.md`.
   without the passes), rebuild `tools/verilator` into that home — the
   capability gate then auto-enables them. (c) The `vgsys-full2` 297-job rerun
   is still on the pre-opt binary; a rerun on an opt build would roughly halve
-  wall time.
+  wall time. (d) Validate `apu_vgsys_perf.lua` markers against a real vgsys
+  Mdir (`g6lc_hyp8_tuning.py prepare` manifest.json hit counts); adjust any
+  0-hit markers — a single 0-hit op sinks the whole overlay to
+  UnsupportedLayout (graceful, but loses the C++ rewrites).
