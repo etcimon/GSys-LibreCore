@@ -68,7 +68,8 @@ def capture(engine, current, name, words, record):
         fields.setdefault(note, []).append(value)
         if pending is None and note != 'pSpecializationInfo':
             state_fields.setdefault(note, []).append(value)
-        if note in ('pDynamicStates', 'blendConstants', 'pSampleMask') and op == 'BLOB':
+        if note in ('pDynamicStates', 'blendConstants', 'pSampleMask',
+                    'pColorAttachmentFormats') and op == 'BLOB':
             blobs[note] = tuple(words[position + 2:position + 2 + value])
         if note == 'pSpecializationInfo' and op == 'PTR':
             if pending is not None or value not in (0, 1):
@@ -78,11 +79,20 @@ def capture(engine, current, name, words, record):
         elif note == 'pData' and op == 'BLOB' and pending is not None:
             specs[pending] = specs[pending][0], position + 2 + (value + 3) // 4
             pending = None
+    # Dynamic rendering: renderPass==VK_NULL_HANDLE and the only pNext node is
+    # VkPipelineRenderingCreateInfo (sType 1000044002).  The chain members
+    # surface under bare names in `fields` (verified: no renderPass/subpass
+    # collision with the parent struct), and decoded['chain'] carries the
+    # node sTypes.  Anything else keeps the render-pass-object requirement.
+    _RENDERING_STYPE = 1000044002
+    dynamic = (fields.get('renderPass') == [0] and
+               {st for st, _ in decoded.get('chain', ())} == {_RENDERING_STYPE})
     if (fields.get('createInfoCount') != [1] or fields.get('stageCount') != [2] or
             sorted(fields.get('stage', ())) != [1, 0x10] or
             any(len(fields.get(key, ())) != 2 for key in ('module', 'pName')) or
             len(specs) != 2 or pending is not None or
-            any(fields.get('flags', ())) or any(fields.get('pNext', ())) or
+            any(fields.get('flags', ())) or
+            (any(fields.get('pNext', ())) and not dynamic) or
             fields.get('pipelineCache') != [0] or
             fields.get('basePipelineHandle') != [0] or
             fields.get('basePipelineIndex') not in ([0], [0xFFFFFFFF]) or
@@ -104,8 +114,32 @@ def capture(engine, current, name, words, record):
     owner = engine.contexts[front.ctx]
     device, _ = resolve(one('device'), 'VkDevice')
     layout_handle, le = resolve(one('layout'), 'VkPipelineLayout')
-    _, rpe = resolve(one('renderPass'), 'VkRenderPass')
-    layout, render_pass = le.get('native_pipeline_layout'), rpe.get('native_rendering')
+    layout = le.get('native_pipeline_layout')
+    if dynamic:
+        # Synthesize a RenderPass-shaped identity from the
+        # VkPipelineRenderingCreateInfo formats.  compatible() compares only
+        # attachments[i][:2] = (format, samples); loadOp/storeOp/clearValue are
+        # BeginRendering-time state, not pipeline identity, so the op/layout
+        # slots carry placeholders (2 = COLOR_ATTACHMENT_OPTIMAL,
+        # 3 = DEPTH_STENCIL_ATTACHMENT_OPTIMAL for the subpass refs).
+        ncolor = one('colorAttachmentCount')
+        fmts = blobs.get('pColorAttachmentFormats', ())
+        if (not 0 < ncolor <= 4 or len(fmts) != ncolor or
+                one('viewMask') != 0 or one('subpass') != 0):
+            raise ValueError('dynamic rendering attachment/view profile exceeds bounds')
+        attachments = [(fmt, 1, 0, 0, 0, 0, 0, 0) for fmt in fmts]
+        color_refs = tuple((i, 2) for i in range(ncolor))
+        depths = (None,)
+        dfmt, sfmt = one('depthAttachmentFormat'), one('stencilAttachmentFormat')
+        if dfmt or sfmt:
+            didx = len(attachments)
+            attachments.append(((dfmt or sfmt), 1, 0, 0, 0, 0, 0, 0))
+            depths = ((didx, 3),)
+        render_pass = RenderPass(owner, device, tuple(attachments), color_refs,
+                                (color_refs,), (), depths)
+    else:
+        _, rpe = resolve(one('renderPass'), 'VkRenderPass')
+        render_pass = rpe.get('native_rendering')
     if (layout is None or layout.context is not owner or layout.device != device or
             not isinstance(render_pass, RenderPass) or render_pass.context is not owner or
             render_pass.device != device):
