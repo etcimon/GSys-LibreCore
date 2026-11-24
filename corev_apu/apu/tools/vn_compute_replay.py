@@ -12,7 +12,8 @@ class ComputeReplay:
     NAMES = frozenset(('vkCmdBindPipeline', 'vkCmdBindDescriptorSets',
                        'vkCmdBindDescriptorSets2',
                        'vkCmdPushConstants', 'vkCmdPushConstants2',
-                       'vkCmdDispatch', 'vkCmdDispatchIndirect'))
+                       'vkCmdDispatch', 'vkCmdDispatchIndirect',
+                       'vkCmdDispatchBase'))
 
     def __init__(self, engine, context, device, remember, payload, append,
                  charge, guards, dispatch_budget, extent):
@@ -118,10 +119,21 @@ class ComputeReplay:
                     raise ValueError('push update stage/range is incompatible with layout')
                 if stages & 0x20:
                     self.push[index] = (word, template.push)
+        elif name == 'vkCmdDispatchBase':
+            self.dispatch_base(record)
         else:
             self.dispatch(record, indirect=name == 'vkCmdDispatchIndirect')
 
-    def dispatch(self, record, *, indirect=False):
+    def dispatch_base(self, record):
+        # vkCmdDispatchBase carries baseGroup{X,Y,Z} in imm[0:3] ahead of
+        # groupCount{X,Y,Z} in imm[3:6].  The bounded compute model derives
+        # workgroup IDs as group % groups[i] with no base offset, so only
+        # the base==(0,0,0) form — identical to vkCmdDispatch — is admitted.
+        if tuple(record['imm'][:3]) != (0, 0, 0):
+            raise ValueError('compute dispatch base group exceeds profile')
+        self.dispatch(record, imm_off=3)
+
+    def dispatch(self, record, *, indirect=False, imm_off=0):
         if self.pipeline is None or not self.dispatch_budget[0]:
             raise ValueError('compute dispatch has no pipeline or exceeds job budget')
         snapshot, _ = pipeline_operand(self.engine, self.front.ctx, self.pipeline)
@@ -213,7 +225,8 @@ class ComputeReplay:
 
             self.guards.append(validate)
             arguments = IndirectArguments(owner, binding + offset)
-        groups = (1, 1, 1) if indirect else tuple(record['imm'][:3])
+        groups = ((1, 1, 1) if indirect else
+                  tuple(record['imm'][imm_off:imm_off + 3]))
         self.append(Compute(snapshot.code, tuple(bindings), groups, push, indirect=arguments,
                             allow_images=has_images))
         self.dispatch_budget[0] -= 1

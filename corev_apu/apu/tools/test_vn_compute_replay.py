@@ -491,6 +491,34 @@ class ComputeReplayTests(unittest.TestCase):
         self.f.drain()
         self.assertEqual(self.word(), 5)
 
+    def dispatch_base(self, bx=0, by=0, bz=0, cx=1, cy=1, cz=1):
+        self.f.command('vkCmdDispatchBase', commandBuffer=self.f.CB,
+                       baseGroupX=bx, baseGroupY=by, baseGroupZ=bz,
+                       groupCountX=cx, groupCountY=cy, groupCountZ=cz)
+
+    def test_dispatch_base_zero_is_dispatch_equivalent(self):
+        # base==(0,0,0) makes vkCmdDispatchBase identical to vkCmdDispatch:
+        # the bounded compute model has no base workgroup offset, so the
+        # zero form replays the groupCount slice at imm[3:6].
+        self.f.begin()
+        self.bind()
+        self.dispatch_base()
+        self.f.end()
+        self.e.replay.enqueue(1, [self.f.CB], compute=True)
+        self.f.drain()
+        self.assertEqual(self.word(), 5)
+
+    def test_dispatch_base_nonzero_group_rejects(self):
+        # A nonzero baseGroup has no representation in the bounded model
+        # (workgroup IDs are group % groups[i]); it must fail closed rather
+        # than silently dispatch at the wrong workgroup origin.
+        self.f.begin()
+        self.bind()
+        self.dispatch_base(bx=1)
+        self.f.end()
+        with self.assertRaises(ValueError):
+            self.e.replay.enqueue(1, [self.f.CB], compute=True)
+
 
 if __name__ == '__main__':
     unittest.main()
