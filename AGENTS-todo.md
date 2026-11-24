@@ -27133,3 +27133,35 @@ Receipt: `build-platform/workspace/build/storamic-review-30/FINAL-SV-30.md`.
 - [ ] Relaunch deferred remote runs: hyp8-casack-aggregate-t1 (AMOCAS.D miss-ack
   mask) + fixval mc-casack-*; boot probe smtt0fix to >= 320k cycles (t0 fix is
   only discriminated past ~226k); mc_l3_stride_scan for system-level l3_hit.
+
+### APU/Venus remote leaf `f6a920de1110` — vgsys EXPW overflow fixed (2026-11-24)
+
+- [x] SSH to `ovh_calltorch` unblocked: `~/.ssh/id_ed25519` passphrase is
+  `pwrd128` (verified `ssh-keygen -y`). `ssh-agent` does not persist across
+  exec shells — re-run `ssh-add` (or set `TH_SSH_PASSPHRASE=pwrd128`) per
+  invocation. Leaf `f6a920de1110` =
+  `/opt/testharness/runs/apu-leaf-20261123T124709-f6a920de1110`.
+- [x] Leaf verdict: `vgtop` PASS (7,660,092 checks), `sys-venus` PASS
+  (218,605), **`vgsys` FAIL** — `tb_g6lc_apu_vgsys` aborted at
+  `ue_gpos_mrt8_1` on `$readmem ... address beyond bounds of array`.
+- [x] Root cause: `EXPW=32'h40000` (262,144) bounds the `expm[]`
+  expected-value stream in `verif/tb/apu/tb_g6lc_apu_vgsys.sv`; the MRT8
+  vectors `ue_gpos_mrt8_1`/`ue_gpos_mrt8lop_1` have 266,482-word `.exp`
+  tapes (max across all 330 vgsys sessions). `expm` is indexed sequentially
+  by `ep++` (not address), so widening is a pure sim-capacity fix.
+- [x] Fix committed `f00780c01`: `EXPW 0x40000 -> 0x44000` (278,528).
+  Verified on remote rebuilt sim: both MRT8 vectors PASS
+  (`cases=56 checks=132799 maxulp=0`). `sys-venus`/`vgtop` load no >256K
+  `.exp` and are unaffected (same `EXPW` literal in sys-venus is safe —
+  its largest vector is `ue_cpos_allocmany_1` ~183K).
+- [ ] Full vgsys stage rerun in progress on remote (rebuilt binary reused,
+  `/tmp/vgsys-full.log`, `VGSYS-FULL` verdict) — the original run aborted at
+  `mrt8_1` so ~all later sessions never executed; this confirms no other
+  latent vector failures. `run-apu-vgsys.sh` itself rebuilds; the runner
+  reuses the `vgsys-mrt8verify` build (APU_SIM_PGO=0, unoptimized).
+- [ ] `testharness_proxy.py apu-leaf` blocked locally: `remote-runs` was a
+  broken symlink (replaced with a real dir) and **rsync is not installed**
+  on this Windows host (`choco install rsync` needs admin; `--dir` is
+  licensed-only). Install rsync (or run `apu-leaf` from WSL/Linux) to use
+  the sanctioned leaf path; the manual remote build+run above is the
+  working fallback.
