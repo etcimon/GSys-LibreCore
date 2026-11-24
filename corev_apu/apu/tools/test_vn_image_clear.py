@@ -141,6 +141,73 @@ class ClearTests(unittest.TestCase):
                     Transfer('pattern', self.f.owner, 0, size, data=color)])
         self.assertFalse(self.e.transfers.active)
 
+    # ---- vkCmdClearDepthStencilImage (stage-A: D32/D16, DEPTH aspect) ----
+
+    def create_ds(self, fmt=126):
+        # VkFormat 126=D32_SFLOAT / 124=D16_UNORM; depth images need the
+        # depth-stencil usage bit and a depth-capable layout.
+        self.images.create(fmt=fmt, initial_layout=7, usage=0x23)
+
+    def clear_ds(self, depth, stencil=0, ranges=None, declared=None):
+        ranges = ranges or [self.w.structure('VkImageSubresourceRange',
+            aspectMask=2, baseMipLevel=0, levelCount=0xFFFFFFFF,
+            baseArrayLayer=0, layerCount=0xFFFFFFFF)]
+        dbits = struct.unpack('<I', struct.pack('<f', depth))[0]
+        self.f.command('vkCmdClearDepthStencilImage', commandBuffer=self.f.CB,
+            image=self.images.IMAGE, imageLayout=7,
+            pDepthStencil=self.w.structure('VkClearDepthStencilValue',
+                depth=dbits, stencil=stencil),
+            rangeCount=len(ranges) if declared is None else declared,
+            pRanges=ranges)
+
+    def record_ds(self, depth, **kwargs):
+        self.f.begin()
+        self.clear_ds(depth, **kwargs)
+        self.f.end()
+
+    def test_depth_clear_d32_writes_fp32_texels(self):
+        self.create_ds(fmt=126)
+        self.record_ds(0.5)
+        job = self.f.enqueue()
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        base = self.f.owner.base
+        # 8-wide D32 row: each texel is the fp32 0.5 bit pattern.
+        self.assertEqual(self.f.state.aperture.read(base + 4096, 32),
+                         struct.pack('<8f', *([0.5] * 8)))
+
+    def test_depth_clear_d16_writes_unorm16_texels(self):
+        self.create_ds(fmt=124)
+        self.record_ds(0.5)
+        job = self.f.enqueue()
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        base = self.f.owner.base
+        # D16_UNORM 0.5 -> unorm16 ~0x8000 per 2-byte texel.
+        self.assertEqual(self.f.state.aperture.read(base + 4096, 16),
+                         struct.pack('<8H', *([0x8000] * 8)))
+
+    def test_depth_clear_stencil_value_ignored_for_depth_only(self):
+        # D32 carries no stencil aspect: pDepthStencil.stencil is ignored.
+        self.create_ds(fmt=126)
+        self.record_ds(0.25, stencil=0xFF)
+        job = self.f.enqueue()
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        base = self.f.owner.base
+        self.assertEqual(self.f.state.aperture.read(base + 4096, 8),
+                         struct.pack('<2f', 0.25, 0.25))
+
+    def test_depth_clear_rejects_non_depth_aspect(self):
+        # aspectMask must be DEPTH(2); a colour aspect on a depth image is
+        # refused at replay.
+        self.create_ds(fmt=126)
+        r = self.w.structure('VkImageSubresourceRange', aspectMask=1,
+            baseMipLevel=0, levelCount=1, baseArrayLayer=0, layerCount=1)
+        self.record_ds(0.5, ranges=[r])
+        with self.assertRaises(ValueError):
+            self.f.enqueue()
+
 
 if __name__ == '__main__':
     unittest.main()

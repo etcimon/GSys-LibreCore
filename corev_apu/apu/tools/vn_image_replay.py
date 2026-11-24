@@ -12,7 +12,7 @@ class ImageReplay:
     NAMES = frozenset(('vkCmdCopyBufferToImage', 'vkCmdCopyBufferToImage2',
                        'vkCmdCopyImageToBuffer', 'vkCmdCopyImageToBuffer2',
                        'vkCmdCopyImage', 'vkCmdCopyImage2',
-                       'vkCmdClearColorImage'))
+                       'vkCmdClearColorImage', 'vkCmdClearDepthStencilImage'))
     _BASE = {'vkCmdCopyBufferToImage2': 'vkCmdCopyBufferToImage',
              'vkCmdCopyImageToBuffer2': 'vkCmdCopyImageToBuffer',
              'vkCmdCopyImage2': 'vkCmdCopyImage'}
@@ -29,7 +29,7 @@ class ImageReplay:
     def _remaining(self):
         return self.engine.transfers.max_operations - len(self.operations)
 
-    def _image(self, record, index):
+    def _image(self, record, index, depth=False):
         golden = self.engine.golden
         _, entry = self.remember(record['handle'][index], golden.KIND['VkImage'])
         owner, binding, size = self.extent(record, index, 'VkImage')
@@ -37,10 +37,15 @@ class ImageReplay:
         w, h, fmt = aux & 0xFFFF, aux >> 16 & 0xFFFF, aux >> 32 & 255
         mips, layers, itype = aux >> 40 & 31, aux >> 45 & 511, state >> 19 & 3
         names, _, bpp, _ = self.engine.model.img_fmt_tables()
-        if (fmt >= len(names) or names[fmt].startswith(('D', 'S8', 'X8_D')) or
+        # depth=True admits pure-depth 'D' formats (stage-A bound to device
+        # fmt 12/13 in _clear_ds); stencil-first S8/X8_D stay refused either
+        # way, and 'D' formats stay refused on the colour-copy path.
+        if (fmt >= len(names) or names[fmt].startswith(('S8', 'X8_D')) or
+                (names[fmt].startswith('D') and not depth) or
                 not bpp[fmt] or itype not in (0, 1) or
                 not 0 < w <= 4096 or not 0 < h <= 4096 or
-                itype == 0 and h != 1 or not 0 < mips <= 13 or not 0 < layers <= 256):
+                itype == 0 and h != 1 or not 0 < mips <= 13 or
+                not 0 < layers <= 256):
             raise ValueError('image type/format/dimensions exceed raw color-copy profile')
         layer_bytes = golden.img_layer_bytes(self.engine.model, w, h, fmt, mips)
         if layer_bytes != (state & 0x7FFFF) << 6 or size != layer_bytes * layers:
@@ -49,11 +54,11 @@ class ImageReplay:
                     bpp=bpp[fmt], mips=mips, layers=layers, layer_bytes=layer_bytes,
                     layout=entry.get('layout', 0))
 
-    def _rows(self, image, subresource, offset, extent):
+    def _rows(self, image, subresource, offset, extent, aspect_ok=1):
         aspect, mip, base, layers = subresource
         x, y, z = offset
         width, height, depth = extent
-        if (aspect != 1 or not 0 <= mip < image['mips'] or
+        if (aspect != aspect_ok or not 0 <= mip < image['mips'] or
                 not 0 < layers <= image['layers'] or base + layers > image['layers'] or
                 z or depth != 1 or not width or not height or
                 x + width > max(1, image['w'] >> mip) or
@@ -80,6 +85,9 @@ class ImageReplay:
         name = self._BASE.get(name, name)
         if name == 'vkCmdClearColorImage':
             self._clear(record)
+            return
+        if name == 'vkCmdClearDepthStencilImage':
+            self._clear_ds(record)
             return
         image_copy = name == 'vkCmdCopyImage'
         count = record['imm'][2 if image_copy else 1]
@@ -159,6 +167,49 @@ class ImageReplay:
                 width, height = max(1, image['w'] >> level), max(1, image['h'] >> level)
                 rows = self._rows(image, (aspect, level, layer, layers),
                                   (0, 0, 0), (width, height, 1))
+                for row in rows:
+                    self.operations.append(Transfer('pattern', image['owner'], row,
+                                                    width * image['bpp'], data=texel))
+
+    def _clear_ds(self, record):
+        # vkCmdClearDepthStencilImage: imm[0]=imageLayout, imm[1]=depth fp32
+        # bits, imm[2]=stencil, imm[3]=rangeCount; the payload is
+        # rangeCount*5 words of VkImageSubresourceRange{aspectMask,
+        # baseMipLevel, levelCount, baseArrayLayer, layerCount} — no leading
+        # clear-value words (they ride imm).  Stage-A admits pure-depth
+        # formats (device fmt 12=D32_SFLOAT / 13=D16_UNORM) and
+        # aspect==DEPTH ranges only; stencil and D24S8 stay out of profile.
+        count = record['imm'][3]
+        if (record['imm'][0] not in (1, 7) or
+                not 0 < count <= self._remaining()):
+            raise ValueError('depth/stencil clear layout/range count exceeds native profile')
+        data = self.payload(record, count * 5)
+        image, seen = self._image(record, 0, depth=True), set()
+        if image['layout'] != record['imm'][0]:
+            raise ValueError('clear image layout does not match current image layout')
+        # exact device fmt (not fmt&15 — that aliases colour fmts 28/29 onto
+        # the depth classes): stage-A is D32_SFLOAT(12)/D16_UNORM(13) only.
+        if image['fmt'] not in (12, 13):
+            raise ValueError('depth/stencil clear format exceeds stage-A profile')
+        texel = self.engine.golden.img_dclear_texel(
+            self.engine.model, image['fmt'], record['imm'][1])
+        for i in range(count):
+            aspect, mip, levels, layer, layers = data[5 * i:5 * i + 5]
+            levels = image['mips'] - mip if levels == 0xFFFFFFFF else levels
+            layers = image['layers'] - layer if layers == 0xFFFFFFFF else layers
+            if (aspect != 2 or not 0 < levels <= image['mips'] or
+                    mip + levels > image['mips'] or
+                    not 0 < layers <= image['layers'] or
+                    layer + layers > image['layers']):
+                raise ValueError('depth clear subresource range exceeds image')
+            for level in range(mip, mip + levels):
+                for index in range(layer, layer + layers):
+                    if (level, index) in seen:
+                        raise ValueError('overlapping depth clear subresource ranges')
+                    seen.add((level, index))
+                width, height = max(1, image['w'] >> level), max(1, image['h'] >> level)
+                rows = self._rows(image, (aspect, level, layer, layers),
+                                  (0, 0, 0), (width, height, 1), aspect_ok=2)
                 for row in rows:
                     self.operations.append(Transfer('pattern', image['owner'], row,
                                                     width * image['bpp'], data=texel))
