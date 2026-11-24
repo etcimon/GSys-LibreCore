@@ -437,6 +437,10 @@ module g6lc_apu_vgtop
                        work_o.ctype ==
                        32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT) ||
                        work_o.ctype ==
+                       32'(APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_COUNT_EXT) ||
+                       work_o.ctype ==
+                       32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_COUNT_EXT) ||
+                       work_o.ctype ==
                        32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT);
     logic        xf_done, xf_work_rdy;
     apu_sh_done_t xf_done_pl;

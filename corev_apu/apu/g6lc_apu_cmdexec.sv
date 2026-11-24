@@ -4132,7 +4132,9 @@ module g6lc_apu_cmdexec
             if ((rec_q.ctype ==
                      32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_EXT) ||
                  rec_q.ctype ==
-                     32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT)) &&
+                     32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT) ||
+                 rec_q.ctype ==
+                     32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_COUNT_EXT)) &&
                 ib_hnd_q != 32'h0) begin
               xf_for_q <= 2'd2;
               state_q  <= StXfBufReq;

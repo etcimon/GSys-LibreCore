@@ -13379,6 +13379,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 PERSP_CLIP if is_persp else
                 DERIV_POS if is_deriv or is_deriv2 or is_demdrv else TRI,
                 VP, SC, CW, CH, front_ccw=1, cull=2)
+        # §multi-draw-indirect Count: an effective draw count of zero
+        # (stored count clamped by maxDrawCount) retires the record with
+        # no draw work in cmdexec — the coverage oracle must likewise
+        # emit an empty footprint so the readback stays at the clear
+        # colour.  Count>0 unions the stride-stepped commands, which are
+        # identical triangles here so the single-triangle cov already
+        # matches.
+        if (is_dcnt or is_ixcnt) and min(_ccount, _cmax) == 0:
+            cov = set()
         if is_blend:
             # clear (0.2,0.2,0.2,1); out = src*0.75 + dst*0.25 ->
             # r=0.8->204, g=b=0.05->13, a=0.8125->207 (all off the
