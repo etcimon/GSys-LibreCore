@@ -19,11 +19,22 @@
 --   here  = CVA6 in-order core (scoreboard/decoder/execute/LSU/commit) +
 --           Venus APU graphics (objtab/objmem CAM, rast wide push buses,
 --           vnfront fpnew shader FPU, tc_sram register files, vgpages).
---   => circular-age-compare is *not* emitted (no OoO age logic exists);
---      scatter-eq-mask maps to CAM tag compares (objmem ec_tag_q/dc_id_q,
---      objtab hit_slot), strided/tiled columns map to bit-sliced tables and
---      page walks, packed rows/predicates map to the wide shader/lane and
---      push-bus datapaths, wide-mux-guard maps to lane/blend conditionals.
+--   => circular-age-compare is *not* emitted (no OoO age logic exists).  The
+--      other SIMD passes were *candidate*-mapped to CAM tag compares (objmem
+--      ec_tag_q/dc_id_q, objtab hit_slot), rast push buses, fpnew lanes and
+--      page walks -- but see the measured note below: none of them actually
+--      match APU generated C++, so none are emitted.
+--
+-- Measured on the real tb_g6lc_apu_vgsys Mdir (131 DepSet TUs): every packed/
+-- SIMD lowering pass reports 0 hits even with the marker gate removed -- the
+-- g6lc_pack_* row/column/predicate/scatter/wmux transforms parse hyp8's OoO
+-- codegen idioms (u_recover, ROB age, LSQ commit columns), which CVA6+Venus
+-- does not emit.  Requesting them trips prepare()'s all-or-nothing
+-- UnsupportedLayout and skips the whole overlay, so they are NOT selected
+-- here.  The one checked transform that does match APU codegen is
+-- assert-guard-hoist (948 hits): it lifts the assertOn() check out of the
+-- VL_ONEHOT case-match vector -- bit-exact, and it skips the expensive match
+-- eval entirely under +verilator+noassert / cold PGO.
 --
 -- Verilator performance references (tools/verilator/docs/guide/simulating.rst,
 -- "Benchmarking & Optimization"): -O3 --x-assign fast --x-initial fast
@@ -82,92 +93,32 @@ select_sentinel_probe("masked_reductions", "masked_reduction",           "*")
 -- Overlay phase: emit checked select_rule() lowering requests.  Each rule is
 -- (class_glob, marker, pass); g6lc_hyp8_tuning.prepare() only applies a pass
 -- to a TU when `marker` is a substring of that TU's generated .cpp, and the
--- pass itself only rewrites the exact patterns it recognises — so a broad
--- class glob plus a distinctive signal marker is safe.  has_source() gates on
--- the .sv basename actually being in this build's verFiles, so a bench that
--- omits a unit simply skips its rules.
+-- pass itself only rewrites the exact patterns it recognises.  Because
+-- prepare() is all-or-nothing (one 0-hit op -> UnsupportedLayout -> whole
+-- overlay skipped), only transforms *measured* to hit on APU codegen are
+-- requested; speculative signal-name markers are not worth the risk.
 -- ---------------------------------------------------------------------------
 if model.phase == "overlay" then
-    -- One glob covering every generated translation unit; the marker (not the
-    -- glob) selects the hot logic, mirroring how hyp8 uses prefix_g6lc_core*.
+    -- Broad glob over every generated TU; the marker (not the glob) selects
+    -- the transformable code, mirroring how hyp8 uses prefix_g6lc_core*.
     local cls = model.prefix .. "_*"
 
-    -- Object table / directory cache: CAM tag compares.
-    --   objmem: ec_tag_q[i] == eg_idx_q  and  dc_id_q[set][way] == ot_req_q.id
-    --   objtab: hit_slot_q / walk_q / par_slot_q / alloc_bucket_q slot fields.
-    -- scatter-eq-mask collapses the 64-way tag-equality OR-mask; the slot
-    -- fields are bit-sliced -> strided-bit-columns; the live/walk bit vectors
-    -- are packed rows.  Highest-confidence data-path rules in the APU.
-    if model.has_source("g6lc_apu_objmem.sv") or model.has_source("g6lc_apu_objtab.sv") then
-        select_rule(cls, "ec_tag_q",   "scatter-eq-mask")
-        select_rule(cls, "dc_id_q",    "strided-bit-columns")
-        select_rule(cls, "hit_slot_q", "strided-bit-columns")
-        select_rule(cls, "walk_q",     "packed-rows")
-        select_rule(cls, "keep_v_q",   "packed-predicates")
-    end
-
-    -- Rasterizer: 2048-bit primitive/shader push buses and scratch state.
-    -- push_i / sh_push_o are the widest single assignments in the model ->
-    -- packed-rows; the per-lane push_n_q popcounts and scratch_base index
-    -- arithmetic are column/predicate shaped.
-    if model.has_source("g6lc_apu_rast.sv") then
-        select_rule(cls, "push_i",      "packed-rows")
-        select_rule(cls, "sh_push",     "packed-rows")
-        select_rule(cls, "push_n_q",    "packed-predicates")
-        select_rule(cls, "scratch_base","tiled-columns")
-        select_rule(cls, "sh_slot",     "strided-bit-columns")
-    end
-
-    -- Vertex front-end / shader wave: fpnew FPU pipes (i_fma/i_cvt/i_dsq/
-    -- i_nc __PVT__), lane x compute-unit generate grid, inp_pipe_ready valid
-    -- masks and lzc sel_nodes priority vectors.  These are the graphics FP
-    -- hot path; packed-predicates eats the valid&~(broadcast&veto) masks and
-    -- tiled/strided columns eat the lane-strided select vectors.
-    if model.has_source("g6lc_apu_vnfront.sv") or model.has_source("g6lc_apu_vnpump.sv")
-       or model.has_source("g6lc_apu_vnrep.sv") or model.has_source("g6lc_apu_vndec.sv") then
-        select_rule(cls, "inp_pipe_ready", "packed-predicates")
-        select_rule(cls, "sel_nodes",      "tiled-columns")
-        select_rule(cls, "__PVT__",        "packed-rows")
-        select_rule(cls, "g_lane__BRA__",  "wide-mux-guard")
-    end
-
-    -- Command processor / DMA / object pay: descriptor tag/index vectors and
-    -- the doneq push/pop counters -> packed rows and bit columns.
-    if model.has_source("g6lc_apu_cmdexec.sv") or model.has_source("g6lc_apu_cmdrec.sv")
-       or model.has_source("g6lc_apu_doneq.sv") or model.has_source("g6lc_apu_dma_read.sv")
-       or model.has_source("g6lc_apu_dma_write.sv") then
-        select_rule(cls, "push_i",   "packed-rows")
-        select_rule(cls, "push_n_o", "packed-predicates")
-    end
-
-    -- Page-table walker: PTE tag/permission bit fields walked per level ->
-    -- strided bit columns and tiled columns.
-    if model.has_source("g6lc_apu_vgpages.sv") then
-        select_rule(cls, "pte",      "strided-bit-columns")
-        select_rule(cls, "walk",     "tiled-columns")
-    end
-
-    -- tc_sram register files / FPnew leaf pipes present in every APU bench:
-    -- wide storage arrays -> packed rows; the fpnew parameterised classes are
-    -- matched by the __PVT__ marker above.
-    if model.has_source("tc_sram.sv") then
-        select_rule(cls, "q_din",    "packed-rows")
-        select_rule(cls, "q_dout",   "packed-rows")
-    end
-
-    -- Assertion cones: universal to every --assert Verilator model.  KNOWN_
-    -- MARKERS already carries both tokens so has_marker() is reliable here.
-    -- assert-guard-hoist lifts the assertOn() check out of the match vector;
-    -- bit-exact and ~free under a noassert build.  (assert-cone-gate is left
-    -- out: it is experimental, needs the whole-class dead_vars precompute, and
-    -- a 0-hit would sink the overlay — revisit once a real Mdir confirms it.)
+    -- assert-guard-hoist is the only checked transform measured to fire on
+    -- APU codegen (see header note).  lower_assert_guard itself requires the
+    -- literal "->assertOn()" substring, so that is the precise per-TU gate;
+    -- "VL_ONEHOT" is emitted too so a TU that reaches the match vector via a
+    -- differently-spelled assert still gets selected (the op dedups to one).
+    -- KNOWN_MARKERS carries both tokens, so has_marker() is reliable.
     if model.has_marker("->assertOn()") or model.has_marker("VL_ONEHOT") then
         select_rule(cls, "->assertOn()", "assert-guard-hoist")
         select_rule(cls, "VL_ONEHOT",    "assert-guard-hoist")
     end
 
-    -- Deliberately absent: circular-age-compare (hyp8 OoO __Vfunc_ooo_age_
-    -- older__ only), and any hyp8 instance markers (u_recover__DOT__,
-    -- i_sb_*, i_rob__DOT__, i_release__DOT__, i_vio_red__DOT__,
-    -- i_stl_red__DOT__, i_sb_lifecycle__DOT__) — none exist in CVA6/Venus.
+    -- Deliberately absent: every packed/SIMD pass (packed-rows, packed-mux-
+    -- rows, packed-predicates, tiled-columns, wrapped-columns, strided-bit-
+    -- columns, circular-age-compare, scatter-eq-mask, wide-mux-guard) and
+    -- assert-cone-gate.  Measured 0 hits on the vgsys Mdir (see header); they
+    -- parse hyp8 OoO idioms CVA6/Venus does not generate, and a single 0-hit
+    -- op fails prepare()'s all-or-nothing check.  Revisit only with a fresh
+    -- per-op hit measurement on a target Mdir that shows nonzero totals.
 end

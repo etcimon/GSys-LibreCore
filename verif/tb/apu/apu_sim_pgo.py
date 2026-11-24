@@ -35,6 +35,82 @@ def budget(name, default):
     return int(value)
 
 
+def _tuning_tools_dir():
+    # g6lc_hyp8_tuning.py + the g6lc_pack_* overlay passes + g6lc_tuning_
+    # {policy,driver} + the APU .lua policies all live in verif/regress/remote.
+    return HERE.parents[1] / 'regress' / 'remote'
+
+
+def _tuning_plugin():
+    """Resolve APU_SIM_TUNING to a .lua policy path, or None when disabled.
+
+    Accepts a bare policy name (looked up in verif/regress/remote, e.g.
+    ``apu_vgsys_perf`` -> ``apu_vgsys_perf.lua``) or a path relative to the
+    repo root / cwd / absolute.  ``0``/``off``/``none``/empty disable it."""
+    spec = os.environ.get('APU_SIM_TUNING', '').strip()
+    if not spec or spec.lower() in ('0', 'off', 'none', 'false'):
+        return None
+    tools = _tuning_tools_dir()
+    root = Path(os.environ.get('CVA6_REPO_DIR', str(HERE.parents[2]))).resolve()
+    candidates = [tools / spec, tools / (spec + '.lua'),
+                  root / spec, Path.cwd() / spec]
+    if Path(spec).is_absolute():
+        candidates.insert(0, Path(spec))
+    for cand in candidates:
+        if cand.is_file():
+            return cand.resolve()
+    raise ValueError('APU_SIM_TUNING policy not found: ' + spec)
+
+
+def _tuning_identity():
+    """Cache-key fragment for the active tuning policy, or None when off.
+
+    The .lua policy and driver are not covered by the source manifest
+    (.lua is outside its EXTENSIONS), so their digests ride the request
+    identity explicitly; the g6lc_pack_*.py passes are .py under
+    verif/regress and are already hashed by source_state()."""
+    plugin = _tuning_plugin()
+    if plugin is None:
+        return None
+    driver = _tuning_tools_dir() / 'g6lc_tuning_driver.lua'
+    return {'plugin': plugin.name, 'pluginSha256': sha(plugin),
+            'driverSha256': sha(driver) if driver.is_file() else None}
+
+
+def _prepare_tuning(build, prefix):
+    """Run g6lc_hyp8_tuning.prepare() between verilate and make.
+
+    Returns the overlay rules.mk path on success, else None so the build
+    proceeds untuned.  Every prepare failure — unsupported layout, a missing
+    tool, or a 0-hit transform (UnsupportedLayout) — degrades to the stock
+    makefile: tuned and untuned images are functionally identical, only the
+    generated-C++ lowering differs."""
+    plugin = _tuning_plugin()
+    if plugin is None:
+        return None
+    script = _tuning_tools_dir() / 'g6lc_hyp8_tuning.py'
+    if not script.is_file():
+        print('SIM TUNING skipped: no g6lc_hyp8_tuning.py under '
+              + str(_tuning_tools_dir()), file=sys.stderr)
+        return None
+    proc = subprocess.run(
+        [sys.executable, str(script), str(build),
+         '--plugin', str(plugin), '--prefix', prefix],
+        capture_output=True, text=True,
+        timeout=budget('APU_SIM_BUILD_TIMEOUT', 600))
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout).strip().splitlines()
+        print('SIM TUNING overlay unavailable; building untuned: '
+              + (tail[-1] if tail else 'prepare failed'), file=sys.stderr)
+        return None
+    rules = build / 'hyp8-packed-tiled' / 'rules.mk'
+    if not rules.is_file():
+        return None
+    print('SIM TUNING overlay=' + str(rules) + ' plugin=' + plugin.name
+          + (' ' + proc.stdout.strip()[:200] if proc.stdout.strip() else ''))
+    return str(rules)
+
+
 def source_state(root):
     files = None
     if os.environ.get('APU_SOURCE_FILES'):
@@ -82,7 +158,7 @@ def request(root, compiler, arguments, mdir, plan):
                 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS')
     build_env = {name: hashlib.sha256(os.environ.get(name, '').encode()).hexdigest()
                  for name in controls}
-    return {
+    description = {
         'sourceSha256': source_state(root), 'recipeSha256': recipe_id(),
         'compilerBinarySha256': sha(binary), 'cxx': str(Path(cxx).resolve()),
         'compilerSourceIdSha256': sha(source_id) if source_id.is_file() else None,
@@ -94,6 +170,10 @@ def request(root, compiler, arguments, mdir, plan):
         'trainingInputs': inputs, 'optFast': '-O3', 'optSlow': '-O2',
         'buildEnvironmentSha256': build_env,
     }
+    tuning = _tuning_identity()
+    if tuning is not None:
+        description['tuning'] = tuning
+    return description
 
 
 def receipt_valid(report, identity):
@@ -226,10 +306,16 @@ def provision(compiler, arguments):
         build_wait = budget('APU_SIM_BUILD_TIMEOUT', 600)
         execute([compiler, *verilate_only(arguments, build)], Path.cwd(),
                 'verilate.log', build_wait)
+        # g6lc overlay (opt-in via APU_SIM_TUNING): rewrite the generated
+        # DepSet .cpp under hyp8-packed-tiled/ and append its rules.mk so both
+        # the instrumented and profile-use makes compile the lowered sources.
+        tuning_rules = _prepare_tuning(build, prefix)
         make = ['make', '-C', str(build), '-f', prefix + '.mk',
                 '-j', str(budget('APU_BUILD_JOBS', 4)), '-B', 'OBJCACHE=',
                 'CXX=' + str(wrapper), 'LINK=' + str(wrapper),
                 'OPT_FAST=-O3', 'OPT_SLOW=-O2', 'OPT_GLOBAL=-O2']
+        if tuning_rules:
+            make += ['-f', tuning_rules]
         execute(make, build, 'generate.log', build_wait)
         image = build / executable
         train_logs = []

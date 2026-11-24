@@ -45,7 +45,7 @@ CONFIGURATION_KEYS = ('TARGET_CFG', 'VERILATOR', 'VERILATOR_ROOT', 'YOSYS',
                       'APU_DEV_BUILD_TIMEOUT', 'APU_TOOL_SETUP_TIMEOUT',
                       'APU_SIM_PGO', 'APU_REAL_VERILATOR', 'APU_SIM_PGO_TIMEOUT',
                       'APU_SIM_BUILD_TIMEOUT', 'APU_SIM_TRAIN_TIMEOUT',
-                      'APU_SIM_PGO_CACHE')
+                      'APU_SIM_PGO_CACHE', 'APU_SIM_TUNING')
 
 
 def _wanted(name: str) -> bool:
