@@ -1224,6 +1224,19 @@ remain release requirements; intermediate raster gates do not narrow the product
     shader `gl_WorkGroupID`/`gl_GlobalInvocationID` base). By contrast
     `vkCmdSetRenderingInputAttachmentIndices` WAS a genuine bug (true no-op
     that wrongly faulted) — fixed `926fca46a` + test `35187a665`.
+    **UPDATE 2026-11-24 — two of the six now IMPLEMENTED:**
+    `vkCmdClearDepthStencilImage` replay landed (`6bf29ec53`) for stage-A
+    pure-depth fmts 12/13 + aspect==DEPTH via `img_dclear_texel` (exact-fmt
+    check, NOT `fmt&15` which aliases colour fmts 28/29); `vkCmdDispatchBase`
+    replay landed (`f604078b9`) admitting only base==(0,0,0) (≡ vkCmdDispatch,
+    counts at imm[3:6]) and failing closed on nonzero base. **The remaining
+    four — `vkCmdBlitImage{,2}` and `vkCmdResolveImage{,2}` — are confirmed
+    hardware-dependent, NOT oracle gaps:** the bounded model has no MSAA
+    (`samples=1` only, no samples field in the image extent) and `_copy`/`_rows`
+    do raw same-format row copies, so blit scaling/filter/conversion and
+    multisample resolve have no bounded-model semantics to replay. They stay
+    deferred to the hardware/CTS waves (BlitImage→Increment 5, ResolveImage→
+    cmdexec+xfer+bench operands).
 - [ ] Complete shader/memory/sync → raster/ROP → VM/cache/matrix/RT/mesh/scheduling engines
   and configuration-safe throughput, using the full feature matrix in the plan.
 - [ ] Clear generic Venus/protocol stock-package blockers, virtio-pci/external-sync/WSI,
