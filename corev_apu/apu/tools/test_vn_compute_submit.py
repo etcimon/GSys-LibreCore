@@ -48,6 +48,27 @@ def submit_packet(w, buffers, *, fence=FENCE, waits=(), signals=(), timeline=Fal
     return data[:4] + struct.pack('<I', 0) + data[8:]
 
 
+def submit2_packet(w, buffers, *, fence=FENCE, waits=(), signals=(), timeline=False):
+    # VkSubmitInfo2 inlines semaphore value/stageMask/deviceIndex per
+    # VkSemaphoreSubmitInfo and deviceMask per VkCommandBufferSubmitInfo;
+    # timeline values ride the same slots (wait=1, signal=2) as the *1
+    # pNext chain so the two paths exercise identical semaphore plans.
+    def ssi(semaphore, value):
+        return w.structure('VkSemaphoreSubmitInfo', pNext=[],
+            semaphore=semaphore, value=value, stageMask=0x800, deviceIndex=0)
+    si2 = w.structure('VkSubmitInfo2', pNext=[], flags=0,
+        waitSemaphoreInfoCount=len(waits),
+        pWaitSemaphoreInfos=[ssi(s, 1 if timeline else 0) for s in waits],
+        commandBufferInfoCount=len(buffers),
+        pCommandBufferInfos=[w.structure('VkCommandBufferSubmitInfo', pNext=[],
+            commandBuffer=b, deviceMask=0) for b in buffers],
+        signalSemaphoreInfoCount=len(signals),
+        pSignalSemaphoreInfos=[ssi(s, 2 if timeline else 0) for s in signals])
+    data = w.command('vkQueueSubmit2', queue=QUEUE, submitCount=1,
+        pSubmits=[si2], fence=fence)
+    return data[:4] + struct.pack('<I', 0) + data[8:]
+
+
 class ComputeSubmissionTests(unittest.TestCase):
     def setUp(self):
         self.r = scene()
@@ -73,6 +94,10 @@ class ComputeSubmissionTests(unittest.TestCase):
         data = submit_packet(self.w, [self.f.CB], **kwargs)
         return self.f.service.execute(1, data)
 
+    def submit2(self, **kwargs):
+        data = submit2_packet(self.w, [self.f.CB], **kwargs)
+        return self.f.service.execute(1, data)
+
     def test_explicit_modes_reach_queue_and_fence_follows_compute_retirement(self):
         self.assertTrue(self.e.submissions.compute_enabled)
         self.submit()
@@ -84,6 +109,48 @@ class ComputeSubmissionTests(unittest.TestCase):
         self.assertEqual(self.r.word(), 5)
         self.assertFalse(self.e.submissions.pending)
         self.assertFalse(self.e.replay.held)
+
+    def test_queue_submit2_reaches_queue_and_fence_follows_compute_retirement(self):
+        self.assertTrue(self.e.submissions.compute_enabled)
+        self.submit2()
+        self.assertEqual(self.status(), 1)
+        self.assertEqual(self.wait(), 2)
+        self.assertEqual(self.r.word(), 0)
+        self.f.drain()
+        self.assertEqual(self.status(), 0)
+        self.assertEqual(self.r.word(), 5)
+        self.assertFalse(self.e.submissions.pending)
+        self.assertFalse(self.e.replay.held)
+
+    def test_queue_submit2_binary_signal_and_wait_retire_in_order(self):
+        self.command('vkCreateSemaphore', device=self.w.DEVICE, pSemaphore=SEM,
+            pCreateInfo=self.w.structure('VkSemaphoreCreateInfo', pNext=[], flags=0))
+        data = submit2_packet(self.w, [self.f.CB], signals=(SEM,))
+        self.f.service.execute(1, data)
+        self.f.service.execute(1, submit2_packet(self.w, [], fence=0, waits=(SEM,)))
+        self.f.drain()
+        self.assertEqual(self.status(), 0)
+        self.assertEqual(self.r.word(), 5)
+        self.assertFalse(self.e.submissions.semaphores.tokens)
+        self.assertEqual(self.f.entry(SEM)['pins'], 0)
+
+    def test_queue_submit2_timeline_wait_host_signal_and_queue_signal(self):
+        self.command('vkCreateSemaphore', device=self.w.DEVICE, pSemaphore=SEM,
+            pCreateInfo=self.w.structure('VkSemaphoreCreateInfo',
+                pNext=[self.w.structure('VkSemaphoreTypeCreateInfo', pNext=[],
+                                       semaphoreType=1, initialValue=0)], flags=0))
+        self.submit2(waits=(SEM,), signals=(SEM,), timeline=True)
+        self.f.service.poll()
+        self.assertEqual(self.r.word(), 0)
+        self.assertEqual(self.status(), 1)
+        self.command('vkSignalSemaphore', device=self.w.DEVICE,
+            pSignalInfo=self.w.structure('VkSemaphoreSignalInfo', pNext=[],
+                                        semaphore=SEM, value=1))
+        self.f.drain()
+        self.assertEqual(self.status(), 0)
+        self.assertEqual(self.r.word(), 5)
+        handle, _ = self.e.submissions._object(self.f.context, SEM, 'VkSemaphore')
+        self.assertEqual(self.e.submissions.timelines.values[(id(self.f.context), handle)], 2)
 
     def test_transfer_only_mode_still_refuses_shader_replay(self):
         self.e.submissions.compute_enabled = False

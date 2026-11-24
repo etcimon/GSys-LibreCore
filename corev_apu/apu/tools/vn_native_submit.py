@@ -41,9 +41,9 @@ def check_submission_modes(transfer, compute):
 
 
 class NativeSubmissions:
-    NAMES = frozenset(('vkQueueSubmit', 'vkWaitForFences', 'vkResetFences',
-                       'vkGetFenceStatus', 'vkDeviceWaitIdle', 'vkQueueWaitIdle',
-                       'vkGetQueryPoolResults')) | TimelineSemaphores.NAMES
+    NAMES = frozenset(('vkQueueSubmit', 'vkQueueSubmit2', 'vkWaitForFences',
+                       'vkResetFences', 'vkGetFenceStatus', 'vkDeviceWaitIdle',
+                       'vkQueueWaitIdle', 'vkGetQueryPoolResults')) | TimelineSemaphores.NAMES
     # EVENT-class host commands bypass NAMES (the golden frontend owns
     # their state); _command reports DEVICE_LOST for them once the
     # owning context faults, matching the fence/query/timeline paths
@@ -194,6 +194,76 @@ class NativeSubmissions:
             raise ValueError('multi-batch semaphore sequencing exceeds native profile')
         fence_id = reader.u64()
         reader.end()
+        self._run_submit(context, queue, buffers, wait_ids, signal_ids,
+                         timeline_values, fence_id)
+
+    def _submit2(self, context, words):
+        # vkQueueSubmit2 (VkSubmitInfo2): semaphore value/stageMask/
+        # deviceIndex are INLINE per VkSemaphoreSubmitInfo and command
+        # buffers carry deviceMask — no pNext timeline chain or parallel
+        # stage array.  Each VkSemaphoreSubmitInfo serializes to 10 words
+        # (9 fields + 1 tail pad for 8-byte struct stride); each
+        # VkCommandBufferSubmitInfo to 6 words (no pad).  Bounded profile
+        # rejects pNext chains, nonzero flags, deviceIndex/deviceMask.
+        reader = WordReader(words)
+        queue, count = reader.u64(), reader.u32()
+        reader.array(count, 4)
+        buffers, wait_ids, signal_ids = [], [], []
+        wait_values, signal_values = [], []
+        model = self.execution.model
+        stype = model.stype_values['VK_STRUCTURE_TYPE_SUBMIT_INFO_2']
+        ssitype = model.stype_values['VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO']
+        cbitype = model.stype_values['VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO']
+
+        def sem_info():
+            if reader.u32() != ssitype:
+                raise ValueError('invalid native semaphore submit info')
+            if reader.u64():
+                raise ValueError('native semaphore submit extension exceeds profile')
+            sem, val = reader.u64(), reader.u64()
+            stage = reader.u32()
+            if reader.u32() or reader.u32():
+                raise ValueError('native semaphore submit device index exceeds profile')
+            if not stage:
+                raise ValueError('native semaphore submit stage mask must be nonzero')
+            return sem, val
+
+        for _ in range(count):
+            if reader.u32() != stype:
+                raise ValueError('invalid native submit2 info')
+            if reader.u64() or reader.u32():
+                raise ValueError('native submit2 extension/flags exceed profile')
+            nw = reader.u32()
+            reader.array(nw, 64)
+            for _ in range(nw):
+                sem, val = sem_info()
+                wait_ids.append(sem)
+                wait_values.append(val)
+            nc = reader.u32()
+            reader.array(nc, 16 - len(buffers))
+            for _ in range(nc):
+                if reader.u32() != cbitype:
+                    raise ValueError('invalid native command buffer submit info')
+                if reader.u64():
+                    raise ValueError('native command buffer submit extension exceeds profile')
+                buffers.append(reader.u64())
+                if reader.u32():
+                    raise ValueError('native command buffer device mask exceeds profile')
+            ns = reader.u32()
+            reader.array(ns, 64)
+            for _ in range(ns):
+                sem, val = sem_info()
+                signal_ids.append(sem)
+                signal_values.append(val)
+        if count > 1 and (wait_ids or signal_ids):
+            raise ValueError('multi-batch semaphore sequencing exceeds native profile')
+        fence_id = reader.u64()
+        reader.end()
+        self._run_submit(context, queue, buffers, wait_ids, signal_ids,
+                         (wait_values, signal_values), fence_id)
+
+    def _run_submit(self, context, queue, buffers, wait_ids, signal_ids,
+                    timeline_values, fence_id):
         queue_handle, queue_entry = self._object(context, queue, 'VkQueue')
         for buffer in buffers:
             _, entry = self._object(context, buffer, 'VkCommandBuffer')
@@ -338,6 +408,11 @@ class NativeSubmissions:
                 result = golden.VK_ERR_LOST
             else:
                 self._submit(context, words)
+        elif name == 'vkQueueSubmit2':
+            if id(context) in self.faults:
+                result = golden.VK_ERR_LOST
+            else:
+                self._submit2(context, words)
         elif name == 'vkGetFenceStatus':
             reader = WordReader(words)
             device, _ = self._object(context, reader.u64(), 'VkDevice')
