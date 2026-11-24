@@ -1179,24 +1179,29 @@ remain release requirements; intermediate raster gates do not narrow the product
     fragment-shader model has no `SubpassInput`/`InputAttachmentIndex`/
     `DimSubpassData` path (`inputAttachmentCount` is always 0), so
     `vkCmdSetRenderingInputAttachmentIndices` has nothing to permute.
-    **`vkCmdSetRenderingAttachmentLocations` mapped, DEFERRED (spec/wire
-    risk):** the FS-out→attachment map lives in `_color_targets`
-    (`vn_graphics_draw_replay.py:65-82`): `subpass_colors` is indexed by
-    subpass slot == FS output `location`, `ref[0]` == framebuffer attachment
-    index; identity gives `colors[L]=(L,layout)`. The command is issued
-    AFTER `vkCmdBeginRendering` (RenderPass already synthesized/frozen), so
-    it must rebuild the active `BeginRendering.render_pass_state.colors` —
-    currently `capture()` returns `None` (`vn_dynamic_rendering.py:207`) and
-    `vn_graphics_draws.py:157` returns True (silent no-op). Two blockers to
-    a blind implementation: the keep-fields are only
-    `colorAttachmentCount`+`pColorAttachmentLocations` (NO
-    `firstColorAttachment`/`attachmentCount` — the Venus wire signature
-    differs from the Vulkan API `(locations, firstColorAttachment,
-    attachmentCount)` and needs an operand-decode probe to pin down), and
-    the permutation direction (`locations[i]` = FS loc for attachment
-    `first+i`, i.e. build `colors[loc]=(att,layout)` via the inverse map)
-    must be spec-exact or it silently mis-renders. Default identity mapping
-    is verified by the MRT draw. 152 tests.
+    **`vkCmdSetRenderingAttachmentLocations` mapped, DEFERRED (multi-part
+    feature, not a command-side tweak):** SPEC RESOLVED via vk.xml — the
+    wire takes `VkRenderingAttachmentLocationInfo{colorAttachmentCount,
+    pColorAttachmentLocations}` (core VK 1.4 form, NO firstColorAttachment
+    subrange). `pColorAttachmentLocations[i]` = the FS output `location`
+    written to colour attachment `i` (array indexed by ATTACHMENT index);
+    `VK_ATTACHMENT_UNUSED`(0xFFFFFFFF) makes that attachment inaccessible;
+    NULL==identity; resets each `vkCmdBeginRendering`; count must equal
+    `VkRenderingInfo::colorAttachmentCount`. It is NOT implementable as a
+    lone command-side `colors` permutation because it couples to THREE
+    other surfaces: (a) the bound PIPELINE may chain the same
+    `VkRenderingAttachmentLocationInfo` in `VkGraphicsPipelineCreateInfo`
+    pNext — pipeline synthesis (`vkCreateGraphicsPipelines`) does not model
+    it yet; (b) `RenderPass.compatible()` zips `colors` positionally and
+    compares `attachments[ref][:2]` formats, so a command-side-only
+    permutation would MISMATCH the pipeline's identity `colors` and reject
+    the draw — the permutation must be applied consistently on BOTH sides;
+    (c) `VK_ATTACHMENT_UNUSED`/unmapped FS outputs must be DISCARDED, but
+    `_color_targets` requires `sorted(FS outputs)==sorted(active slots)`
+    exactly — discarding is unmodelled. Real implementation = pipeline
+    pNext parse + a shared permutation applied to both RenderPass
+    syntheses + discard-aware `_color_targets`. Default identity mapping
+    verified by the MRT draw. 152 tests.
 - [ ] Complete shader/memory/sync → raster/ROP → VM/cache/matrix/RT/mesh/scheduling engines
   and configuration-safe throughput, using the full feature matrix in the plan.
 - [ ] Clear generic Venus/protocol stock-package blockers, virtio-pci/external-sync/WSI,
