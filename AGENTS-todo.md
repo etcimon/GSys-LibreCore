@@ -1254,33 +1254,16 @@ remain release requirements; intermediate raster gates do not narrow the product
     `qslots` + state corruption). Added a dedicated arm clearing
     `qslots[first:first+count]` with `qopen` discard, mirroring the
     `vkCmdResetQueryPool` replay path; regression test added. **`vkQueueSubmit2`
-    remains the open candidate** — scoped 2026-11-24. `NativeSubmissions._submit`
-    (`vn_native_submit.py:154`) parses `VkSubmitInfo` words then runs shared
-    logic (obj resolve → `semaphores.plan`/`timelines.jobs.plan` → fence lease →
-    `replay.enqueue`); **only the parse differs for `*2`** — the submit core is
-    reusable. `VkSubmitInfo2` per element: `sType=SUBMIT_INFO_2`, `pNext`,
-    `flags`, `waitSemaphoreInfoCount`+`pWaitSemaphoreInfos` (each
-    `VkSemaphoreSubmitInfo`={sType,pNext,semaphore u64,value u64,stageMask u32,
-    deviceIndex u32}), `commandBufferInfoCount`+`pCommandBufferInfos` (each
-    `VkCommandBufferSubmitInfo`={sType,pNext,commandBuffer u64,deviceMask u64}),
-    `signalSemaphoreInfoCount`+`pSignalSemaphoreInfos`. Deltas vs `*1`: semaphore
-    value/stageMask/deviceIndex INLINE per-info (not pNext timeline chain +
-    parallel stage array); command buffers carry deviceMask. **Wire confirmed
-    2026-11-24:** `VkSubmitInfo2`/`VkSemaphoreSubmitInfo`/`VkCommandBufferSubmitInfo`
-    ARE in `model.reg.type_table` and `vkQueueSubmit2` is a supported COMMAND
-    type — `w.command`/`w.structure` build it. `WordReader` contract decoded:
-    `position` starts at 2 (skips ctype+flags word), `u64()`=2 u32s,
-    `array(count,limit)` reads a u64 count prefix == count. `vkQueueSubmit` 25w
-    vs `vkQueueSubmit2` 28w dumps captured. **Open unknown:** exact operand
-    serialization of the `*2` sub-structs — whether stageMask/deviceIndex/
-    deviceMask/sType/pNext occupy stream words or are decoder-internal (the
-    `g6lc_apu_vn_tables.md` decode extracts only semaphore+value and
-    commandBuffer). Resolve by diffing a semaphored `*2` packet's words against
-    the operand table before writing `_submit2`. Bounded scope: reject
-    deviceIndex/deviceMask≠0 + nonzero `flags`. Plan: add `'vkQueueSubmit2'` to
-    `NAMES`, dispatch a `_submit2` parsing the `*2` layout into the same
-    intermediates `_submit` produces, share the tail. Needs a dedicated session +
-    submit/semaphore regression run.
+    RESOLVED 2026-11-24 — `f35ae0905`:** the admitted submit command had no
+    `NAMES` entry or `_submit2` parser. Added both; `_submit2` parses the
+    `VkSubmitInfo2` layout (semaphore value/stageMask/deviceIndex INLINE per
+    `VkSemaphoreSubmitInfo` = 10 words/elem incl. tail pad; `VkCommandBufferSubmitInfo`
+    deviceMask = 6 words/elem no pad) then shares the extracted `_run_submit`
+    tail with `vkQueueSubmit`. Bounded profile rejects pNext chains, nonzero
+    flags, deviceIndex/deviceMask≠0. 3 tests (bare/binary/timeline inline
+    values) green; semaphore+submit suites pass. **The bounded Python oracle's
+    admitted command surface is now fully closed** — every `vkCmd*`/host command
+    is implemented+tested or a documented hardware-bound deferral (Blit/Resolve).
 - [ ] Complete shader/memory/sync → raster/ROP → VM/cache/matrix/RT/mesh/scheduling engines
   and configuration-safe throughput, using the full feature matrix in the plan.
 - [ ] Clear generic Venus/protocol stock-package blockers, virtio-pci/external-sync/WSI,
