@@ -1179,9 +1179,24 @@ remain release requirements; intermediate raster gates do not narrow the product
     fragment-shader model has no `SubpassInput`/`InputAttachmentIndex`/
     `DimSubpassData` path (`inputAttachmentCount` is always 0), so
     `vkCmdSetRenderingInputAttachmentIndices` has nothing to permute.
-    Remaining (d) only: `vkCmdSetRenderingAttachmentLocations` non-identity
-    permutation (the draw-path `targets`/`extras` integration is intricate;
-    default identity mapping already verified by the MRT draw). 152 tests.
+    **`vkCmdSetRenderingAttachmentLocations` mapped, DEFERRED (spec/wire
+    risk):** the FS-out→attachment map lives in `_color_targets`
+    (`vn_graphics_draw_replay.py:65-82`): `subpass_colors` is indexed by
+    subpass slot == FS output `location`, `ref[0]` == framebuffer attachment
+    index; identity gives `colors[L]=(L,layout)`. The command is issued
+    AFTER `vkCmdBeginRendering` (RenderPass already synthesized/frozen), so
+    it must rebuild the active `BeginRendering.render_pass_state.colors` —
+    currently `capture()` returns `None` (`vn_dynamic_rendering.py:207`) and
+    `vn_graphics_draws.py:157` returns True (silent no-op). Two blockers to
+    a blind implementation: the keep-fields are only
+    `colorAttachmentCount`+`pColorAttachmentLocations` (NO
+    `firstColorAttachment`/`attachmentCount` — the Venus wire signature
+    differs from the Vulkan API `(locations, firstColorAttachment,
+    attachmentCount)` and needs an operand-decode probe to pin down), and
+    the permutation direction (`locations[i]` = FS loc for attachment
+    `first+i`, i.e. build `colors[loc]=(att,layout)` via the inverse map)
+    must be spec-exact or it silently mis-renders. Default identity mapping
+    is verified by the MRT draw. 152 tests.
 - [ ] Complete shader/memory/sync → raster/ROP → VM/cache/matrix/RT/mesh/scheduling engines
   and configuration-safe throughput, using the full feature matrix in the plan.
 - [ ] Clear generic Venus/protocol stock-package blockers, virtio-pci/external-sync/WSI,
