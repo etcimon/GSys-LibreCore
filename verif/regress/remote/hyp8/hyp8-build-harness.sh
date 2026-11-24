@@ -437,6 +437,7 @@ vlt_supports_flag() {
   [[ -x "$bin" ]] && grep -Fq -- "$needle" "$bin" 2>/dev/null
 }
 BUILD_POLICY_VLT_ARGS=()
+BUILD_ASSERT_ARG=(--assert)
 CLOCK_SKIP_REQ="${HYP8_BUILD_CLOCK_SKIP:-auto}"
 CLOCK_SKIP_EFFECTIVE="off"
 if [[ "$TUNING" == lua && -n "$POLICY_FILE" ]]; then
@@ -444,7 +445,11 @@ if [[ "$TUNING" == lua && -n "$POLICY_FILE" ]]; then
     --plan-vlt-flags --plugin "$POLICY_FILE" --prefix Vg6lc_testharness \
     --command "$TARGET_VLT_DEFS --threads $VTHREADS" 2>/dev/null || true)
   for fl in $planned_flags; do
-    if vlt_supports_flag "$fl"; then
+    if [[ "$fl" == "--no-assert" ]]; then
+      BUILD_ASSERT_ARG=()
+    elif [[ "$fl" == "--dumpi-sentinel" || "$fl" == "1" ]]; then
+      BUILD_POLICY_VLT_ARGS+=("$fl")
+    elif vlt_supports_flag "$fl"; then
       BUILD_POLICY_VLT_ARGS+=("$fl")
       [[ "$fl" == "-fclock-skip-sink" ]] && CLOCK_SKIP_EFFECTIVE="sink"
       [[ "$fl" == "-fclock-skip" ]] && CLOCK_SKIP_EFFECTIVE="causal"
@@ -452,6 +457,11 @@ if [[ "$TUNING" == lua && -n "$POLICY_FILE" ]]; then
       log "warn: selected verilator_bin does not support policy flag $fl; skipping"
     fi
   done
+fi
+[[ "${HYP8_BUILD_NO_ASSERT:-0}" == "1" ]] && BUILD_ASSERT_ARG=()
+if [[ ${#BUILD_ASSERT_ARG[@]} -eq 0 && -f "$ROOT/verif/regress/remote/hyp8/hyp8_tb_probes.vlt" ]]; then
+  BUILD_POLICY_VLT_ARGS+=("$ROOT/verif/regress/remote/hyp8/hyp8_tb_probes.vlt")
+  TARGET_CFLAGS="$TARGET_CFLAGS -DG6LC_TB_PUBLIC_PROBES"
 fi
 case "$CLOCK_SKIP_REQ" in
   auto)
@@ -568,7 +578,7 @@ if [[ "$VER_DONE" == "1" ]]; then
   rc=0
 else
 set +e
-"$VERILATOR" --no-timing verilator_config.vlt --assert \
+"$VERILATOR" --no-timing verilator_config.vlt ${BUILD_ASSERT_ARG[@]+"${BUILD_ASSERT_ARG[@]}"} \
   $TARGET_VLT_DEFS \
   -f "$FLIST" \
   --threads "$VTHREADS" \

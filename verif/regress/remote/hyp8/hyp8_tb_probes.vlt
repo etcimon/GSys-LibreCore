@@ -1,0 +1,25 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+// Minimal public_flat_rd probes required by hyp8_tb.cpp when --no-assert is
+// requested by a throughput Lua policy (e.g. hyp8_mc_fast.lua). Keeps only the
+// few observability registers read by the testbench without forcing
+// --public-flat-rw across the entire core.
+`verilator_config
+
+public_flat_rd -module "g6lc_rob" -var "head_q"
+public_flat_rd -module "g6lc_rob" -var "tail_q"
+public_flat_rd -module "g6lc_rob" -var "count_q"
+public_flat_rd -module "g6lc_rob" -var "rob_q"
+public_flat_rd -module "g6lc_rob" -var "retire_tid_i"
+public_flat_rd -module "g6lc_csr_regfile" -var "mepc_q"
+public_flat_rd -module "g6lc_csr_regfile" -var "mcause_q"
+public_flat_rd -module "g6lc_csr_regfile" -var "mtvec_q"
+public_flat_rd -module "g6lc_csr_regfile" -var "mtval_q"
+public_flat_rd -module "g6lc_csr_regfile" -var "wfi_q"
+public_flat_rd -module "csr_regfile" -var "mepc_q"
+public_flat_rd -module "csr_regfile" -var "mcause_q"
+public_flat_rd -module "csr_regfile" -var "mtvec_q"
+public_flat_rd -module "csr_regfile" -var "mtval_q"
+public_flat_rd -module "csr_regfile" -var "wfi_q"
+public_flat_rd -module "commit_stage" -var "fire"
+public_flat_rd -module "commit_stage" -var "commit_dec"

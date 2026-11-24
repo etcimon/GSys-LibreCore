@@ -5244,3 +5244,93 @@ a marginal simulation speedup (§6.1):
    exercises `-fclock-skip-sink -fdfg-peephole-pack-bitwise-mux` + Lua overlay
    (`packed-rows`, `packed-mux-rows`, `tiled-columns`) + PGO; full sleep-model
    A/B vs `hyp8-sleepgatefix-aggregate-t1` follows on build completion.
+4. **Single-threaded re-test + scenario matrix** (same WSL bench binaries,
+   `taskset -c 0`, 500k cycles, interleaved AB/BA, 2026-11-23 second session;
+   host load noisier, so report ratios not absolute cyc/s):
+   - Wake-pulse scenario re-run in 3 independent batches: speedup ratios
+     **2.90× / 2.96× / 3.56×** — reproduces the §65.4-1 2.81× figure.
+   - New **deep-sleep** variant (`en=0x1` permanently; cores 1–3 never wake,
+     checksum `56df92aa56cdc59c` identical): off median ~1.17M vs sink
+     ~3.74M cyc/s → **~3.2×**.
+   - New **all-awake** variant (`en=0xf` every cycle, checksum
+     `f78687fdf78426f4` identical): sink ≈ parity, consistently ~2–5%
+     slower at median across batches — within host noise on this
+     microbenchmark; emitted hot-path overhead is only 4 `VL_UNLIKELY`
+     dirty-flag tests per `_eval` (refresh helpers stay `VL_ATTR_COLD`).
+     Acceptable because the flag is opt-in and only enabled on sleep
+     targets where the asleep-phase win dominates.
+
+## 66. Lua-driven Sentinel/DFG compilation pipeline — breaking 1,000 cycles/s on real `g6lc64_hyp8_mc` (2026-11-24)
+
+### 66.1 Post-`packed-mux-rows` dynamic profile (`perf record`, `i64.elf`, `hyp8-mc-csrfix`)
+
+After `packed-tiled` + `packed-mux-rows`, `u_recover` dropped to 2.00% of dynamic
+instructions (0.23% of host cycles). Dynamic attribution of the remaining 163B
+instructions (`cycles:u` = 649B under load / 280B quiet) located five dominant,
+structurally regular hotspots outside `u_recover`:
+
+1. **Inlined circular age comparisons (`__Vfunc_ooo_age_older__*`) — 9.41% insns / 11.21% cycles** across 737 core TUs (`vio_age_d` 4.30% insns, `gen_unres_e.uvec` 2.09%, `unnamedblk12.ou` 1.76%, `gen_fhw_k.colder/solder` 1.26%).
+2. **Arbitrary-bit-stride column transposes — 8.67% insns / 4.93% cycles** across 65 core TUs (`i_sb_commit_bundle.mem_col` 6.33%, stride = 522 bits non-byte-multiple; `i_vio_red.age_col` 2.34%, stride = 40 bits wrapped across 64-bit word pairs).
+3. **64-bit scatter-OR equality bitmasks (`i_stl_red.dwait_d`) — 1.46% insns / 0.93% cycles** (952 KB single C++ assignment per bank).
+4. **Wide masked ternary copies (`i_rob.rob_d` 1.08% + `i_sb_lifecycle.mem_n` 0.52%)** and **non-`u_recover` masked rows (`i_release.t1_alloc_older` 0.86%)**.
+5. **Ungated `VL_ONEHOT` / `assertOn()` checks across 390+ TUs** (31,200 sites where Verilator evaluates assertion conditions before testing `assertOn()`).
+
+### 66.2 Expanded Lua Sentinel/DFG policy engine & checked lowering passes
+
+Moved model-specific sentinel/DFG inspection and pass selection into Lua
+(`verif/regress/remote/g6lc_tuning_driver.lua`, `g6lc_tuning_policy.py`,
+`g6lc_hyp8_tuning.py`, `hyp8/policies/hyp8_mc_sentinel.lua`):
+
+- **Read-only Lua introspection**: `model.has_marker(marker)`, `model.stat(key)`,
+  `sentinel.has_dfg()`, `sentinel.dfg_count(op)`, `sentinel.has_sched()`,
+  `sentinel.sched_tasks()`, `sentinel.sched_edges()`, plus declarative
+  `select_sentinel_probe(name, op, target_glob)` and `--dumpi-sentinel` flag support.
+- **Five new checked, bit-exact lowering passes** (all opt-in via Lua, verified with
+  exhaustive C++ bit-oracles + 13/13 live Lua 5.4.7 unit tests):
+  1. `strided-bit-columns` (`g6lc_pack_bit_columns.py` + `g6lc_column_tile.h`):
+     arbitrary-bit-stride 64-entry SIMD transpose (`gather_bits64`, `gather_bits64_x4`,
+     cached `column64`, and wrapped `octet_bits`) using AVX-512BW `_mm512_movepi8_mask`
+     with AVX2 and scalar SWAR fallbacks (matches 4,100 sites across 43 TUs; `mem_col`
+     `__377.cpp` 3.4 MB → 24 KB; `age_col` `__782.cpp` 3.5 MB → 64 KB).
+  2. `circular-age-compare` (`g6lc_pack_age_compare.py` + `g6lc_age_compare.h`):
+     exact algebraic lowering `(((a - cp) & mask) < ((b - cp) & mask))`, 64-entry
+     constant-index `mask64` collapse (`rotl64((1ULL << d) - 1, cp)` for `uvec` &
+     `unnamedblk12.ou`), and 32-lane AVX-512VL+BW `_mm256_cmplt_epu8_mask` word
+     batching (`older32_const_a` / `older32_u8`) — 170,946 sites across 663 TUs
+     (574 `mask64` collapses, 3,184 AVX-512 32-lane vector calls).
+  3. `scatter-eq-mask` (`g6lc_pack_scatter_mask.py` + `g6lc_age_compare.h`):
+     exact `tzcnt` scatter-OR lowering `scatter_eq64<N, W, BaseBit, Stride>` for
+     `i_stl_red.dwait_d` (28 sites across 15 TUs; `__554.cpp` 1.9 MB → 1.8 KB).
+  4. `wide-mux-guard` (`g6lc_pack_wide_mux.py`): 1- and 2-level pure condition
+     hoisting across contiguous wide masked ternary runs (`rob_d` + `mem_n`: 1,152
+     sites across 24 TUs).
+  5. `assert-guard-hoist` (`g6lc_pack_assert_guard.py`): hoists `assertOn()` outside
+     pure assertion condition checks (31,200 sites across 390 TUs; 100% identical when
+     assertions are enabled; skips all hoisted checks and moves them to `.text.unlikely`
+     under `+verilator+noassert` + PGO).
+- Also fixed `AstLogOr` handling in `V3ClkSkip.cpp::parseTriggerCond` (local + remote
+  `verilator-v5.008-g6lc-clkskip`); confirmed on `g6lc64_hyp8_mc_sleep` that remaining
+  `_nba_comb__` calls are pinned by in-core `AstAssert` / hybrid triggers (`_eval_triggers__act`).
+
+### 66.3 Measured progression on real 4-core `g6lc64_hyp8_mc` (`i64.elf`, 13,257 cycles, `taskset -c 2,4`)
+
+All runs below are whole-process timings on the real 4-core `g6lc64_hyp8_mc` model
+(`hyp8-mc-csrfix-aggregate-t1`, `--threads 2`, AVX-512, PGO, all 4 cores active)
+with **100% byte-for-byte identical 4-core RVFI traces** across every arm and trial:
+
+| Arm / Stage | Median wall | Median cyc/s | Speedup vs ctl | Median `instructions:u` | Median `cycles:u` | IPC | HOT `.text` (SQLite) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Control A (`packed-tiled` + AVX-512 + PGO, default asserts) | 29.54 s | **448.8** | 1.00× | 156.68 B | 280.61 B | 0.56 | 85.43 MB |
+| Control A (`+verilator+noassert`, apples-to-apples ABBA) | 28.92 s | **458.3** | 1.02× | 153.87 B | 273.79 B | 0.56 | 85.43 MB |
+| Round 1 `hyp8_mc_sentinel.lua` (878 TUs, stale PGO, default asserts, `/tmp/clkskip-work/sentinel-ab/summary.json`) | 18.02 s | **735.7** | **1.64×** | 103.80 B (−33.7%) | 169.97 B (−39.4%) | 0.61 | 75.32 MB (−11.8%) |
+| Round 2 + AVX-512 `older32` + `VL_ONEHOT` hoist + fresh PGO (1,035 TUs, `assertOn=true`, `/tmp/clkskip-work/sentinel-r2/summary.json`) | 15.61 s | **849.3** | **1.89×** | 101.51 B (−35.2%) | 148.59 B (−47.0%) | 0.68 | 72.15 MB (−15.5%) |
+| Round 2 (`+verilator+noassert`) | 13.92 s | **952.3** (peak 965.9) | **2.12×** | 98.03 B (−37.4%) | 136.37 B (−51.4%) | 0.72 | 72.15 MB (−15.5%) |
+| **Round 3** + `gather_bits64_x4` + 31,200 `assert-guard-hoist` + fresh PGO (`+verilator+noassert`, `/tmp/clkskip-work/sentinel-r3/summary.json`) | **10.88 s** | **1,218.4** (1,219.5 / 1,218.4 / 1,205.3; ABBA 1,218.9 / 1,143.6) | **2.66× vs `ctl+noassert`** (**2.72× vs `ctl`**, **7.24× vs `devthr2-ab`**) | **94.56 B (−39.6%)** | **108.56 B (−61.3%)** | **0.87** | **77.49 MB (−9.3%)** |
+| Round 3 (`assertOn=true`, full runtime assertions active) | 17.81 s | **744.4** | **1.66×** | 99.78 B (−36.3%) | 168.77 B (−39.9%) | 0.59 | 77.49 MB (−9.3%) |
+
+Note on PGO training polarity: Round 3 trained PGO with `+verilator+noassert`, which
+placed all 31,200 hoisted assertion blocks into `.text.unlikely` (delivering **1,218.4
+cycles/s** with `+verilator+noassert` and IPC 0.87), while Round 2 (`VL_ONEHOT`-only
+hoist) delivered **849.3 cycles/s** with full runtime assertions enabled. Both keep
+`--assert` intact in the binary and preserve exact 4-core RVFI traces.
+

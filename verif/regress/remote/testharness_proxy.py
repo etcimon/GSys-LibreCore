@@ -1013,8 +1013,13 @@ def _git_tracked_files(root: Path, patterns: list[str]) -> list[Path]:
 HYP8_NATIVE_INPUTS = tuple("verif/regress/remote/" + name for name in (
     "g6lc_tuning_policy.py", "g6lc_tuning_driver.lua",
     "g6lc_hyp8_tuning.py", "g6lc_pack_generated_rows.py", "g6lc_pack_columns.py",
+    "g6lc_pack_bit_columns.py", "g6lc_pack_age_compare.py",
+    "g6lc_pack_assert_cone.py", "g6lc_pack_assert_guard.py",
+    "g6lc_pack_scatter_mask.py", "g6lc_pack_wide_mux.py",
     "g6lc_pack_predicates.py", "g6lc_pack_wrapped_columns.py",
-    "g6lc_column_tile.h", "hyp8/g6lc_native_isa.h", "hyp8/Flist.hyp8_mc_sim"))
+    "g6lc_sentinel_dataflow.py",
+    "g6lc_column_tile.h", "g6lc_age_compare.h",
+    "hyp8/g6lc_native_isa.h", "hyp8/Flist.hyp8_mc_sim"))
 
 
 def _hyp8_native_inputs(root: Path):

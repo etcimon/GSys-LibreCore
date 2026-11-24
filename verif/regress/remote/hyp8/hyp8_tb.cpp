@@ -136,6 +136,13 @@ static inline auto g6lc_tb_core_pi(Vg6lc_testharness* t, int c) {
 // (public module ports / public_flat_rw), e.g. commit_instr_id_commit.
 #define G6LC_CVA6_C0_PUB(path) path
 #define G6LC_CVA6_C1_PUB(path) path
+#if defined(G6LC_TB_PUBLIC_PROBES)
+#  define G6LC_CVA6_C0_PROBE(path) G6LC_CVA6_C0_PUB(path)
+#  define G6LC_CVA6_C1_PROBE(path) G6LC_CVA6_C1_PUB(path)
+#else
+#  define G6LC_CVA6_C0_PROBE(path) G6LC_CVA6_C0(path)
+#  define G6LC_CVA6_C1_PROBE(path) G6LC_CVA6_C1(path)
+#endif
 #else
 #define G6LC_CORE_ROOT(c) (top->rootp)
 #if defined(G6LC_CVA6_GEN_ACC)
@@ -149,6 +156,8 @@ static inline auto g6lc_tb_core_pi(Vg6lc_testharness* t, int c) {
 // (no __PVT__ split), so the public variant is identical to the regular one.
 #define G6LC_CVA6_C0_PUB(path) G6LC_CVA6_C0(path)
 #define G6LC_CVA6_C1_PUB(path) G6LC_CVA6_C1(path)
+#define G6LC_CVA6_C0_PROBE(path) G6LC_CVA6_C0(path)
+#define G6LC_CVA6_C1_PROBE(path) G6LC_CVA6_C1(path)
 #endif
 #endif
 // SMT hierarchy flavor: NrHarts>1 builds the banked CSR/RF wrappers and the
@@ -161,14 +170,24 @@ static inline auto g6lc_tb_core_pi(Vg6lc_testharness* t, int c) {
 // i_smt_thread_select reads in G6LC_TB_H1: a bare G6LC_TB_CSR(core,1,·)
 // silently aliases hart-0 state when non-banked.
 #if defined(G6LC_TB_BANKED)
-#  define G6LC_TB_CSR(core, h, sig) \
-     core(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__##h##__KET____DOT__i_csr__DOT__##sig)
+#  if defined(G6LC_TB_PUBLIC_PROBES)
+#    define G6LC_TB_CSR(core, h, sig) \
+       G6LC_CVA6_C0_PUB(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__##h##__KET____DOT__i_csr__DOT__##sig)
+#  else
+#    define G6LC_TB_CSR(core, h, sig) \
+       core(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__##h##__KET____DOT__i_csr__DOT__##sig)
+#  endif
 #  define G6LC_TB_RF(core, h) \
      core(issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_g6lc_regfile__DOT__gen_banked__DOT__gen_hart_bank__BRA__##h##__KET____DOT__i_rf_bank__DOT__mem)
 #  define G6LC_TB_H1(expr) (expr)
 #else
-#  define G6LC_TB_CSR(core, h, sig) \
-     core(csr_regfile_i__DOT__gen_single__DOT__i_csr__DOT__##sig)
+#  if defined(G6LC_TB_PUBLIC_PROBES)
+#    define G6LC_TB_CSR(core, h, sig) \
+       G6LC_CVA6_C0_PUB(csr_regfile_i__DOT__gen_single__DOT__i_csr__DOT__##sig)
+#  else
+#    define G6LC_TB_CSR(core, h, sig) \
+       core(csr_regfile_i__DOT__gen_single__DOT__i_csr__DOT__##sig)
+#  endif
 #  define G6LC_TB_RF(core, h) \
      core(issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_g6lc_regfile__DOT__gen_single_bank__DOT__i_rf__DOT__mem)
 #  define G6LC_TB_H1(expr) 0u
@@ -692,6 +711,15 @@ done_processing:
     }
   }
 
+  // G6LC_SIM_THREADS=N sizes the default VerilatedContext worker pool before
+  // the first model is added. Without it m_threads defaults to
+  // std::thread::hardware_concurrency() (e.g. 12), oversubscribing a
+  // --threads 2 MTask partition with ~10 idle spinners (~25% of host cycles).
+  if (const char *st = std::getenv("G6LC_SIM_THREADS")) {
+    unsigned sim_threads = (unsigned)strtoul(st, nullptr, 10);
+    if (sim_threads) Verilated::defaultContextp()->threads(sim_threads);
+  }
+
   jtag = new remote_bitbang_t(rbb_port);
   dtm = new preload_aware_dtm_t(htif_argc, htif_argv);
   signal(SIGTERM, handle_sigterm);
@@ -1112,7 +1140,7 @@ done_processing:
       if (main_time >= 1450 && main_time <= 1560) {
         static uint64_t rob_evermask = 0;  // tids ever seen valid in the ROB
         auto *rc = G6LC_CORE_ROOT(0);
-        const auto &robq = rc->G6LC_CVA6_C0(
+        const auto &robq = rc->G6LC_CVA6_C0_PROBE(
             issue_stage_i__DOT__gen_full_ooo__DOT__i_ooo_dispatch__DOT__i_rob__DOT__rob_q);
         // free_hit is a generate-flattened packed array: in partitioned models
         // Verilator emits it as per-bit __BRA__ members, not an indexable
@@ -1120,19 +1148,19 @@ done_processing:
         // predicate instead: free_hit[r][s] = retire_ack[r] && rob_q[s].valid
         // && (rob_q[s].tid==retire_tid[r]) && !claimed[r], with claimed[0]=0
         // and claimed[1]=free_hit[0][s]. robq/rtid/fire are all readable.
-        unsigned rh = (unsigned)rc->G6LC_CVA6_C0(
+        unsigned rh = (unsigned)rc->G6LC_CVA6_C0_PROBE(
             issue_stage_i__DOT__gen_full_ooo__DOT__i_ooo_dispatch__DOT__i_rob__DOT__head_q);
-        unsigned rt = (unsigned)rc->G6LC_CVA6_C0(
+        unsigned rt = (unsigned)rc->G6LC_CVA6_C0_PROBE(
             issue_stage_i__DOT__gen_full_ooo__DOT__i_ooo_dispatch__DOT__i_rob__DOT__tail_q);
-        unsigned rn = (unsigned)rc->G6LC_CVA6_C0(
+        unsigned rn = (unsigned)rc->G6LC_CVA6_C0_PROBE(
             issue_stage_i__DOT__gen_full_ooo__DOT__i_ooo_dispatch__DOT__i_rob__DOT__count_q);
         unsigned rtid = (unsigned)rc->G6LC_CVA6_C0_PUB(
             issue_stage_i__DOT__gen_full_ooo__DOT__i_ooo_dispatch__DOT____Vcellinp__i_rob__retire_tid_i);
         // retire_ack_i == commit_stage commit_ack_o == `fire` (fires for BOTH
         // normal commits and commit_drop cancels). `commit_ack` is the MASKED
         // net (macro_ack & ~drop) and hides the drop acks — wrong signal here.
-        unsigned fire = (unsigned)rc->G6LC_CVA6_C0(commit_stage_i__DOT__fire);
-        unsigned cdec = (unsigned)rc->G6LC_CVA6_C0(commit_stage_i__DOT__commit_dec);
+        unsigned fire = (unsigned)rc->G6LC_CVA6_C0_PROBE(commit_stage_i__DOT__fire);
+        unsigned cdec = (unsigned)rc->G6LC_CVA6_C0_PROBE(commit_stage_i__DOT__commit_dec);
         unsigned cdrop = (unsigned)rc->G6LC_CVA6_C0(commit_drop_id_commit);
         // cancelled_mask marks squashed tids; a drop-ack of a tid cancelled
         // before OoO dispatch legitimately has no ROB entry.
