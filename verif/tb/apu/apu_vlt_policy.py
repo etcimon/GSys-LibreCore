@@ -4,6 +4,7 @@
 """Shared compiler PGO recipe and bounded RTL-unroll policy."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -12,10 +13,67 @@ PGO_INPUTS = ('apu_vlt_policy.py', 'apu_verilator_pgo.py',
 UNROLL_COUNT = 256
 UNROLL_STMTS = 131072
 
+# Runtime-codegen options forwarded by Verilator to the generated makefile /
+# C++ compile.  These are plain Verilator options, so they apply to any
+# Verilator (stock or g6lc fork).  -march=native adapts to the build host and
+# -DVL_SIMD_PREFER_512 only widens the SIMD tier when __AVX512F__ is defined,
+# so the pair is safe on non-AVX-512 hosts.  Set APU_VLT_NO_OPT=1 to opt out.
+CXX_FLAGS = '-march=native -DVL_SIMD_PREFER_512'
+OPT_MAKEFLAGS = 'OPT_FAST=-O3 OPT_SLOW=-O2 OPT_GLOBAL=-O2'
+
+# hyp8-style fork passes (clock-skip-sink + opt-in DFG peepholes).  Only emitted
+# when the selected verilator_bin actually carries them; mirrors the hyp8
+# harness's vlt_supports_flag() capability gate.
+FORK_FLAGS = ('-fclock-skip-sink', '-fdfg-peephole',
+              '-fdfg-peephole-pack-byte-plane', '-fdfg-peephole-pack-predicates',
+              '-fdfg-peephole-pack-bitwise-mux', '-fdfg-peephole-guard-empty-mask',
+              '-fdfg-peephole-fuse-transpose-reductions')
+_FORK_MARKERS = (b'clock-skip-sink', b'pack-bitwise-mux', b'fuse-transpose')
+
 
 def unroll_flags():
     return ['--unroll-count', str(UNROLL_COUNT),
             '--unroll-stmts', str(UNROLL_STMTS), '--stats']
+
+
+def _verilator_bin():
+    cands = []
+    root = os.environ.get('VERILATOR_ROOT') or ''
+    if root:
+        cands.append(os.path.join(root, 'bin', 'verilator_bin'))
+    for var in ('APU_REAL_VERILATOR', 'VERILATOR'):
+        v = os.environ.get(var) or ''
+        if not v:
+            continue
+        if os.path.basename(v) == 'verilator_bin':
+            cands.append(v)
+        cands.append(os.path.join(os.path.dirname(v), 'verilator_bin'))
+    for c in cands:
+        if c and os.path.isfile(c):
+            return c
+    return ''
+
+
+def _fork_supports():
+    b = _verilator_bin()
+    if not b:
+        return False
+    try:
+        with open(b, 'rb') as fh:
+            blob = fh.read()
+    except OSError:
+        return False
+    return all(m in blob for m in _FORK_MARKERS)
+
+
+def perf_flags():
+    """Codegen/runtime opts appended after the unroll policy."""
+    if os.environ.get('APU_VLT_NO_OPT') == '1':
+        return []
+    flags = ['-CFLAGS', CXX_FLAGS, '-MAKEFLAGS', OPT_MAKEFLAGS]
+    if _fork_supports():
+        flags += list(FORK_FLAGS)
+    return flags
 
 
 def recipe_id():
@@ -46,7 +104,7 @@ def validate_receipt(home):
 
 if __name__ == '__main__':
     if len(sys.argv) == 2 and sys.argv[1] == '--flags':
-        print('\n'.join(unroll_flags()))
+        print('\n'.join(unroll_flags() + perf_flags()))
     elif len(sys.argv) == 3 and sys.argv[1] == '--check':
         sys.exit(0 if validate_receipt(sys.argv[2]) else 1)
     elif len(sys.argv) == 2 and sys.argv[1] == '--recipe':
