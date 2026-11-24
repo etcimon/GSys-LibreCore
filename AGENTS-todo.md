@@ -1088,6 +1088,38 @@ remain release requirements; intermediate raster gates do not narrow the product
     imageView-format ≠ image-format views are in the bounded profile — the
     existing framebuffer check uses the *image* fmt (`ie['aux']>>32&255`),
     so mirror that unless a view-fmt path is admitted.
+  - **`VkPipelineRenderingCreateInfo` decode VERIFIED empirically
+    (2026-11-24):** encoded a `vkCreateGraphicsPipelines` packet with
+    `pNext=[VkPipelineRenderingCreateInfo{viewMask,colorAttachmentCount=2,
+    pColorAttachmentFormats=[37,44],depthAttachmentFormat=126,
+    stencilAttachmentFormat=1000061000}]` + `renderPass=0` and ran
+    `Sim.run(words,want_trace=True)`. `rec['chain']=[(1000044002,…)]` (the
+    struct's sType) and the members surface in the capture `fields` dict
+    under bare names: `viewMask`(U32), `colorAttachmentCount`(U32),
+    `pColorAttachmentFormats`(**BLOB** — payload words are the VkFormat
+    array, same `words[pos+2:pos+2+value]` idiom as the existing `blobs`
+    dict), `depthAttachmentFormat`/`stencilAttachmentFormat`(U32). Main
+    `sType` stays a single STYPE op (chain bodies skip sType), so no field
+    collision. `VkPipelineRenderingCreateInfo` is registered
+    (`VkGraphicsPipelineCreateInfo.p_next` also lists
+    `VkRenderingAttachmentLocationInfo`/`VkRenderingInputAttachmentIndexInfo`
+    for the two auxiliary commands).
+  - **RenderPass-synthesis design (preferred over a parallel abstraction):**
+    `render_pass` is consumed pervasively — `validate_state`→
+    `subpass_colors(subpass)` (attachment count drives blend/viewport),
+    `validate_interfaces`, and `draws._draw`→`snapshot.render_pass
+    .compatible(pass_state.render_pass_state)`. `compatible()` compares only
+    `attachments[i][:2]` = `(format, samples)`; the bounded profile is
+    single-sample (`rasterizationSamples=1`). So synthesize a `RenderPass`
+    on BOTH sides: pipeline side `attachments[i][0]=colorAttachmentFormats[i]`
+    (VkFormat, direct from the struct), command side `attachments[i][0]=
+    d2vk[imageView-image device fmt]` (the resolved VkFormat decision
+    above), `samples=1` both sides, single synthetic subpass
+    `colors=((0,L),(1,L),…)`. `compatible()` then does exactly the
+    pipeline-format vs actual-format check Vulkan requires; loadOp/storeOp/
+    clearValue ride the BeginRendering `pay` separately (sub-problem d), not
+    the RenderPass tuple. `GraphicsPipeline.render_pass` may need widening
+    to Optional or a rendering-state carrier — decide at implementation.
 - [ ] Complete shader/memory/sync → raster/ROP → VM/cache/matrix/RT/mesh/scheduling engines
   and configuration-safe throughput, using the full feature matrix in the plan.
 - [ ] Clear generic Venus/protocol stock-package blockers, virtio-pci/external-sync/WSI,
