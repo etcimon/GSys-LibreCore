@@ -11,6 +11,7 @@ from vn_query_replay import replay as replay_query
 from vn_conditional_replay import replay as replay_conditional
 from vn_compute_replay import ComputeReplay
 from vn_render_pass_replay import replay as replay_render_pass
+from vn_dynamic_rendering import replay as replay_dynrender
 from vn_graphics_dynamic import Recording
 from vn_graphics_draws import GraphicsDraws
 from vn_graphics_draw_replay import operation as draw_operation
@@ -151,7 +152,9 @@ class TransferReplay:
                                             'vkCmdEndRenderPass2',
                                             'vkCmdClearAttachments',
                                             'vkCmdNextSubpass',
-                                            'vkCmdNextSubpass2'):
+                                            'vkCmdNextSubpass2',
+                                            'vkCmdBeginRendering',
+                                            'vkCmdEndRendering'):
                     continue
                 if shader is not None and name in shader.NAMES:
                     shader.replay(name, record)
@@ -170,6 +173,9 @@ class TransferReplay:
                               'vkCmdNextSubpass2'):
                     replay_render_pass(engine, context_id, name, record,
                                        remember, append, guards)
+                elif name in ('vkCmdBeginRendering', 'vkCmdEndRendering'):
+                    replay_dynrender(engine, context_id, name, record,
+                                     remember, append, guards)
                 elif name == 'vkCmdPipelineBarrier':
                     replay_image_barrier(images, record, compute=compute, device=pool['parent'])
                 elif name == 'vkCmdPipelineBarrier2':

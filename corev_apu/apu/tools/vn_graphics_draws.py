@@ -8,6 +8,7 @@ from vn_graphics_dynamic import DynamicCommand, Recording, validate as dynamic_v
 from vn_graphics_dynamic import validate_recording, _BOOL_DYNAMIC, _VECTOR_DYNAMIC
 from vn_native_rendering import framebuffer_operand
 from vn_render_pass_commands import BeginPass, EndPass, NextPass
+from vn_dynamic_rendering import BeginRendering, EndRendering
 from vn_vertex_operands import BufferBindings, BufferSource, operand as buffer_span
 
 
@@ -147,6 +148,14 @@ class GraphicsDraws:
         if name in ('vkCmdNextSubpass', 'vkCmdNextSubpass2'):
             self._next(record)
             return True
+        if name == 'vkCmdBeginRendering':
+            self._begin_dynamic(record)
+            return True
+        if name == 'vkCmdEndRendering':
+            self._end_dynamic(record)
+            return True
+        if name == 'vkCmdSetRenderingAttachmentLocations':
+            return True
         if name in self.DRAWS:
             self._draw(name, record)
             return True
@@ -220,6 +229,22 @@ class GraphicsDraws:
         snapshot = record.get('native_render_pass')
         if not isinstance(snapshot, EndPass) or snapshot.begin is not self.pass_state:
             raise ValueError('graphics draw render-pass end does not match begin')
+        self.pass_state = None
+        self.subpass = 0
+
+    def _begin_dynamic(self, record):
+        snapshot = record.get('native_dynamic_render')
+        if not isinstance(snapshot, BeginRendering):
+            raise KeyError('graphics draw dynamic-rendering begin snapshot is unavailable')
+        if self.pass_state is not None:
+            raise ValueError('graphics draw render pass is nested')
+        self.pass_state = snapshot
+        self.subpass = 0
+
+    def _end_dynamic(self, record):
+        snapshot = record.get('native_dynamic_render')
+        if not isinstance(snapshot, EndRendering) or snapshot.begin is not self.pass_state:
+            raise ValueError('graphics draw dynamic-rendering end does not match begin')
         self.pass_state = None
         self.subpass = 0
 
@@ -352,7 +377,11 @@ class GraphicsDraws:
             values = tuple(record['imm'][:5])
         else:
             values = tuple(record['imm'][:4])
-        framebuffer = framebuffer_operand(self.engine, self.context_id, self.pass_state.framebuffer)
+        if isinstance(self.pass_state, BeginRendering):
+            framebuffer = self.pass_state.operand
+        else:
+            framebuffer = framebuffer_operand(self.engine, self.context_id,
+                                              self.pass_state.framebuffer)
         references.extend(framebuffer.references)
         guards.append(framebuffer.validate)
         _, _, cb = self.front.resolve(self.recording.command_buffer, self.kinds['VkCommandBuffer'])

@@ -26,6 +26,7 @@ from vn_graphics_pipelines import capture as capture_graphics, attach as attach_
 from vn_vertex_operands import capture as capture_vertex, attach as attach_vertex
 from vn_graphics_dynamic import capture as capture_dynamic, attach as attach_dynamic
 from vn_render_pass_commands import capture as capture_pass, attach as attach_pass
+from vn_dynamic_rendering import capture as capture_dynrender, attach as attach_dynrender
 
 
 class StreamFault(ValueError):
@@ -210,6 +211,7 @@ class LinearExecution:
         vertex = capture_vertex(self, current, name, record)
         dynamic = capture_dynamic(self, current, name, record)
         render_pass = capture_pass(self, current, name, command, record)
+        dynrender = capture_dynrender(self, current, name, command, record)
         if self.submissions.enabled and name == 'vkCmdPipelineBarrier':
             capture_barrier(self, current.frontend, record)
         elif self.submissions.enabled and name in ('vkCmdPipelineBarrier2',
@@ -263,6 +265,7 @@ class LinearExecution:
                 attach_vertex(out, vertex)
                 attach_dynamic(out, dynamic)
                 attach_pass(out, render_pass)
+                attach_dynrender(out, dynrender)
                 self.submissions.after_command(current, name, record, out, creation)
             if out['fault']:
                 raise StreamFault('front execution fault')
