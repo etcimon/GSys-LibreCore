@@ -1120,6 +1120,21 @@ remain release requirements; intermediate raster gates do not narrow the product
     clearValue ride the BeginRendering `pay` separately (sub-problem d), not
     the RenderPass tuple. `GraphicsPipeline.render_pass` may need widening
     to Optional or a rendering-state carrier — decide at implementation.
+  - **Sub-problem (a) LANDED (`3b39c8241`):** `vn_graphics_pipelines.capture()`
+    now admits `renderPass=0` + sole `VkPipelineRenderingCreateInfo` pNext
+    (sType 1000044002). Empirically confirmed the chain members surface in
+    `fields` under bare names with **no renderPass/subpass collision** (each
+    n=1), and `decoded['chain']` exposes the sType → detection is
+    `{st for st,_ in decoded['chain']} == {1000044002}` + `renderPass==[0]`.
+    Synthesizes `RenderPass(owner,device,attachments,color_refs,(color_refs,),
+    (),depths)` with `attachments[i][0]=VkFormat` (colorAttachmentFormats BLOB
+    payload, captured via the existing `blobs` mechanism), samples=1,
+    optional depth attachment from depth/stencilAttachmentFormat. Verified:
+    pipeline operand resolves, `attachments=((37,..),(44,..),(126,..depth))`,
+    `depths=((2,3),)`, `subpass_count=1`; all 10 existing pipeline tests PASS.
+    Remaining: (b) `vkCmdBeginRendering`/`EndRendering` capture + command-side
+    RenderPass synthesis (imageView fmt via `d2vk`), (c) draw routing,
+    (d) loadOp/storeOp/clearValue from BeginRendering `pay`, (e) oracle + vectors.
 - [ ] Complete shader/memory/sync → raster/ROP → VM/cache/matrix/RT/mesh/scheduling engines
   and configuration-safe throughput, using the full feature matrix in the plan.
 - [ ] Clear generic Venus/protocol stock-package blockers, virtio-pci/external-sync/WSI,
