@@ -1248,8 +1248,15 @@ remain release requirements; intermediate raster gates do not narrow the product
     synchronization2 submit variant; `vkQueueSubmit` IS in `NAMES` but the `*2`
     form is not) and `vkResetQueryPool` (type 171, act EVENT — host query-pool
     reset; `vkCmdResetQueryPool` command variant and `vkGetQueryPoolResults`
-    ARE handled). If confirmed unhandled they are the submit/query-side `*2`
-    gap complementing the closed `vkCmd*2` command-buffer frontier.
+    ARE handled). **RESOLVED 2026-11-24 — `vkResetQueryPool` was a REAL bug,
+    now fixed `c590f4202`:** as act=EVENT it fell into the event-state else-arm
+    and cleared bit 0 of the *query pool's* ObjTab state (silent no-op on
+    `qslots` + state corruption). Added a dedicated arm clearing
+    `qslots[first:first+count]` with `qopen` discard, mirroring the
+    `vkCmdResetQueryPool` replay path; regression test added. **`vkQueueSubmit2`
+    remains the open candidate** — needs the `VkSubmitInfo2` decode +
+    `NativeSubmissions` routing (semaphore/fence/timeline semantics), a
+    dedicated session.
 - [ ] Complete shader/memory/sync → raster/ROP → VM/cache/matrix/RT/mesh/scheduling engines
   and configuration-safe throughput, using the full feature matrix in the plan.
 - [ ] Clear generic Venus/protocol stock-package blockers, virtio-pci/external-sync/WSI,
