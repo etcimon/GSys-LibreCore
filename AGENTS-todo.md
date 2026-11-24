@@ -1132,9 +1132,28 @@ remain release requirements; intermediate raster gates do not narrow the product
     optional depth attachment from depth/stencilAttachmentFormat. Verified:
     pipeline operand resolves, `attachments=((37,..),(44,..),(126,..depth))`,
     `depths=((2,3),)`, `subpass_count=1`; all 10 existing pipeline tests PASS.
-    Remaining: (b) `vkCmdBeginRendering`/`EndRendering` capture + command-side
-    RenderPass synthesis (imageView fmt via `d2vk`), (c) draw routing,
-    (d) loadOp/storeOp/clearValue from BeginRendering `pay`, (e) oracle + vectors.
+    **Sub-problem (b)+(c) LANDED (`d9527e7f7`):** new `vn_dynamic_rendering.py`
+    decodes `VkRenderingInfo` via the `Sim` trace (field-name→word-position,
+    same idiom as `_packet`/`_clear_packet`), resolves each
+    `VkRenderingAttachmentInfo.imageView`→image→memory into live `Attachment`s,
+    recovers VkFormat via `d2vk[device fmt]` (the injective inverse — each
+    admitted format earns a unique device id), and synthesizes
+    `RenderPass`/`Framebuffer`/`FramebufferOperand` (`dynamic_framebuffer_operand`
+    mirrors `framebuffer_operand` minus the VkFramebuffer handle). Wired:
+    `vn_native_execution` capture/attach → `record['native_dynamic_render']`;
+    `vn_graphics_draws` `_begin_dynamic`/`_end_dynamic`/`_draw` (uses the stored
+    operand); `vn_transfer_replay` routes Begin/End to `replay_dynrender` for
+    clears. **Verified end-to-end:** dynamic `VkPipelineRenderingCreateInfo`
+    pipeline + `vkCmdBeginRendering` + `vkCmdDraw` + `vkCmdEndRendering`
+    reproduces the fragcoord oracle texels AND the loadOp=CLEAR fill — color
+    clears emit `pattern` Transfers over the render area. Depth slot
+    synthesizes (`depths=((didx,3),)`, need_usage=32). `test_vn_dynamic_rendering.py`
+    (147 tests incl. inherited draw suite) all PASS; no static-path regression.
+    Remaining: (d) depth/stencil clears (`img_dclear_texel` path), storeOp=
+    DONT_CARE, per-attachment `imageLayout` transitions (currently ignored),
+    `vkCmdSetRenderingAttachmentLocations` non-identity permutation +
+    `vkCmdSetRenderingInputAttachmentIndices`, (e) extend oracle/vectors to
+    MRT/depth-draw/input-attachment cases.
 - [ ] Complete shader/memory/sync → raster/ROP → VM/cache/matrix/RT/mesh/scheduling engines
   and configuration-safe throughput, using the full feature matrix in the plan.
 - [ ] Clear generic Venus/protocol stock-package blockers, virtio-pci/external-sync/WSI,
