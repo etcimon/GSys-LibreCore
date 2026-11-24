@@ -1179,6 +1179,11 @@ remain release requirements; intermediate raster gates do not narrow the product
     fragment-shader model has no `SubpassInput`/`InputAttachmentIndex`/
     `DimSubpassData` path (`inputAttachmentCount` is always 0), so
     `vkCmdSetRenderingInputAttachmentIndices` has nothing to permute.
+    **HANDLED as a recognised no-op (commit `926fca46a`):** it was admitted
+    at decode but previously fell through `GraphicsDraws._state` to
+    `vn_transfer_replay`'s `unsupported replay command` fault; now returns
+    `True` (handled, no state change) like `SetRenderingAttachmentLocations`,
+    with a regression test in `test_vn_dynamic_rendering`.
     **`vkCmdSetRenderingAttachmentLocations` mapped, DEFERRED (multi-part
     feature, not a command-side tweak):** SPEC RESOLVED via vk.xml — the
     wire takes `VkRenderingAttachmentLocationInfo{colorAttachmentCount,
