@@ -1149,11 +1149,20 @@ remain release requirements; intermediate raster gates do not narrow the product
     clears emit `pattern` Transfers over the render area. Depth slot
     synthesizes (`depths=((didx,3),)`, need_usage=32). `test_vn_dynamic_rendering.py`
     (147 tests incl. inherited draw suite) all PASS; no static-path regression.
-    Remaining: (d) depth/stencil clears (`img_dclear_texel` path), storeOp=
-    DONT_CARE, per-attachment `imageLayout` transitions (currently ignored),
-    `vkCmdSetRenderingAttachmentLocations` non-identity permutation +
-    `vkCmdSetRenderingInputAttachmentIndices`, (e) extend oracle/vectors to
-    MRT/depth-draw/input-attachment cases.
+    **Sub-problem (d) partial — clears COMPLETE (`4a4d5258b`):** colour AND
+    depth-stencil `loadOp=CLEAR` now fill via the shared `img_clear_texel`
+    packed path — the wire `VkClearValue` union has no `depthStencil` arm, so
+    the depth clear rides `color.uint32[0]` as float32 bits (fmt12 verbatim,
+    fmt14 → unorm24) and `uint32[1][7:0]` as the stencil byte; the depth-slot
+    skip in `_begin_rendering` is removed. Verified D32 clear 0.25 + D24S8
+    packed `{stencil=0xAB, depth_unorm24=0xFFFFFF}` (149 tests). `storeOp` is
+    confirmed **parity-noop**: the static path captures but never consumes it
+    (always stores), so dynamic ignoring it matches. Remaining (d): per-
+    attachment `imageLayout` transitions (static tracks `entry['layout']`
+    through initial/subpass/final; dynamic `imageLayout` is the in-pass layout
+    with no initial/final pair — semantics to pin), `vkCmdSetRenderingAttachment
+    Locations` non-identity permutation + `vkCmdSetRenderingInputAttachment
+    Indices`, (e) extend oracle/vectors to MRT/depth-draw/input-attachment.
 - [ ] Complete shader/memory/sync → raster/ROP → VM/cache/matrix/RT/mesh/scheduling engines
   and configuration-safe throughput, using the full feature matrix in the plan.
 - [ ] Clear generic Venus/protocol stock-package blockers, virtio-pci/external-sync/WSI,
