@@ -204,7 +204,8 @@ def capture(engine, current, name, words, record):
         if not isinstance(active, BeginRendering):
             raise ValueError('dynamic rendering end has no active begin')
         return EndRendering(*identity, active)
-    if name == 'vkCmdSetRenderingAttachmentLocations':
+    if name in ('vkCmdSetRenderingAttachmentLocations',
+                'vkCmdSetRenderingInputAttachmentIndices'):
         return None
     if name != 'vkCmdBeginRendering':
         return None

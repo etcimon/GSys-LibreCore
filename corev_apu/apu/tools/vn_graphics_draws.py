@@ -154,7 +154,12 @@ class GraphicsDraws:
         if name == 'vkCmdEndRendering':
             self._end_dynamic(record)
             return True
-        if name == 'vkCmdSetRenderingAttachmentLocations':
+        if name in ('vkCmdSetRenderingAttachmentLocations',
+                    'vkCmdSetRenderingInputAttachmentIndices'):
+            # Dynamic-rendering attachment remap / input-attachment index
+            # state: the bounded fragment model has no input-attachment read
+            # path and the attachment-location permutation is deferred, so
+            # both are recognised no-ops (handled, no state change).
             return True
         if name in self.DRAWS:
             self._draw(name, record)
