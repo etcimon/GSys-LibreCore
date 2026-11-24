@@ -1254,9 +1254,22 @@ remain release requirements; intermediate raster gates do not narrow the product
     `qslots` + state corruption). Added a dedicated arm clearing
     `qslots[first:first+count]` with `qopen` discard, mirroring the
     `vkCmdResetQueryPool` replay path; regression test added. **`vkQueueSubmit2`
-    remains the open candidate** — needs the `VkSubmitInfo2` decode +
-    `NativeSubmissions` routing (semaphore/fence/timeline semantics), a
-    dedicated session.
+    remains the open candidate** — scoped 2026-11-24. `NativeSubmissions._submit`
+    (`vn_native_submit.py:154`) parses `VkSubmitInfo` words then runs shared
+    logic (obj resolve → `semaphores.plan`/`timelines.jobs.plan` → fence lease →
+    `replay.enqueue`); **only the parse differs for `*2`** — the submit core is
+    reusable. `VkSubmitInfo2` per element: `sType=SUBMIT_INFO_2`, `pNext`,
+    `flags`, `waitSemaphoreInfoCount`+`pWaitSemaphoreInfos` (each
+    `VkSemaphoreSubmitInfo`={sType,pNext,semaphore u64,value u64,stageMask u32,
+    deviceIndex u32}), `commandBufferInfoCount`+`pCommandBufferInfos` (each
+    `VkCommandBufferSubmitInfo`={sType,pNext,commandBuffer u64,deviceMask u64}),
+    `signalSemaphoreInfoCount`+`pSignalSemaphoreInfos`. Deltas vs `*1`: semaphore
+    value/stageMask/deviceIndex INLINE per-info (not pNext timeline chain +
+    parallel stage array); command buffers carry deviceMask. Bounded scope should
+    reject deviceIndex/deviceMask≠0 (single-device) and nonzero `flags`. Plan:
+    add `'vkQueueSubmit2'` to `NAMES`, dispatch a `_submit2` parsing the `*2`
+    layout into the same intermediates `_submit` produces, share the tail. Needs
+    a dedicated session + submit/semaphore regression run.
 - [ ] Complete shader/memory/sync → raster/ROP → VM/cache/matrix/RT/mesh/scheduling engines
   and configuration-safe throughput, using the full feature matrix in the plan.
 - [ ] Clear generic Venus/protocol stock-package blockers, virtio-pci/external-sync/WSI,
