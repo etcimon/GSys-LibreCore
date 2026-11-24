@@ -201,7 +201,8 @@ class DynamicDrawTests(draw_fixture.DrawReplayTests):
                 layout=self.g.PL, renderPass=0, subpass=0,
                 basePipelineHandle=0, basePipelineIndex=-1)])
 
-    def begin_rendering(self, load=1, clear=(0, 0, 0, 0x3F800000), view=None):
+    def begin_rendering(self, load=1, clear=(0, 0, 0, 0x3F800000), view=None,
+                        depth=None, stencil=None):
         s = self.w.structure
         ca = s('VkRenderingAttachmentInfo', imageView=view or self.g.r.VIEW,
             imageLayout=2, resolveMode=0, resolveImageView=0,
@@ -213,8 +214,40 @@ class DynamicDrawTests(draw_fixture.DrawReplayTests):
                 renderArea=s('VkRect2D', offset=s('VkOffset2D', x=0, y=0),
                     extent=s('VkExtent2D', width=8, height=4)),
                 layerCount=1, viewMask=0, colorAttachmentCount=1,
-                pColorAttachments=[ca], pDepthAttachment=None,
-                pStencilAttachment=None))
+                pColorAttachments=[ca], pDepthAttachment=depth,
+                pStencilAttachment=stencil))
+
+    def dyn_depth_view(self, fmt=126):
+        s = self.w.structure
+        self.f.command('vkCreateImage', device=self.w.DEVICE, pImage=self.DIMAGE,
+            pCreateInfo=s('VkImageCreateInfo', pNext=[], flags=0, imageType=1,
+                format=fmt,
+                extent=s('VkExtent3D', width=8, height=4, depth=1),
+                mipLevels=1, arrayLayers=1, samples=1, tiling=0, usage=0x23,
+                sharingMode=0, queueFamilyIndexCount=0, pQueueFamilyIndices=[],
+                initialLayout=0))
+        self.f.command('vkBindImageMemory', device=self.w.DEVICE,
+            image=self.DIMAGE, memory=self.w.MEMORY, memoryOffset=self.DEPTH_OFF)
+        self.f.command('vkCreateImageView', device=self.w.DEVICE, pView=self.DVIEW,
+            pCreateInfo=s('VkImageViewCreateInfo', pNext=[], flags=0,
+                image=self.DIMAGE, viewType=1, format=fmt,
+                components=s('VkComponentMapping', r=0, g=0, b=0, a=0),
+                subresourceRange=s('VkImageSubresourceRange', aspectMask=2,
+                    baseMipLevel=0, levelCount=1, baseArrayLayer=0,
+                    layerCount=1)))
+
+    def depth_attachment(self, view=None, load=1, depth=1.0, stencil=0,
+                         layout=3):
+        # wire VkClearValue union has no depthStencil arm: the depth clear
+        # rides colour.uint32[0] as float32 bits; uint32[1][7:0] is the
+        # stencil byte for packed D24S8 (device fmt 14).
+        s = self.w.structure
+        dbits = struct.unpack('<I', struct.pack('<f', depth))[0]
+        return s('VkRenderingAttachmentInfo', imageView=view or self.DVIEW,
+            imageLayout=layout, resolveMode=0, resolveImageView=0,
+            resolveImageLayout=0, loadOp=load, storeOp=0,
+            clearValue=s('VkClearValue', color=s('VkClearColorValue',
+                uint32=[dbits, stencil, 0, 0])))
 
     def dyn_prepared(self, **kw):
         self.dyn_pipeline()
@@ -254,6 +287,40 @@ class DynamicDrawTests(draw_fixture.DrawReplayTests):
         self.assertEqual(job.state, 'done')
         for x, y in ((0, 0), (1, 1), (2, 0)):
             self.assertEqual(self.read_texel(x, y), self.fc_texel(x, y))
+
+    def test_dynamic_rendering_depth_clear(self):
+        # D32_SFLOAT (VkFormat 126 -> device fmt 12): loadOp=CLEAR fills the
+        # depth attachment with the float32 clearValue over the render area,
+        # independent of any draw.
+        self.dyn_depth_view(fmt=126)
+        self.begin_rendering(load=0,
+                             depth=self.depth_attachment(depth=0.25))
+        self.f.command('vkCmdEndRendering', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        for x, y in ((0, 0), (3, 2), (7, 3)):
+            self.assertAlmostEqual(self.read_depth(x, y), 0.25)
+
+    def test_dynamic_rendering_ds_clear_packs_stencil(self):
+        # D24_UNORM_S8_UINT (VkFormat 129 -> device fmt 14): the packed word
+        # is {stencil[31:24], depth_unorm24[23:0]} — img_clear_texel reads
+        # uint32[0] as float32->unorm24 depth and uint32[1][7:0] as stencil.
+        self.dyn_depth_view(fmt=129)
+        self.begin_rendering(load=0,
+                             depth=self.depth_attachment(depth=1.0,
+                                                          stencil=0xAB))
+        self.f.command('vkCmdEndRendering', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        word = self.read_ds(0, 0)
+        self.assertEqual(word >> 24 & 0xFF, 0xAB)
+        self.assertEqual(word & 0xFFFFFF, 0xFFFFFF)  # depth 1.0 -> unorm24 max
 
 
 if __name__ == '__main__':

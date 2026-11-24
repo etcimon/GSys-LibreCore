@@ -330,26 +330,21 @@ def attach(out, snapshot):
         out['record']['native_dynamic_render'] = snapshot
 
 
-def _depth_index(state):
-    depths = state.render_pass_state.depths or (None,)
-    return depths[0][0] if depths and depths[0] is not None else None
-
-
 def _begin_rendering(engine, context_id, state, remember, append, guards):
-    # loadOp=CLEAR colour attachments are filled with their clearValue over
-    # the render area before the first draw; depth-stencil clears ride the
-    # packed-depth path and are handled with the depth follow-up.
+    # loadOp=CLEAR attachments are filled with their clearValue over the
+    # render area before the first draw.  Colour and depth-stencil slots
+    # share the packed-clear path: img_clear_texel consumes the wire
+    # colour.uint32 union arm, where uint32[0] is the float32 depth bits
+    # (fmt12 verbatim, fmt14 -> unorm24) and uint32[1][7:0] the stencil.
     from vn_render_pass_replay import _emit
     result = state.operand
     for ref, kind in result.references:
         remember(ref, kind)
     guards.append(result.validate)
-    depth = _depth_index(state)
     x, y, width, height = state.area
-    for index, (attachment, ops) in enumerate(
-            zip(result.attachments, state.attachment_ops)):
+    for attachment, ops in zip(result.attachments, state.attachment_ops):
         load_op = ops[0] if ops else 0
-        if load_op != 1 or index == depth:
+        if load_op != 1:
             continue
         for op in _emit(engine, attachment, (x, y, width, height), ops[2]):
             append(op)
