@@ -27330,9 +27330,31 @@ Receipt: `build-platform/workspace/build/storamic-review-30/FINAL-SV-30.md`.
   `g_lane__BRA__`), cmdexec/dmaq/doneq, vgpages, tc_sram. `->assertOn()`/
   `VL_ONEHOT` are in KNOWN_MARKERS so has_marker() gates assert-guard-hoist.
   `--no-assert` deliberately not selected (benches need --assert); flags live
-  in apu_vlt_policy.py, this file is the overlay surface only. Inert until the
-  APU build adopts the g6lc_hyp8_tuning.py prepare() overlay flow; Unsupported
-  Layout is a graceful skip, not a wrong result.
+  in apu_vlt_policy.py, this file is the overlay surface only.
+- [x] Wired `g6lc_hyp8_tuning.py prepare()` into the sim-PGO build path
+  (commit `38de36f30`): `apu_sim_pgo.py provision()` runs it between
+  `verilate_only` (`--cc --exe --main`) and the instrumented `make`, appending
+  `hyp8-packed-tiled/rules.mk` so both the generate and profile-use makes
+  compile the lowered DepSet TUs. Opt-in via `APU_SIM_TUNING`
+  (`apu_vgsys_perf` resolves to the .lua); every prepare failure degrades to
+  the stock makefile, and plugin+driver sha256 ride the request cache key
+  (`apu_source_manifest.py` records `APU_SIM_TUNING`). Local rsync resolved:
+  the proxy runs under WSL (`.cache/apu-perf/th.sh` -> `cd /mnt/e/cva6`),
+  which has rsync 3.2.7 + python3.12 + ssh; remote `/opt/testharness/repo`
+  synced.
+- [x] **Measured the overlay on the real `tb_g6lc_apu_vgsys` Mdir** (131 DepSet
+  TUs, `/tmp/tunetest`): ran every `g6lc_pack_*` `lower_*` on every TU with the
+  marker gate removed -> **all nine packed/SIMD passes report 0 hits**. They
+  parse hyp8's OoO codegen idioms (u_recover, ROB `__Vfunc_ooo_age_older__`,
+  LSQ commit columns) that CVA6+Venus does not emit, so the speculative
+  signal-name markers could never work. Rewrote `apu_vgsys_perf.lua` overlay
+  rules to **assert-guard-hoist only** — the one transform that fires
+  (**948 hits / 48 TUs**). `prepare()` now succeeds (was UnsupportedLayout);
+  verified a rewritten TU compiles to a clean .o and the diff is the intended
+  assertOn()-before-VL_ONEHOT hoist (bit-exact, skips the match-vector eval
+  under noassert/cold PGO). The .lua flag selections (clock-skip + 5 DFG
+  peepholes) are intentionally redundant with `perf_flags()`, which already
+  reaches both PGO and non-PGO builds via `APU_VERILATOR_FLAGS`.
 - [ ] Follow-ups: (a) sentinel observer needs a fork build newer than the remote
   `-clkskip` toolchain (`--dumpi-sentinel` absent there); the repo
   `tools/verilator@53c5c0be6` has it. (b) To activate the fork flags in the
@@ -27340,7 +27362,8 @@ Receipt: `build-platform/workspace/build/storamic-review-30/FINAL-SV-30.md`.
   without the passes), rebuild `tools/verilator` into that home — the
   capability gate then auto-enables them. (c) The `vgsys-full2` 297-job rerun
   is still on the pre-opt binary; a rerun on an opt build would roughly halve
-  wall time. (d) Validate `apu_vgsys_perf.lua` markers against a real vgsys
-  Mdir (`g6lc_hyp8_tuning.py prepare` manifest.json hit counts); adjust any
-  0-hit markers — a single 0-hit op sinks the whole overlay to
-  UnsupportedLayout (graceful, but loses the C++ rewrites).
+  wall time. (d) RESOLVED — markers validated against the real vgsys Mdir;
+  SIMD passes proven inapplicable (0 hits ungated), policy reduced to
+  assert-guard-hoist. (e) An end-to-end `APU_SIM_TUNING=apu_vgsys_perf
+  APU_SIM_PGO=1` provision() run would confirm the tuned image builds + trains;
+  prepare() output and single-TU compile are already verified.
