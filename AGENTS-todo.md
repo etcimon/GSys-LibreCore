@@ -27394,10 +27394,20 @@ Receipt: `build-platform/workspace/build/storamic-review-30/FINAL-SV-30.md`.
   reaches both PGO and non-PGO builds via `APU_VERILATOR_FLAGS`.
 - [ ] Follow-ups: (a) sentinel observer needs a fork build newer than the remote
   `-clkskip` toolchain (`--dumpi-sentinel` absent there); the repo
-  `tools/verilator@53c5c0be6` has it. (b) To activate the fork flags in the
-  default `APU_VERILATOR_HOME` (`apu-verilator-pgo-v1`, currently an older fork
-  without the passes), rebuild `tools/verilator` into that home — the
-  capability gate then auto-enables them. (c) The `vgsys-full2` 297-job rerun
+  `tools/verilator@53c5c0be6` has it. (b) Fork-flag activation — DIAGNOSED
+  2026-11-24: the **remote** apu-leaf path is content-addressed, so
+  `tools/verilator@53c5c0be6` (clean worktree, HEAD `53c5c0be6` = the
+  clock-skip-sink AstLogOr fix, ~24 h newer than every existing
+  `apu-repo-verilator` build) hashes to a NEW identity
+  `6cbbde6ac0921e32afad2987c78734d01453712a57244274a8aeea8e4c1126d7`
+  (`pgo-a75b10e4…`) with no build yet → `APU_AUTO_INSTALL=1` builds it on the
+  next leaf, after which `_fork_supports()` finds the markers and
+  `perf_flags()` emits `FORK_FLAGS`. Verified remote `3f7af3ca…` builds DO
+  carry the fork markers (older fork commit, pre-AstLogOr-fix). The LOCAL
+  `~/.cache/librecore/apu-verilator-pgo-v1` home the note names does not
+  exist on this host — local (non-remote) APU builds would need
+  `bash verif/tb/apu/local-verilator.sh` run once (PGO ~30-60 min); remote
+  leaves need no manual step. (c) The `vgsys-full2` 297-job rerun
   is still on the pre-opt binary; a rerun on an opt build would roughly halve
   wall time. (d) RESOLVED — markers validated against the real vgsys Mdir;
   SIMD passes proven inapplicable (0 hits ungated), policy reduced to
