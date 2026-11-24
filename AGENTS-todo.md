@@ -1265,11 +1265,22 @@ remain release requirements; intermediate raster gates do not narrow the product
     `VkCommandBufferSubmitInfo`={sType,pNext,commandBuffer u64,deviceMask u64}),
     `signalSemaphoreInfoCount`+`pSignalSemaphoreInfos`. Deltas vs `*1`: semaphore
     value/stageMask/deviceIndex INLINE per-info (not pNext timeline chain +
-    parallel stage array); command buffers carry deviceMask. Bounded scope should
-    reject deviceIndex/deviceMask≠0 (single-device) and nonzero `flags`. Plan:
-    add `'vkQueueSubmit2'` to `NAMES`, dispatch a `_submit2` parsing the `*2`
-    layout into the same intermediates `_submit` produces, share the tail. Needs
-    a dedicated session + submit/semaphore regression run.
+    parallel stage array); command buffers carry deviceMask. **Wire confirmed
+    2026-11-24:** `VkSubmitInfo2`/`VkSemaphoreSubmitInfo`/`VkCommandBufferSubmitInfo`
+    ARE in `model.reg.type_table` and `vkQueueSubmit2` is a supported COMMAND
+    type — `w.command`/`w.structure` build it. `WordReader` contract decoded:
+    `position` starts at 2 (skips ctype+flags word), `u64()`=2 u32s,
+    `array(count,limit)` reads a u64 count prefix == count. `vkQueueSubmit` 25w
+    vs `vkQueueSubmit2` 28w dumps captured. **Open unknown:** exact operand
+    serialization of the `*2` sub-structs — whether stageMask/deviceIndex/
+    deviceMask/sType/pNext occupy stream words or are decoder-internal (the
+    `g6lc_apu_vn_tables.md` decode extracts only semaphore+value and
+    commandBuffer). Resolve by diffing a semaphored `*2` packet's words against
+    the operand table before writing `_submit2`. Bounded scope: reject
+    deviceIndex/deviceMask≠0 + nonzero `flags`. Plan: add `'vkQueueSubmit2'` to
+    `NAMES`, dispatch a `_submit2` parsing the `*2` layout into the same
+    intermediates `_submit` produces, share the tail. Needs a dedicated session +
+    submit/semaphore regression run.
 - [ ] Complete shader/memory/sync → raster/ROP → VM/cache/matrix/RT/mesh/scheduling engines
   and configuration-safe throughput, using the full feature matrix in the plan.
 - [ ] Clear generic Venus/protocol stock-package blockers, virtio-pci/external-sync/WSI,
