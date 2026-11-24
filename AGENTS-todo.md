@@ -27273,3 +27273,37 @@ Receipt: `build-platform/workspace/build/storamic-review-30/FINAL-SV-30.md`.
   PASS — oracle change is scoped to count=0 only, no other vector affected.
 - [ ] Full vgsys rerun on the clean-RTL binary in flight
   (`/tmp/vgsys-full2.log`, 297 jobs) to confirm **297/297**.
+
+### APU/Venus vgsys Verilator perf — hyp8-style opts ported (2026-11-24)
+
+- [x] Analyzed `tools/verilator` (`g6lc@53c5c0be6`) + the hyp8 Lua tuning
+  stack (`g6lc_tuning_driver.lua`/`g6lc_tuning_policy.py`/`hyp8-build-harness.sh`):
+  sentinel observer (`--dumpi-sentinel`), opt-in DFG peepholes
+  (`pack-byte-plane`/`pack-predicates`/`pack-bitwise-mux`/`guard-empty-mask`/
+  `fuse-transpose-reductions`, all disabled-by-default at `V3Options.cpp:1945`),
+  `-fclock-skip`/`-fclock-skip-sink`, and the `vlt_supports_flag()` capability
+  gate. Ported the *policy* idea to `verif/tb/apu/apu_vlt_policy.py` (commit
+  `0806586d5`): `perf_flags()` emits universal CXX opts
+  (`-CFLAGS -march=native -DVL_SIMD_PREFER_512`, `-MAKEFLAGS
+  OPT_FAST=-O3 OPT_SLOW=-O2 OPT_GLOBAL=-O2`) unconditionally and the fork flags
+  only when `verilator_bin` carries the markers (`_fork_supports()`).
+  `APU_VLT_NO_OPT=1` opts out. `unroll_flags()`/`recipe_id()`/`validate_receipt()`
+  untouched so the compiler-PGO contract is preserved; `perf_flags()` does not
+  leak into `apu_verilator_pgo.py`/`apu_sim_pgo.py` (they import `unroll_flags`
+  directly). Verified `--flags`: stock 5.008 -> 0 fork flags, g6lc-clkskip ->
+  all 7.
+- [x] Measured `tb_g6lc_apu_vgsys` `ue_gpos_dindcnt_1` on remote EPYC 4244P
+  (AVX-512): stock 5.008 `-Os` baseline **112.8s** -> stock+CXX-only **58.6s**
+  (-48%) -> `verilator-v5.008-g6lc-clkskip` + all hyp8 flags **53.4s** (-53%).
+  Dominant lever is `OPT_FAST=-O3` over the default `-Os`; `-march=native` +
+  `VL_SIMD_PREFER_512` (16-word SIMD tier, gated by `__AVX512F__`) and the fork
+  passes add the rest. All runs `maxulp=0` PASS; also verified
+  `drawindxcnt_1` (52.5s) and `dindcntz_1` count=0 (48.5s).
+- [ ] Follow-ups: (a) sentinel observer needs a fork build newer than the remote
+  `-clkskip` toolchain (`--dumpi-sentinel` absent there); the repo
+  `tools/verilator@53c5c0be6` has it. (b) To activate the fork flags in the
+  default `APU_VERILATOR_HOME` (`apu-verilator-pgo-v1`, currently an older fork
+  without the passes), rebuild `tools/verilator` into that home — the
+  capability gate then auto-enables them. (c) The `vgsys-full2` 297-job rerun
+  is still on the pre-opt binary; a rerun on an opt build would roughly halve
+  wall time.
