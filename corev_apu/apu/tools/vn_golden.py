@@ -5921,6 +5921,22 @@ class FrontModel(ObjectTable, PayloadMemory):
             es = lu[1] if len(lu) > 1 else -1
             if es < 0:
                 out['result'] = VK_ERR_UNKNOWN
+            elif ct == session['T'].get('vkResetQueryPool'):
+                # host query-pool reset — same semantic as the
+                # vkCmdResetQueryPool replay arm in _qry_op_apply:
+                # clear qslots[first:first+count] and drop qopen
+                # membership.  firstQuery->imm[0], queryCount->imm[1]
+                # (U32 args pack in order, mirroring the cmd record).
+                ee = ent_of(es)
+                slots = ee.get('qslots') if ee is not None else None
+                if slots is not None:
+                    qopen = ee.setdefault('qopen', set())
+                    first = rec['imm'][0] & 0xFFFFFFFF
+                    cnt = rec['imm'][1] & 0xFFFFFFFF
+                    if first + cnt <= len(slots):
+                        for i in range(first, first + cnt):
+                            slots[i] = None
+                            qopen.discard(i)
             elif ct == session['T'].get('vkGetEventStatus'):
                 ee = ent_of(es)
                 out['result'] = 3 if (ee['state'] & 1) else 4

@@ -82,6 +82,23 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(job.query_stats[0], {'stamped': 0})
         self.assertEqual(job.query_stats[3], {'reset': 2})
 
+    def test_host_reset_query_pool_clears_slot_range(self):
+        self.create()
+        self.f.begin()
+        self.stamp(0)
+        self.stamp(1)
+        self.stamp(2)
+        self.stamp(3)
+        self.f.end()
+        self.f.enqueue()
+        self.f.drain()
+        self.assertEqual(self.slots(), [0, 0, 0, 0])
+        # host-side reset (act EVENT) must clear only [first, first+count)
+        # and leave the pool's ObjTab state intact — it is NOT an event.
+        self.f.command('vkResetQueryPool', device=self.w.DEVICE,
+            queryPool=self.POOL, firstQuery=1, queryCount=2)
+        self.assertEqual(self.slots(), [0, None, None, 0])
+
     def test_occlusion_stats_flags_and_count_refuse_at_create(self):
         for i, kwargs in enumerate((dict(qtype=1, stats=0x8),
                                     dict(qtype=3),
