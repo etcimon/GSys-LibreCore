@@ -104,7 +104,8 @@ def _fields(engine, words):
 
 
 def capture(engine, current, name, words, record):
-    if name not in ('vkCreateRenderPass', 'vkCreateFramebuffer'):
+    if name not in ('vkCreateRenderPass', 'vkCreateRenderPass2',
+                    'vkCreateFramebuffer'):
         return None
     context = engine.contexts[current.frontend.ctx]
     front, kinds = current.frontend, engine.golden.KIND
@@ -123,7 +124,19 @@ def capture(engine, current, name, words, record):
         return values[0]
 
     device, _ = resolve(one('device'), 'VkDevice')
-    if name == 'vkCreateRenderPass':
+    if name in ('vkCreateRenderPass', 'vkCreateRenderPass2'):
+        # vkCreateRenderPass2 carries the same member names on the *2
+        # structs; its only additions are multiview (subpass viewMask +
+        # correlatedViewMasks) and the input-attachment aspectMask.  The
+        # bounded profile is single-view: every subpass viewMask must be
+        # 0 and no correlated masks may be declared (spec: all-zero
+        # viewMask => multiview disabled => correlatedViewMaskCount 0).
+        # aspectMask is spec-ignored on colour/depth references and input
+        # attachments are refused below, so it needs no bound here.
+        if (any(fields.get('viewMask', ())) or
+                any(fields.get('correlatedViewMaskCount', ())) or
+                any(fields.get('pCorrelatedViewMasks', ()))):
+            raise ValueError('render pass multiview exceeds profile')
         count = one('attachmentCount')
         nsub, ndep = one('subpassCount'), one('dependencyCount')
         if (not 0 < count <= 4 or not 1 <= nsub <= 4 or ndep > 8 or

@@ -63,6 +63,33 @@ class RenderingTests(unittest.TestCase):
                 dependencyCount=0, pDependencies=[]))
         return self.f.entry(handle or self.RP)['native_rendering']
 
+    def render_pass2(self, handle=None, *, fmt=37, load=1, store=0, final=1,
+                     color_layout=2, samples=1, input_count=0, reference=0,
+                     count=1, initial=0, view_mask=0, correlated=0):
+        ref = lambda attachment, layout: self.w.structure(
+            'VkAttachmentReference2', pNext=[], attachment=attachment,
+            layout=layout, aspectMask=0)
+        self.f.command('vkCreateRenderPass2', device=self.w.DEVICE,
+            pRenderPass=handle or self.RP,
+            pCreateInfo=self.w.structure('VkRenderPassCreateInfo2', pNext=[], flags=0,
+                attachmentCount=count, pAttachments=[self.w.structure(
+                    'VkAttachmentDescription2', pNext=[], flags=0, format=fmt,
+                    samples=samples, loadOp=load, storeOp=store, stencilLoadOp=2,
+                    stencilStoreOp=1, initialLayout=initial, finalLayout=final)
+                    for _ in range(count)],
+                subpassCount=1, pSubpasses=[self.w.structure('VkSubpassDescription2',
+                    pNext=[], flags=0, pipelineBindPoint=0, viewMask=view_mask,
+                    inputAttachmentCount=input_count,
+                    pInputAttachments=[ref(0, 1)] * input_count,
+                    colorAttachmentCount=count,
+                    pColorAttachments=[ref(reference if count == 1 else i,
+                                           color_layout) for i in range(count)],
+                    pResolveAttachments=[], pDepthStencilAttachment=None,
+                    preserveAttachmentCount=0, pPreserveAttachments=[])],
+                dependencyCount=0, pDependencies=[],
+                correlatedViewMaskCount=correlated, pCorrelatedViewMasks=[0] * correlated))
+        return self.f.entry(handle or self.RP)['native_rendering']
+
     def framebuffer(self, handle=None, *, width=8, height=4, layers=1, render_pass=None, views=None):
         views = views or [self.VIEW]
         self.f.command('vkCreateFramebuffer', device=self.w.DEVICE, pFramebuffer=handle or self.FB,
@@ -174,6 +201,33 @@ class RenderingTests(unittest.TestCase):
                 case.setUp()
                 with self.assertRaisesRegex(StreamFault, 'profile'):
                     case.render_pass(case.RP2, **fields)
+                self.assertNotIn(case.RP2, case.f.front.idmap)
+
+    def test_render_pass2_builds_compatible_render_pass(self):
+        other = self.render_pass2(self.RP2)
+        original = self.f.entry(self.RP)['native_rendering']
+        self.assertEqual(other.attachments, original.attachments)
+        self.assertTrue(original.compatible(other))
+        self.framebuffer(self.FB2, render_pass=self.RP2)
+        self.assertEqual(self.operand(self.FB2).framebuffer.width, 8)
+
+    def test_render_pass2_multiview_is_refused(self):
+        for fields in (dict(view_mask=3), dict(correlated=1), dict(correlated=2)):
+            with self.subTest(fields=fields):
+                case = RenderingTests()
+                case.setUp()
+                with self.assertRaisesRegex(StreamFault, 'profile'):
+                    case.render_pass2(case.RP2, **fields)
+                self.assertNotIn(case.RP2, case.f.front.idmap)
+
+    def test_render_pass2_unsupported_features_fail_before_allocation(self):
+        for fields in (dict(samples=2), dict(input_count=1), dict(reference=1),
+                       dict(final=0)):
+            with self.subTest(fields=fields):
+                case = RenderingTests()
+                case.setUp()
+                with self.assertRaisesRegex(StreamFault, 'profile'):
+                    case.render_pass2(case.RP2, **fields)
                 self.assertNotIn(case.RP2, case.f.front.idmap)
 
     def test_framebuffer_extent_and_layers_fail_before_allocation(self):
