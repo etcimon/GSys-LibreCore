@@ -111,21 +111,24 @@ def _rendering_info(engine, words):
     if not header['width'] or not header['height']:
         raise ValueError('dynamic rendering render area is empty')
 
-    endarr = next((i for i in range(array_i + 1, len(ops))
-                   if ops[i][1] == 'ENDARR'), None)
-    if endarr is None:
-        raise ValueError('dynamic rendering colour array is unterminated')
+    # each colour element closes with its own ENDARR, so the array region
+    # ends at the first depth/stencil attachment PTR (or the packet END)
+    # rather than at a single array terminator.
+    boundary = next((k for k in range(array_i + 1, len(ops))
+                     if ops[k][1] == 'END' or
+                     (ops[k][0] in ('pDepthAttachment', 'pStencilAttachment')
+                      and ops[k][1] == 'PTR')), len(ops))
     colors, i = [], array_i + 1
     for _ in range(ncolor):
-        while i < endarr and ops[i][0] != 'sType':
+        while i < boundary and ops[i][0] != 'sType':
             i += 1
-        if i >= endarr:
+        if i >= boundary:
             raise ValueError('dynamic rendering colour attachment is truncated')
         fields, i = _attachment(ops, words, i)
         colors.append(fields)
 
     depth = stencil = None
-    j = endarr + 1
+    j = boundary
     for key in ('pDepthAttachment', 'pStencilAttachment'):
         ptr = next((k for k in range(j, len(ops))
                     if ops[k][0] == key and ops[k][1] == 'PTR'), None)

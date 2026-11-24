@@ -137,6 +137,44 @@ class DynamicRenderingTests(unittest.TestCase):
         self.assertEqual(len(state.framebuffer_state.attachments), 2)
         self.assertEqual(len(state.attachment_ops), 2)
 
+    def test_begin_synthesizes_multiple_color_attachments(self):
+        # MRT: a second colour target (distinct VkFormat 44) parked at a free
+        # offset; the synthesized RenderPass/Framebuffer/operand must carry
+        # both attachments with independent loadOp/clearValue records.
+        img2, view2 = 0x700000008000, 0x700020008002
+        self.f.command('vkCreateImage', device=self.w.DEVICE, pImage=img2,
+            pCreateInfo=self.w.structure('VkImageCreateInfo', pNext=[], flags=0,
+                imageType=1, format=44,
+                extent=self.w.structure('VkExtent3D', width=8, height=4,
+                                        depth=1),
+                mipLevels=1, arrayLayers=1, samples=1, tiling=0, usage=0x13,
+                sharingMode=0, queueFamilyIndexCount=0, pQueueFamilyIndices=[],
+                initialLayout=0))
+        self.f.command('vkBindImageMemory', device=self.w.DEVICE, image=img2,
+                       memory=self.w.MEMORY, memoryOffset=2048)
+        self.f.command('vkCreateImageView', device=self.w.DEVICE, pView=view2,
+            pCreateInfo=self.w.structure('VkImageViewCreateInfo', pNext=[],
+                flags=0, image=img2, viewType=1, format=44,
+                components=self.w.structure('VkComponentMapping',
+                                            r=0, g=0, b=0, a=0),
+                subresourceRange=self.w.structure('VkImageSubresourceRange',
+                    aspectMask=1, baseMipLevel=0, levelCount=1,
+                    baseArrayLayer=0, layerCount=1)))
+        self.f.begin()
+        self.begin(colors=[
+            self.attachment(clear=(1, 2, 3, 4)),
+            self.attachment(view=view2, clear=(5, 6, 7, 8))])
+        state = self.dynamic()
+        rp = state.render_pass_state
+        self.assertEqual(len(rp.attachments), 2)
+        self.assertEqual(rp.attachments[0][0], 37)
+        self.assertEqual(rp.attachments[1][0], 44)
+        self.assertEqual(rp.colors, ((0, 2), (1, 2)))
+        self.assertEqual(len(state.framebuffer_state.attachments), 2)
+        self.assertEqual(len(state.operand.attachments), 2)
+        self.assertEqual(state.attachment_ops,
+                         ((1, 0, (1, 2, 3, 4)), (1, 0, (5, 6, 7, 8))))
+
 
 class DynamicDrawTests(draw_fixture.DrawReplayTests):
     """End-to-end vkCmdBeginRendering -> vkCmdDraw -> vkCmdEndRendering."""
