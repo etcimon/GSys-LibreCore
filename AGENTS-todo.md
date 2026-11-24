@@ -1237,6 +1237,19 @@ remain release requirements; intermediate raster gates do not narrow the product
     multisample resolve have no bounded-model semantics to replay. They stay
     deferred to the hardware/CTS waves (BlitImage→Increment 5, ResolveImage→
     cmdexec+xfer+bench operands).
+  - **Non-`vkCmd*` command audit (2026-11-24, candidate gaps — UNVERIFIED).**
+    Diffed admitted non-command-buffer commands against the host/sync handler
+    sets (`NativeSubmissions.NAMES`/`EVENT_NAMES`, `TimelineSemaphores.NAMES`).
+    Most unmatched names are generic ALLOC/QUERY/dealloc commands handled by
+    the frontend object layer or out-of-scope MESA extensions. **Two candidates
+    with ZERO implementation references, flagged for verification (may still
+    route through generic frontend/golden SUBMIT/EVENT handling — do NOT assume
+    they fault):** `vkQueueSubmit2` (type 206, act SUBMIT — the `VkSubmitInfo2`
+    synchronization2 submit variant; `vkQueueSubmit` IS in `NAMES` but the `*2`
+    form is not) and `vkResetQueryPool` (type 171, act EVENT — host query-pool
+    reset; `vkCmdResetQueryPool` command variant and `vkGetQueryPoolResults`
+    ARE handled). If confirmed unhandled they are the submit/query-side `*2`
+    gap complementing the closed `vkCmd*2` command-buffer frontier.
 - [ ] Complete shader/memory/sync → raster/ROP → VM/cache/matrix/RT/mesh/scheduling engines
   and configuration-safe throughput, using the full feature matrix in the plan.
 - [ ] Clear generic Venus/protocol stock-package blockers, virtio-pci/external-sync/WSI,
