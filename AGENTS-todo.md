@@ -1033,6 +1033,25 @@ remain release requirements; intermediate raster gates do not narrow the product
   `[f5wx] ISSUE ct=6e … SHDONE code=00` proving the dispatch executed — WSL, not evidence.
   Coverage gap recorded: no vector begins a non-initial command buffer; add
   `ue_cneg_cb_rebegin_1` (expect `VK_ERROR_UNKNOWN` + INVALID, records/submit refused).
+  **2026-11-2x oracle/RTL re-audit of the re-begin semantics (corrects the expected
+  vector shape):** `g6lc_apu_vnfront.sv` `StCbGo`/`APU_VN_ACT_CB_BEGIN` refuses
+  (`APU_VK_ERROR_UNKNOWN`) **only** when `state & (APU_CB_RECORDING|APU_CB_INVALID)`
+  (`0x1|0x8`); `APU_CB_EXECUTABLE` (`0x2`) is **not** in the mask — an EXECUTABLE
+  re-begin takes the §6.1 *implicit reset* arm (`APU_CMDREC_OP_BEGIN` rewinds the
+  stream) and re-records, matching `vn_golden.py` `CB_BEGIN` (`CB_REC|CB_INV` →
+  `VK_ERR_UNKNOWN`, else record). `APU_CB_PENDING` (`0x4`) waits out the drain then
+  implicit-resets. **No `RESET_COMMAND_BUFFER_BIT` gate exists** in vnfront/cmdrec/
+  golden — the engine is spec-permissive vs VUID-vkBeginCommandBuffer-commandBuffer-
+  00050 (executable re-begin should require the pool reset bit). Consequences: (a) the
+  test-E "state != 0 refused the re-begin" root-cause is imprecise — a pure-EXECUTABLE
+  begin is *not* refused; the dropped dispatch more likely came from the PENDING-drain
+  path or a re-used fence masking a still-in-flight submit (empirical, needs the RTL
+  trace to pin down); (b) `ue_cneg_cb_rebegin_1` must **not** assert `VK_ERROR_UNKNOWN`
+  on an EXECUTABLE re-begin — that would fail on real hardware. Valid shapes: BEGIN on a
+  still-RECORDING buffer (begin twice, no end) → `VK_ERROR_UNKNOWN` + INVALID is the
+  clean refusal the RTL actually implements; or, if spec-conformance gating is wanted,
+  add the `RESET_COMMAND_BUFFER_BIT` check to vnfront/cmdrec first, then the EXECUTABLE
+  refusal vector becomes valid. Decide which before writing the vector.
 - [x] **Venus arm of the stock-guest gate is green on the builder with the fixed test**
   (`apu-leaf-20261011T104810-64504101eb0e` and `…T121022-c91c2167cc22`, identities
   `09bad64a…` / `1e70ad5a…` local = before = after, isolated stream8 QEMU): stock Ubuntu
