@@ -1207,6 +1207,23 @@ remain release requirements; intermediate raster gates do not narrow the product
     pNext parse + a shared permutation applied to both RenderPass
     syntheses + discard-aware `_color_targets`. Default identity mapping
     verified by the MRT draw. 152 tests.
+  - **Command-buffer replay boundary — full audit (2026-11-24).** Diffed all
+    91 admitted `vkCmd*` names (`vn_command_set.txt`) against the
+    `vn_transfer_replay` dispatch (`GraphicsDraws._state` +
+    `GraphicsBindings.replay` + `_BOOL/_VECTOR_DYNAMIC` + `ComputeReplay.NAMES`
+    + `ImageReplay.NAMES` + the elif chain). **85 handled; exactly 6 reach
+    `unsupported replay command`** — all confirmed golden-verbatim/hardware-
+    emission-only with NO Python semantic replay (documented deferrals, NOT
+    bugs — the fail-closed fault is correct bounded behaviour):
+    `vkCmdBlitImage{,2}` (scaling/filter blit → Increment 5), `vkCmdResolveImage{,2}`
+    (MSAA resolve → CTS wave, needs cmdexec+xfer+bench operands),
+    `vkCmdClearDepthStencilImage` (DS clear; operand = ranges-only `5*i`,
+    aspectMask∈{2,4,6}, packed depth/stencil texel — `img_clear_texel`
+    already handles fmt12/14 but no `ImageReplay` arm yet),
+    `vkCmdDispatchBase` (compute dispatch + `{gbx,gby,gbz}` base offsets →
+    shader `gl_WorkGroupID`/`gl_GlobalInvocationID` base). By contrast
+    `vkCmdSetRenderingInputAttachmentIndices` WAS a genuine bug (true no-op
+    that wrongly faulted) — fixed `926fca46a` + test `35187a665`.
 - [ ] Complete shader/memory/sync → raster/ROP → VM/cache/matrix/RT/mesh/scheduling engines
   and configuration-safe throughput, using the full feature matrix in the plan.
 - [ ] Clear generic Venus/protocol stock-package blockers, virtio-pci/external-sync/WSI,
