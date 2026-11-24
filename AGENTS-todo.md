@@ -27165,3 +27165,61 @@ Receipt: `build-platform/workspace/build/storamic-review-30/FINAL-SV-30.md`.
   licensed-only). Install rsync (or run `apu-leaf` from WSL/Linux) to use
   the sanctioned leaf path; the manual remote build+run above is the
   working fallback.
+
+### APU/Venus vgsys `DrawIndirectCount` vectors — root-caused + fixed (2026-11-24)
+
+- [x] Full vgsys rerun (`/tmp/vgsys-full.log`, 297 jobs = 283 sessions + 14
+  negatives, 10-worker `/tmp/run-vgsys-par.py`) surfaced **exactly 4 FAILs**,
+  all `vkCmdDrawIndirectCount` family: `ue_gpos_{drawindxcnt,dindcnt,dindcntz,dindcntx}_1`,
+  each `rc=-6` with a contiguous framebuffer region reading `0xff000000`
+  (clear) where `0xff996633` was expected — the count draws produced no
+  rasterized coverage. All plain/multi indirect draws (`drawind`/`drawindx`/
+  `drawindmd<N>`/`drawindxmd<N>`) PASS, isolating the bug to the count path.
+- [x] Fresh-artifact control proved it was **real RTL, not stale oracle**:
+  regenerated `.hex`/`.exp` for all 4 differed from committed only by CRLF
+  noise (Windows Python); content identical after stripping `\r` → reverted.
+  Committed vectors were correct all along (`.hex` is untracked/generated;
+  only `.exp`/`.json` are tracked).
+- [x] Static decode→record→exec verified correct end-to-end (`g6lc_apu_vndec`
+  HANDLE→q-slot `rom_a[5:3]`, U32/U64→`imm[]`, `need_res` operand resolution,
+  two-phase `xf_opnd_q` 0→1 fetch, `f_iw` alignment, `ind_cnt_q` clamp) —
+  matched the `tb_g6lc_apu_cmdexec` unit bench that hand-builds the same
+  record layout and PASSes.
+- [x] Instrumented `cmdexec.sv` (`CNTDBG`/`RECADBG`/`DRAWDBG` `$display`
+  probes, since removed) gave the decisive data: `h0==h1` (countBuffer
+  aliases commands buffer — legitimate), `cnt=2 maxdc=4 dr=2`, two valid
+  `VkDrawIndirectCommand` fetches (`vertexCount=3 instanceCount=1`,
+  `base` advancing by `stride=16`). **Count fetch AND draw issue were both
+  correct** — the draws reached `StDsPipeReq` but never rasterized.
+- [x] **Root cause (two RTL sites missed the count ctypes):**
+  - `corev_apu/apu/g6lc_apu_vgtop.sv` `work_is_draw` whitelisted
+    DRAW/DRAW_INDEXED/DRAW_INDIRECT/DRAW_INDEXED_INDIRECT/CLEAR_ATTACHMENTS
+    but **not** `DRAW_INDIRECT_COUNT_EXT`(165)/`DRAW_INDEXED_INDIRECT_COUNT_EXT`(166)
+    → count-draw work items fell through to the generic `work_valid_o` path
+    and never reached `g6lc_apu_rast`. **Affected all 4 vectors.**
+  - `corev_apu/apu/g6lc_apu_cmdexec.sv` `StDrIbN` index-buffer operand fetch
+    checked DRAW_INDEXED/DRAW_INDEXED_INDIRECT but **not**
+    `DRAW_INDEXED_INDIRECT_COUNT_EXT` → the indexed variant never resolved
+    its index buffer. **Affected `drawindxcnt` only.**
+  - Every other ctype-dispatch site (`rec_is_draw`, `rec_is_ind_draw`,
+    `rec_is_cnt_draw`, shcore pseudo-ctype remap) already covered 165/166.
+- [x] **Oracle bug (third, `dindcntz` only):** after the RTL fix `dindcntz`
+  still failed — `CNTDBG` showed `cnt=0 dr=0` → RTL correctly retires with
+  zero draws (Vulkan: count=0 = no-op) → clear framebuffer. But `vn_golden.py`
+  computed the coverage `cov` unconditionally; the work-item model
+  (`_disp_assembly_lost` `ind_noop`) suppressed count=0 correctly, only the
+  framebuffer path missed it. Fixed by emptying `cov` when the count-draw's
+  effective count `min(_ccount,_cmax)==0` (`is_dcnt`/`is_ixcnt`), mirroring
+  cmdexec's `dr==0` retire. Regenerated `ue_gpos_dindcntz_1.exp`/`.json`
+  (LF-normalized): `.exp` diff is exactly `FF996633`→`FF000000` at the ~1024
+  covered px ×2 readback lanes; `.json` "512 tri px"→"0 tri px",
+  "3584 clear"→"4096 clear".
+- [x] **Verified on remote clean-RTL rebuild** (`vgsys-cntdbg`, probes
+  removed, `APU_SIM_PGO=0`): all 4 vectors PASS `cases=26 checks=17189
+  maxulp=0` — `dindcnt`/`dindcntx` (count 2 / clamp 9→4)/`drawindxcnt`
+  (indexed, `idx=1`, stride 20)/`dindcntz` (count=0→clear).
+- [x] Committed `5e0c30f87` (2 RTL files + `vn_golden.py` + regenerated
+  `dindcntz` `.exp`/`.json`). Python `test_vn_graphics_draw_replay` 140/140
+  PASS — oracle change is scoped to count=0 only, no other vector affected.
+- [ ] Full vgsys rerun on the clean-RTL binary in flight
+  (`/tmp/vgsys-full2.log`, 297 jobs) to confirm **297/297**.
