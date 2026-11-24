@@ -59,7 +59,7 @@ module tb_g6lc_apu_vgsys
     return 0;
   endfunction
   localparam int unsigned TAPEW  = 32'h100000;
-  localparam int unsigned EXPW   = 32'h40000;
+  localparam int unsigned EXPW   = 32'h44000;
   localparam int unsigned MAXCYC = 20_000_000;
 
   // virtqueue layout inside the guest window (well clear of the tape
