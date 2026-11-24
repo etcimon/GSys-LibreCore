@@ -1157,12 +1157,21 @@ remain release requirements; intermediate raster gates do not narrow the product
     skip in `_begin_rendering` is removed. Verified D32 clear 0.25 + D24S8
     packed `{stencil=0xAB, depth_unorm24=0xFFFFFF}` (149 tests). `storeOp` is
     confirmed **parity-noop**: the static path captures but never consumes it
-    (always stores), so dynamic ignoring it matches. Remaining (d): per-
-    attachment `imageLayout` transitions (static tracks `entry['layout']`
-    through initial/subpass/final; dynamic `imageLayout` is the in-pass layout
-    with no initial/final pair — semantics to pin), `vkCmdSetRenderingAttachment
-    Locations` non-identity permutation + `vkCmdSetRenderingInputAttachment
-    Indices`, (e) extend oracle/vectors to MRT/depth-draw/input-attachment.
+    (always stores), so dynamic ignoring it matches. **MRT decode FIXED
+    (`7352ba3f5`):** the colour-attachment array does NOT close with a single
+    ENDARR — each `VkRenderingAttachmentInfo` element emits its own ENDARR, so
+    `colorAttachmentCount>=2` faulted "truncated"; the region is now bounded on
+    the first `pDepthAttachment`/`pStencilAttachment` PTR (or packet END).
+    Verified with a 2-colour-attachment (VkFormat 37+44) capture test (150
+    tests). `imageLayout` **resolved — informational**: dynamic rendering does
+    no render-pass-style automatic layout transitions; `imageLayout` declares
+    the in-pass layout the app establishes via barriers, and `entry['layout']`
+    stays barrier-managed (`vn_image_barriers`), so ignoring it is correct —
+    optional `entry['layout']==imageLayout` validation is deferred strictness,
+    not required for correct vectors. Remaining (d): `vkCmdSetRendering
+    AttachmentLocations` non-identity permutation + `vkCmdSetRenderingInput
+    AttachmentIndices`, (e) extend oracle/vectors to depth-draw/input-attachment
+    (MRT synthesis now covered).
 - [ ] Complete shader/memory/sync → raster/ROP → VM/cache/matrix/RT/mesh/scheduling engines
   and configuration-safe throughput, using the full feature matrix in the plan.
 - [ ] Clear generic Venus/protocol stock-package blockers, virtio-pci/external-sync/WSI,
