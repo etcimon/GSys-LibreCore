@@ -1168,10 +1168,20 @@ remain release requirements; intermediate raster gates do not narrow the product
     the in-pass layout the app establishes via barriers, and `entry['layout']`
     stays barrier-managed (`vn_image_barriers`), so ignoring it is correct —
     optional `entry['layout']==imageLayout` validation is deferred strictness,
-    not required for correct vectors. Remaining (d): `vkCmdSetRendering
-    AttachmentLocations` non-identity permutation + `vkCmdSetRenderingInput
-    AttachmentIndices`, (e) extend oracle/vectors to depth-draw/input-attachment
-    (MRT synthesis now covered).
+    not required for correct vectors. **Sub-problem (e) DONE (`be0d2e8d0`):**
+    `dyn_pipeline`/`dyn_prepared` now take a depth VkFormat +
+    `VkPipelineDepthStencilStateCreateInfo`, and `begin_rendering` accepts a
+    colour-attachment list. New end-to-end tests: `test_dynamic_rendering_
+    depth_draw` (D32 + LESS commits z_win=0.5, clear keeps 1.0) and
+    `test_dynamic_rendering_mrt_draw` (two fmt37 targets + `fs_program2`,
+    identity loc→attachment mapping, both targets written + per-attachment
+    clears). **Input-attachment reads are OUT OF SCOPE** — the bounded
+    fragment-shader model has no `SubpassInput`/`InputAttachmentIndex`/
+    `DimSubpassData` path (`inputAttachmentCount` is always 0), so
+    `vkCmdSetRenderingInputAttachmentIndices` has nothing to permute.
+    Remaining (d) only: `vkCmdSetRenderingAttachmentLocations` non-identity
+    permutation (the draw-path `targets`/`extras` integration is intricate;
+    default identity mapping already verified by the MRT draw). 152 tests.
 - [ ] Complete shader/memory/sync → raster/ROP → VM/cache/matrix/RT/mesh/scheduling engines
   and configuration-safe throughput, using the full feature matrix in the plan.
 - [ ] Clear generic Venus/protocol stock-package blockers, virtio-pci/external-sync/WSI,
