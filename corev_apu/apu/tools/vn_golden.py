@@ -4513,12 +4513,14 @@ class FrontModel(ObjectTable, PayloadMemory):
                           not 1 <= mips <= img_mipcap(extmax) or
                           usage == 0 or
                           usage & ~0x3F or
-                          # attachment usage (CA|DSA = 0x30) must be a
-                          # subset of the format's feature-derived usage
-                          # mask — mirrors vnfront's APU_VN_FMT_USAGE
-                          # check (COLOR_ATTACHMENT / DEPTH_STENCIL_
-                          # ATTACHMENT profile features).
-                          (usage & 0x30 &
+                          # every supported usage type (TS|TD|S|ST|CA|DSA
+                          # = 0x3F) must be granted by the format's
+                          # feature-derived usage mask — mirrors vnfront's
+                          # APU_VN_FMT_USAGE check.  Gating only the
+                          # attachment pair (0x30) let depth formats
+                          # accept SAMPLED/STORAGE usage they never
+                          # advertised (CTS api.image truthfulness).
+                          (usage & 0x3F &
                            ~self.m.fmt_usage()[rec['imm'][2] & 0xFF]
                            & 0xFFFFFFFF) != 0 or
                           ilay not in (0, 1, 2, 5, 6, 7, 8)):

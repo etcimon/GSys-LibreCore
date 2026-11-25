@@ -10,12 +10,11 @@
 //   gcc -O2 -o vkmem vkmem.c -lvulkan && ./vkmem bufcopy.spv
 //
 // Checks:
-//   A  12 MiB on the HOST_VISIBLE type succeeds (> private arena —
-//      only possible on the 24 MiB guest-span heap), maps, and a
-//      strided write/read pattern verifies.
+//   A  12 MiB on the HOST_VISIBLE type succeeds on the guest-span heap
+//      (type1/heap1), maps, and a strided write/read pattern verifies.
 //   B  2 MiB on the DEVICE_LOCAL-only type + buffer bind succeeds.
-//   C  12 MiB on the DEVICE_LOCAL-only type must fail
-//      (heap0 < 12 MiB — heap separation is truthful, not pooled).
+//   C  an allocation larger than heap0 on the DEVICE_LOCAL-only type
+//      must fail (heap separation is truthful, not pooled).
 //   D  3d-d: alloc 1 MiB host-visible -> bind -> vkCmdFillBuffer ->
 //      fence -> vkMapMemory -> verify (GPU write before the kernel
 //      picks the offset; the map relocates the filled extent).
@@ -183,18 +182,27 @@ int main(int argc, char **argv)
     vkFreeMemory(dev, mdev, NULL);
     printf("device-local 2MiB alloc+bind PASS\n");
 
-    /* C: 12 MiB on the private-arena type must fail — the heaps are
-     * separate, so >8 MiB cannot be satisfied from heap0. */
+    /* C: an allocation larger than the private-arena heap must fail —
+     * the heaps are separate, so mt_dev's heap cannot satisfy it.  The
+     * threshold tracks the reported heap0 size: it was widened past
+     * 12 MiB for CTS memory.binding buffer_1048577, so a fixed 12 MiB
+     * request now legitimately fits and can no longer serve as the
+     * negative. */
+    VkDeviceSize heap0 =
+        mp.memoryHeaps[mp.memoryTypes[mt_dev].heapIndex].size;
+    VkDeviceSize over = heap0 + (heap0 >> 1);
     VkDeviceMemory mneg;
     VkMemoryAllocateInfo mai3 = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-                                 NULL, HOST_BYTES, mt_dev};
+                                 NULL, over, mt_dev};
     VkResult r = vkAllocateMemory(dev, &mai3, NULL, &mneg);
     if (r == VK_SUCCESS) {
-        printf("FAIL: 12MiB device-local alloc unexpectedly succeeded\n");
+        printf("FAIL: %llu-byte device-local alloc unexpectedly "
+               "succeeded\n", (unsigned long long)over);
         vkFreeMemory(dev, mneg, NULL);
         return 1;
     }
-    printf("private-arena overflow refused (%d) PASS\n", (int)r);
+    printf("private-arena overflow refused (%d, %llu > heap0 %llu) PASS\n",
+           (int)r, (unsigned long long)over, (unsigned long long)heap0);
 
     /* shared cbuf scaffolding for arms D and E */
     VkCommandPoolCreateInfo cpci2 = {

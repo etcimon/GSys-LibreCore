@@ -7777,14 +7777,18 @@ module g6lc_apu_vnfront
                          mips < 32'd1 ||
                          mips > 32'(mipcap) ||
                          op_q.imm[10] == 32'h0 ||
-                         // usage ⊆ TS|TD|S|ST|CA|DSA (0x3F); attachment
-                         // usage (CA|DSA = 0x30) follows the profile's
-                         // COLOR_ATTACHMENT / DEPTH_STENCIL_ATTACHMENT
-                         // features through APU_VN_FMT_USAGE.  imm[2]
-                         // is < 256 here (f_img_fmt==NONE refused above),
-                         // so the [7:0] index is the VkFormat number.
+                         // usage ⊆ TS|TD|S|ST|CA|DSA (0x3F); every one
+                         // of those usage types must be granted by the
+                         // format's feature-derived mask
+                         // (APU_VN_FMT_USAGE) — not just the attachment
+                         // pair.  Without the full 0x3F gate a depth
+                         // format such as D24_UNORM_S8_UINT (no
+                         // SAMPLED_IMAGE/STORAGE_IMAGE feature) would
+                         // wrongly accept VK_IMAGE_USAGE_SAMPLED_BIT.
+                         // imm[2] is < 256 here (f_img_fmt==NONE refused
+                         // above), so the [7:0] index is the VkFormat.
                          (op_q.imm[10] & ~32'h3F) != 32'h0 ||
-                         ((op_q.imm[10] & 32'h30 &
+                         ((op_q.imm[10] & 32'h3F &
                            ~APU_VN_FMT_USAGE[int'(op_q.imm[2][7:0])])
                           != 32'h0)
                         ) begin
