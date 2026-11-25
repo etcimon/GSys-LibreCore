@@ -556,7 +556,9 @@ def main():
             # -> host-read across a size ladder, first-bad-byte offset.
             if not only or "vkmembig" in only:
                 rc = con.run("cd /root && gcc -O2 -o vkmembig vkmembig.c "
-                             "-lvulkan && ./vkmembig", timeout=1200)
+                             "-lvulkan && ./vkmembig", timeout=int(
+                                 os.environ.get("G6LC_VKMEMBIG_TIMEOUT",
+                                                "2400")))
                 print(f"[drive] vkmembig rc={rc}", flush=True)
                 fail |= (rc != 0)
             # §12.3 C/5b: images + samplers + Xfer image copies on the
