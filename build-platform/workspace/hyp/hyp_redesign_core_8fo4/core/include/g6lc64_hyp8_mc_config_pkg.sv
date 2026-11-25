@@ -370,13 +370,19 @@ L2En: bit'(1),  // hyp8-mc: always on (4-core shared L2/L3)
       L2WriteTrackDepth: unsigned'(4),
       L2ReadTrackDepth: unsigned'(4),
       L2PrefetchEn: bit'(0),
-      L2PfStreams: unsigned'(0),
-      L2PfDistance: unsigned'(0),
-      L2PfStrideEn: bit'(0),
-      L2PfMshrReserve: unsigned'(0),
-      L2PfMaxOutstanding: unsigned'(0),
-      L2PfQuiet: unsigned'(0),
-      L3PrefetchEn: bit'(0),
+      // SQL run700-703: L2 already hits ~98%, while L3 is effectively cold
+      // (l3_hit=2 vs ~950-986 misses) because the verified non-inclusive eWT
+      // prefetcher was never enabled. Keep L2 prefetch off (it would duplicate
+      // the high-hit L2 stream) and enable conservative L3-only stride PF:
+      // demand reserve 1 of 4 MSHRs, one outstanding candidate per stream, and
+      // an 8-cycle quiet window after every demand miss.
+      L2PfStreams: unsigned'(4),
+      L2PfDistance: unsigned'(2),
+      L2PfStrideEn: bit'(1),
+      L2PfMshrReserve: unsigned'(1),
+      L2PfMaxOutstanding: unsigned'(1),
+      L2PfQuiet: unsigned'(8),
+      L3PrefetchEn: bit'(1),
       SharedTlbDepth: int'(64),
 
       NrLoadPipeRegs: int'(G6LCConfigNrLoadPipeRegs),

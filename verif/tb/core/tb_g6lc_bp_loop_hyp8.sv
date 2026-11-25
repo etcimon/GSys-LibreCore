@@ -79,14 +79,14 @@ module tb_g6lc_bp_loop_hyp8;
     rst_n = 1'b1;
     tick();
 
-    // ---- S1: Train 4-iteration loop at slot 2 (0x8000_1004) over 3 passes ----
-    // Pass 1 allocates & learns trip=4 (conf 0->0->1 on matching pass 2->2 on pass 3)
-    for (int p = 0; p < 3; p++) begin
-      repeat (4) train_br(64'h8000_1004, 1'b1);
+    // ---- S1: Train 8-iteration loop at slot 2 (0x8000_1004) to full conf=3 ----
+    // Pass 1 learns trip=8 (conf->0), passes 2..4 increment conf 0->1->2->3.
+    for (int p = 0; p < 4; p++) begin
+      repeat (8) train_br(64'h8000_1004, 1'b1);
       train_br(64'h8000_1004, 1'b0);
     end
-    // Now conf>=2, trip=4, conf_cnt=0. Advance 4 taken iters -> conf_cnt==4 (exit!)
-    repeat (4) train_br(64'h8000_1004, 1'b1);
+    // Now conf==3, trip=8, conf_cnt=0. Advance 8 taken iters -> conf_cnt==8 (exit!)
+    repeat (8) train_br(64'h8000_1004, 1'b1);
     lookup_vpc(64'h8000_1000);  // aligned fetch block!
     check(pred_o[2].valid === 1'b1 && pred_o[2].taken === 1'b0, "S1_SLOT2_PRED_EXIT");
     check(pred_o[0].taken === 1'b1, "S1_SLOT0_UNTOUCHED");
@@ -97,13 +97,22 @@ module tb_g6lc_bp_loop_hyp8;
     check(pred_o[0].taken === 1'b1, "S2_UNALIGNED_SLOT0_CLEAN");
 
     // ---- S3: Long 256-iter loop at slot 3 (0x8000_1006) saturates instead of wrapping to 0 ----
-    for (int p = 0; p < 3; p++) begin
+    for (int p = 0; p < 4; p++) begin
       repeat (256) train_br(64'h8000_1006, 1'b1);
       train_br(64'h8000_1006, 1'b0);
     end
     lookup_vpc(64'h8000_1000);
     // Must yield to base TAGE (taken=1), NOT override with taken=0 from bogus trip=0!
     check(pred_o[3].taken === 1'b1, "S3_LONG_LOOP_NO_BOGUS_WRAP");
+
+    // ---- S4: Short 4-iter loop at slot 1 (0x8000_1002) must NOT override TAGE ----
+    for (int p = 0; p < 4; p++) begin
+      repeat (4) train_br(64'h8000_1002, 1'b1);
+      train_br(64'h8000_1002, 1'b0);
+    end
+    repeat (4) train_br(64'h8000_1002, 1'b1);
+    lookup_vpc(64'h8000_1000);
+    check(pred_o[1].taken === 1'b1, "S4_SHORT_LOOP_YIELDS_TO_TAGE");
 
     $display("PASS tb_g6lc_bp_loop_hyp8 checked=%0d", checked);
     $finish;

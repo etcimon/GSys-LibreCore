@@ -740,8 +740,8 @@ module g6lc_cluster
         .POSTED_WRITES  (G6LCCfg.L2PostedWriteEn),
         .WTRK_DEPTH     (G6LCCfg.L2WriteTrackDepth != 0 ? G6LCCfg.L2WriteTrackDepth : 32'd4),
         .RDTRK_DEPTH    (G6LCCfg.L2ReadTrackDepth != 0 ? G6LCCfg.L2ReadTrackDepth : 32'd4),
-        // T9h/M5: L3 instance shares the L2 prefetch fields; L3PrefetchEn
-        // stays 0 in this milestone (check_cfg refuses it without L2 PF).
+        // T9h/M5: L3 instance shares the L2 prefetch geometry fields;
+        // L3PrefetchEn may be enabled independently of L2PrefetchEn.
         .PF_EN          (G6LCCfg.L3PrefetchEn),
         .PF_STREAMS     (G6LCCfg.L2PfStreams != 0 ? G6LCCfg.L2PfStreams : 32'd4),
         .PF_DISTANCE    (G6LCCfg.L2PfDistance != 0 ? G6LCCfg.L2PfDistance : 32'd2),

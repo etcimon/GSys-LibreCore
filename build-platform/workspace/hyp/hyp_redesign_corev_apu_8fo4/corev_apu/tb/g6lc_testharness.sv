@@ -2498,8 +2498,9 @@ module g6lc_testharness #(
                    mc_cnt_l2_hold_r1, mc_cnt_l2_hold_r1_wu,
                    mc_cnt_l2_hold_r2, mc_cnt_hub_aw_sc, mc_cnt_hub_ar_hold,
                    mc_cnt_hub_aw_hold_slot, mc_cnt_hub_aw_hold_other;
-  // T9h/M5: L2 prefetcher pulses.
+  // T9h/M5: L2/L3 prefetcher pulses.
   int unsigned mc_cnt_l2_pf_issue, mc_cnt_l2_pf_useful, mc_cnt_l2_pf_drop;
+  int unsigned mc_cnt_l3_pf_issue, mc_cnt_l3_pf_useful, mc_cnt_l3_pf_drop;
   // T26: hub_aw_hold_other split by blocker (sim-only hierarchical reads of the
   // hub's gen_cluster state): W data of the previous AW still in flight
   // (w_busy), invalidation-retention admission, mem-side !aw_ready, or an RR
@@ -2509,6 +2510,7 @@ module g6lc_testharness #(
   logic mc_hub_aw_wbusy_obs, mc_hub_aw_inv_obs, mc_hub_aw_mem_obs, mc_hub_aw_rr_obs,
         mc_hub_aw_fire_obs, mc_hub_ar_fire_obs, mc_hub_aw_anyheld;
   logic mc_l2_pf_issue_obs, mc_l2_pf_useful_obs, mc_l2_pf_drop_obs;
+  logic mc_l3_pf_issue_obs, mc_l3_pf_useful_obs, mc_l3_pf_drop_obs;
   logic mc_l2_hit_obs, mc_l2_bypass_obs, mc_l2_selfinv_obs, mc_l3_selfinv_obs,
         mc_l2_wupd_obs, mc_l3_wupd_obs,
         mc_l2_wtrk_full_obs, mc_l2_line_hold_obs, mc_l2_posted_obs,
@@ -2595,9 +2597,15 @@ module g6lc_testharness #(
   if (G6LCCfg.L3En) begin : gen_mc_cache_l3
     assign mc_l3_selfinv_obs = i_cluster.gen_l3.i_l3.l3_selfinv_hit_o;
     assign mc_l3_wupd_obs = i_cluster.gen_l3.i_l3.l3_wupdate_o;
+    assign mc_l3_pf_issue_obs  = i_cluster.gen_l3.i_l3.l3_pf_issue_o;
+    assign mc_l3_pf_useful_obs = i_cluster.gen_l3.i_l3.l3_pf_useful_o;
+    assign mc_l3_pf_drop_obs   = i_cluster.gen_l3.i_l3.l3_pf_drop_o;
   end else begin : gen_mc_cache_nol3
     assign mc_l3_selfinv_obs = 1'b0;
     assign mc_l3_wupd_obs = 1'b0;
+    assign mc_l3_pf_issue_obs = 1'b0;
+    assign mc_l3_pf_useful_obs = 1'b0;
+    assign mc_l3_pf_drop_obs = 1'b0;
   end
   always_ff @(posedge clk_i) begin
     if (rst_ni) begin
@@ -2630,6 +2638,9 @@ module g6lc_testharness #(
       mc_cnt_l2_pf_issue <= mc_cnt_l2_pf_issue + mc_l2_pf_issue_obs;
       mc_cnt_l2_pf_useful <= mc_cnt_l2_pf_useful + mc_l2_pf_useful_obs;
       mc_cnt_l2_pf_drop <= mc_cnt_l2_pf_drop + mc_l2_pf_drop_obs;
+      mc_cnt_l3_pf_issue <= mc_cnt_l3_pf_issue + mc_l3_pf_issue_obs;
+      mc_cnt_l3_pf_useful <= mc_cnt_l3_pf_useful + mc_l3_pf_useful_obs;
+      mc_cnt_l3_pf_drop <= mc_cnt_l3_pf_drop + mc_l3_pf_drop_obs;
     end else begin
       mc_cnt_l2_hit    <= '0;
       mc_cnt_l2_miss   <= '0;
@@ -2656,6 +2667,9 @@ module g6lc_testharness #(
       mc_cnt_l2_pf_issue <= '0;
       mc_cnt_l2_pf_useful <= '0;
       mc_cnt_l2_pf_drop <= '0;
+      mc_cnt_l3_pf_issue <= '0;
+      mc_cnt_l3_pf_useful <= '0;
+      mc_cnt_l3_pf_drop <= '0;
     end
   end
   //pragma translate_on
@@ -2830,14 +2844,15 @@ module g6lc_testharness #(
                c, mc_gap_max[c], MC_GAP_LIMIT, mc_last_wfi[c]);
     if (mc_any_hung)
       $display("*** [mc_verdict] FAIL: a core ran and then stopped retiring (exit code 126)");
-    $display("*** [mc_cache] l2_hit=%0d l2_miss=%0d l2_bypass=%0d l3_hit=%0d l3_miss=%0d l2_selfinv=%0d l3_selfinv=%0d l2_wupd=%0d l3_wupd=%0d l2_wtrk_full=%0d l2_line_hold=%0d l2_posted=%0d l2_rdtrk=%0d l2_hold_r1=%0d l2_hold_r1_wu=%0d l2_hold_r2=%0d hub_aw_sc_collide=%0d hub_ar_hold=%0d hub_aw_hold_slot=%0d hub_aw_hold_other=%0d dram_latency=%0d l2_pf_issue=%0d l2_pf_useful=%0d l2_pf_drop=%0d",
+    $display("*** [mc_cache] l2_hit=%0d l2_miss=%0d l2_bypass=%0d l3_hit=%0d l3_miss=%0d l2_selfinv=%0d l3_selfinv=%0d l2_wupd=%0d l3_wupd=%0d l2_wtrk_full=%0d l2_line_hold=%0d l2_posted=%0d l2_rdtrk=%0d l2_hold_r1=%0d l2_hold_r1_wu=%0d l2_hold_r2=%0d hub_aw_sc_collide=%0d hub_ar_hold=%0d hub_aw_hold_slot=%0d hub_aw_hold_other=%0d dram_latency=%0d l2_pf_issue=%0d l2_pf_useful=%0d l2_pf_drop=%0d l3_pf_issue=%0d l3_pf_useful=%0d l3_pf_drop=%0d",
              mc_cnt_l2_hit, mc_cnt_l2_miss, mc_cnt_l2_bypass, mc_cnt_l3_hit, mc_cnt_l3_miss,
              mc_cnt_l2_selfinv, mc_cnt_l3_selfinv, mc_cnt_l2_wupd, mc_cnt_l3_wupd,
              mc_cnt_l2_wtrk_full, mc_cnt_l2_line_hold, mc_cnt_l2_posted,
              mc_cnt_l2_rdtrk, mc_cnt_l2_hold_r1, mc_cnt_l2_hold_r1_wu,
              mc_cnt_l2_hold_r2, mc_cnt_hub_aw_sc, mc_cnt_hub_ar_hold,
              mc_cnt_hub_aw_hold_slot, mc_cnt_hub_aw_hold_other, DramLatency,
-             mc_cnt_l2_pf_issue, mc_cnt_l2_pf_useful, mc_cnt_l2_pf_drop);
+             mc_cnt_l2_pf_issue, mc_cnt_l2_pf_useful, mc_cnt_l2_pf_drop,
+             mc_cnt_l3_pf_issue, mc_cnt_l3_pf_useful, mc_cnt_l3_pf_drop);
     $display("*** [mc_hub] aw_fire=%0d ar_fire=%0d aw_hold_other split: wbusy=%0d inv_adm=%0d mem_nready=%0d rr_loss=%0d",
              mc_cnt_hub_aw_fire, mc_cnt_hub_ar_fire, mc_cnt_hub_aw_wbusy, mc_cnt_hub_aw_inv,
              mc_cnt_hub_aw_mem, mc_cnt_hub_aw_rr);

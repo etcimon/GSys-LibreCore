@@ -28,7 +28,7 @@ module g6lc_memdep #(
     parameter int unsigned NR_QUERY   = 1,
     // Periodic Store-Set epoch clear (2^CLEAR_BITS cycles) to prevent long-term
     // saturation without wiping learned ld_wait entries on replay/branch flushes.
-    parameter int unsigned CLEAR_BITS = 16
+    parameter int unsigned CLEAR_BITS = 12
 ) (
     input  logic clk_i,
     input  logic rst_ni,

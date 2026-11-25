@@ -264,8 +264,13 @@ module wt_dcache_ctrl
         // reuse the miss mechanism to handle
         // the request
         READ, REPLAY_READ: begin
-          // speculatively request cache line
+          // Only request the shared read port when a back-to-back demand load
+          // is actually waiting; otherwise yield to PTW / wbuffer tag checks.
+`ifdef G6LC_MUT_DCCTRL_IDLE_RD_STEAL
           rd_req_o = 1'b1;
+`else
+          rd_req_o = req_port_i.data_req;
+`endif
 
           // kill -> go back to IDLE
           if (req_port_i.kill_req) begin
@@ -457,9 +462,13 @@ module wt_dcache_ctrl
       // rd_data_i, wbuffer_fwd_hit_i). Hit/miss/replay criteria identical
       // to the single-cycle READ evaluation.
       READ_V: begin
-        // keep the read port offered so a back-to-back request can be
-        // accepted in the verdict cycle (the emit did this in READ).
+        // Offer the read port only when a back-to-back demand load is waiting
+        // (avoids stealing wt_dcache_mem read grants from wbuffer / PTW when idle).
+`ifdef G6LC_MUT_DCCTRL_IDLE_RD_STEAL
         rd_req_o = 1'b1;
+`else
+        rd_req_o = req_port_i.data_req;
+`endif
         unique case (rv_sel)
           2'd0: begin
             state_d = IDLE;

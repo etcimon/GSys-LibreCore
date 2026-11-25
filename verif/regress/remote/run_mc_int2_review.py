@@ -78,7 +78,8 @@ def parse_cache_counters(text):
     # l2_hold_r1/l2_hold_r1_wu/l2_hold_r2/hub_aw_sc_collide; T9e/M1d adds
     # hub_ar_hold (hub-side read-behind-write hold cycles). N4/T10c adds
     # hub_aw_hold_slot/hub_aw_hold_other (AW backpressure by cause); M5/N3
-    # adds l2_pf_issue/l2_pf_useful/l2_pf_drop.
+    # adds l2_pf_issue/l2_pf_useful/l2_pf_drop; the hyp8 L3 enable adds the
+    # same three counters for the non-inclusive eWT L3 instance.
     match = re.search(r'\*\*\* \[mc_cache\] l2_hit=(\d+) l2_miss=(\d+) l2_bypass=(\d+)'
                       r' l3_hit=(\d+) l3_miss=(\d+)'
                       r'(?: l2_selfinv=(\d+) l3_selfinv=(\d+))?'
@@ -91,7 +92,9 @@ def parse_cache_counters(text):
                       r'(?: hub_aw_hold_slot=(\d+) hub_aw_hold_other=(\d+))?'
                       r' dram_latency=(\d+)'
                       r'(?: l2_pf_issue=(\d+) l2_pf_useful=(\d+)'
-                      r' l2_pf_drop=(\d+))?', text)
+                      r' l2_pf_drop=(\d+))?'
+                      r'(?: l3_pf_issue=(\d+) l3_pf_useful=(\d+)'
+                      r' l3_pf_drop=(\d+))?', text)
     if not match:
         return None
     return {'l2_hit': int(match.group(1)), 'l2_miss': int(match.group(2)),
@@ -115,7 +118,10 @@ def parse_cache_counters(text):
             'dram_latency': int(match.group(21)),
             'l2_pf_issue': int(match.group(22)) if match.group(22) else None,
             'l2_pf_useful': int(match.group(23)) if match.group(23) else None,
-            'l2_pf_drop': int(match.group(24)) if match.group(24) else None}
+            'l2_pf_drop': int(match.group(24)) if match.group(24) else None,
+            'l3_pf_issue': int(match.group(25)) if match.group(25) else None,
+            'l3_pf_useful': int(match.group(26)) if match.group(26) else None,
+            'l3_pf_drop': int(match.group(27)) if match.group(27) else None}
 
 
 def verdict(text, bound, kind, rc=0, expect_mask=None):

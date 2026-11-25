@@ -75,13 +75,14 @@ module g6lc_bp_loop
     assign slot_idx[i] = slot_pc[i][OFFSET+:IDX_W];
   end
 
-  // Prediction: per-slot column match (T21e parity) with saturated trip guard
+  // Prediction: per-slot column match (T21e parity) with full-confidence &
+  // >=8-iter trip guard (prevents resolve-lagged overrides on short loops)
   always_comb begin
     pred_o = pred_i;
     for (int unsigned i = 0; i < CVA6Cfg.INSTR_PER_FETCH; i++) begin
       if (mem_q[slot_idx[i]].valid && mem_q[slot_idx[i]].tag == slot_pc[i] &&
-          mem_q[slot_idx[i]].conf[1] &&
-          (mem_q[slot_idx[i]].trip != 8'd0) && (mem_q[slot_idx[i]].trip != 8'hFF)) begin
+          (&mem_q[slot_idx[i]].conf) &&
+          (mem_q[slot_idx[i]].trip >= 8'd8) && (mem_q[slot_idx[i]].trip != 8'hFF)) begin
         pred_o[i].valid = 1'b1;
         pred_o[i].taken = (mem_q[slot_idx[i]].conf_cnt < mem_q[slot_idx[i]].trip);
       end

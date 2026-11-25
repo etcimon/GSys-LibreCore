@@ -14,7 +14,7 @@ module g6lc_memdep #(
     parameter config_pkg::cva6_cfg_t CVA6Cfg = config_pkg::cva6_cfg_empty,
     parameter int unsigned NR_SETS    = 64,
     parameter int unsigned NR_TRAIN   = 2,
-    parameter int unsigned CLEAR_BITS = 16
+    parameter int unsigned CLEAR_BITS = 12
 ) (
     input  logic clk_i,
     input  logic rst_ni,

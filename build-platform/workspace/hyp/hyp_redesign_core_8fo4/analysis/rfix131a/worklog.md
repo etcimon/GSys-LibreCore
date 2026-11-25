@@ -9817,3 +9817,43 @@ Scanned all 284 modules via `sv-timing analyze --all-modules --target-mhz 5000 -
 - `hyp8-fo4-fe-reg2` (`HYP8_LEAF=linecheck`, exercises `g6lc_fe_redirect` + `g6lc_fe_override` + `bht`): `HYP8_LINECHECK_PASS checked=75` (`rc=0`).
 - `hyp8-fo4-realign-reg2` (`HYP8_LEAF=realign`, exercises `instr_realign`): `HYP8_REALIGN_PASS checked=59` (`rc=0`).
 - Architectural note on the 8-FO4 target: latency-neutral combinational flattening (`-150.56 FO4` across 11 modules) removes structural/procedural serialization chains down to ~21–32 FO4; closing the remaining gap to 8.0 FO4 requires multi-cycle retiming/pipeline cuts (`svt-stage` / caller protocol changes) on wide arithmetic, CAM/age tournaments, and SRAM-fed lookup cones.
+
+## 2026-11-25 — Broad-to-narrow SQL pattern seeking on live Run 704 (`hyp8-witness-234d719fb`) vs Run 703/702/700 & 3 surgical RTL fixes
+
+### 1. Matched 2M-cycle SQL comparison (`hyp8-trace.sqlite`, Run 704 vs Run 703)
+
+- Live Run 704 (`hyp8-witness-234d719fb`, built clean `errors=0` from commit `ca9ca9b36`) verified our N8 WT telemetry live (`dmiss=24,444`, `dc_req=289,076`, `dc_gnt=120,712`, `mshr_full=46,911`, `rtab_full=21,896`, `wbuf_full=113`, `ldbuf_full=0`, `lu_replay=0`, `mem_viol=322` — down `-23.3%` vs Run 703's `420`; `inflight ld` down `-8,607`, `held st_sb` down `-4,978`).
+- However, broad-to-narrow SQL diff at `cyc=2,000,000` caught a `-3.9%` retirement delta (`ret=378,024` vs `393,404`, `empty=33,778` vs `29,062` `+4,716`, `notissued ld=23,288` vs `21,411` `+1,877`, `held oth=27,563` vs `23,574` `+3,989`) plus `58.2%` refused `data_gnt` cycles (`rtab_full=21,896`).
+
+### 2. Three surgical fixes implemented across both hyp8 & main trees
+
+1. **`g6lc_bp_loop.sv` (both trees — resolve-lagged override on short/variable loops)**:
+   - Activating all 4 fetch columns let resolve-time `conf_cnt` (lagging 10–15 cycles behind OoO fetch) override TAGE on short/variable `<8`-iter boot loops at `conf=2`, adding `+4,716` empty cycles.
+   - Tightened `trip_valid` to require `trip >= 8'd8` (`!= 8'hFF`) and full confidence saturation (`&rd_row.conf == 1`, i.e., `2'b11`). Mutant: `G6LC_MUT_BP_LOOP_LOW_CONF_SHORT`.
+2. **`wt_dcache_ctrl.sv` (both trees — idle `READ`/`READ_V` read-port stealing)**:
+   - `READ`/`REPLAY_READ` (`DCACHE_HIT0`) and `READ_V` (`DCACHE_HIT2`) drove `rd_req_o = 1'b1` unconditionally even when `req_port_i.data_req == 0`, stealing shared `wt_dcache_mem` read grants from write-buffer tag checks & PTW walks (feeding `rtab_full=21,896`).
+   - Gated `rd_req_o = req_port_i.data_req;` (zero added latency on back-to-back load hits; yields read port immediately when idle). Mutant: `G6LC_MUT_DCCTRL_IDLE_RD_STEAL`.
+3. **`g6lc_memdep.sv` (both trees — 64-entry Store-Set hash-alias decay)**:
+   - Tightened `CLEAR_BITS` from `16` (65,536 cyc) to `12` (4,096 cyc, ~1 SMT quantum) to preserve the `-23%` `mem_viol` drop while preventing 65k-cycle false load serialization on 64-entry hash aliases (`+1,877 notissued ld`).
+
+### 3. Remote verification (`ovh_calltorch`)
+
+- `hyp8-bploop-t3` (`verif/tb/core/tb_g6lc_bp_loop_hyp8.sv`, S1–S4): `PASS checked=6` + 3/3 mutants caught (`MUT_SLOT0`, `MUT_WRAP`, `MUT_SHORT`, `rc=0`).
+- `hyp8-dcctrl-rdreq-t1` (`verif/tb/core/tb_g6lc_wt_dcctrl_rdreq_hyp8.sv`, S1–S2): `PASS checked=4` + `MUT_STEAL` caught (`rc=0`).
+
+## 2026-11-25 — SQL-confirmed L3-only eWT prefetch enable + SQL-visible PF telemetry (hyp8-mc)
+
+### 1. Broad-to-narrow SQL evidence
+
+- Completed witness runs **700/702/703** all show the same memory-hierarchy shape: high L2 hit rate (`l2_hit/(hit+miss) ~= 98%`) but an effectively cold L3 on first-touch streaming (`l3_hit=2` against `l3_miss=954/949/986`) with `l2_pf_issue=0` because both prefetch enables were off.
+- Directed baseline `mc-cycq2-l3-t1` (`mc_l3_stride_scan`, run 499) is the control shape: `PASS` in `781,762` cycles, `l2_hit=27 l2_miss=16,389 l3_hit=8,193 l3_miss=8,196 l2_pf_issue=0`; the 8,193 hits are the benchmark's own second pass, not prefetcher hits.
+- Hub/store-path SQL remains the next major bottleneck (`hub_aw_hold_other ~= 2.37-2.74M` versus only `aw_fire ~= 52.8-59.7k`; dominant split `wbusy ~= 842k-1.11M`), but the already-verified L3 prefetcher was a lower-risk confirmed opportunistic improvement and is needed to reduce first-touch L3/DRAM latency before further store-path surgery.
+
+### 2. Minimal implementation
+
+- `core/include/g6lc64_hyp8_mc_config_pkg.sv` (hyp8-mc only): keep `L2PrefetchEn=0` (L2 is already ~98% hit) and enable conservative **L3-only** stride prefetching: `L3PrefetchEn=1`, `L2PfStreams=4`, `L2PfDistance=2`, `L2PfStrideEn=1`, demand reserve `1` of `L3MshrDepth=4`, `L2PfMaxOutstanding=1`, quiet window `8`.
+- `corev_apu/tb/g6lc_testharness.sv` (hyp8): added simulation-only `l3_pf_issue/l3_pf_useful/l3_pf_drop` counters beside the existing L2 PF counters and printed them in `[mc_cache]`, so tracedb ingests the new keys generically through `kv`.
+- `corev_apu/src/g6lc_cluster.sv` + hyp mirror: corrected the stale comment; `check_cfg` permits L3 prefetch independently of L2 prefetch as long as the demand reserve is legal.
+- `verif/regress/remote/run_mc_int2_review.py`: extended `parse_cache_counters` for optional `l3_pf_issue/l3_pf_useful/l3_pf_drop`; legacy lines remain accepted.
+- Local parser verification: `python -m unittest test_testharness_proxy.McCacheCounterParseTests` `OK` plus explicit new-key probe `MC_PARSER_L3PF_PASS`.
+- Remote full-cluster build+witness `hyp8-witness-l3pf-r704fix` launched from the run-704 closure overlaid with the bp_loop/WT-D$/memdep fixes and this L3-PF change; directed comparison tag planned: `mc-directed-l3pf-r704fix` against run-499 baseline (`781,762` cycles, `l3_hit=8,193`, `l3_miss=8,196`, PF counters zero).

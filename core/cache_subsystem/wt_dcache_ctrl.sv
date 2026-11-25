@@ -167,8 +167,9 @@ module wt_dcache_ctrl
       // reuse the miss mechanism to handle
       // the request
       READ, REPLAY_READ: begin
-        // speculatively request cache line
-        rd_req_o = 1'b1;
+        // Only request the shared read port when a back-to-back demand load
+        // is actually waiting; otherwise yield to PTW / wbuffer tag checks.
+        rd_req_o = req_port_i.data_req;
 
         // kill -> go back to IDLE
         if (req_port_i.kill_req) begin

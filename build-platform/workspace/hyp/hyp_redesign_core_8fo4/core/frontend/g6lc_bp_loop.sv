@@ -118,8 +118,13 @@ module g6lc_bp_loop
     assign rd_row = mem_q[idx_q[i]];
 `ifdef G6LC_MUT_BP_LOOP_WRAP_TRIP
     assign trip_valid = 1'b1;
-`else
+`elsif G6LC_MUT_BP_LOOP_LOW_CONF_SHORT
     assign trip_valid = (rd_row.trip != 8'd0) && (rd_row.trip != 8'hFF);
+`else
+    // Require trip >= 8 (and < 255) plus full saturation confidence (conf==2'b11)
+    // so resolve-lagged conf_cnt never falsely overrides TAGE on short/variable
+    // <8-iter boot loops (run 704 vs 703: +4,716 empty cycles).
+    assign trip_valid = (rd_row.trip >= 8'd8) && (rd_row.trip != 8'hFF) && (&rd_row.conf);
 `endif
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
