@@ -100,6 +100,9 @@ TESTS = [
     ('mini_stq_alias_jal',    'mini_stq_alias_jal.S',      [], 'pass'),
     ('mini_stq_flush_fwd',    'mini_stq_flush_fwd.S',      [], 'pass'),
     ('mini_stq_press_smt',    'mini_stq_press_smt.S',      [], 'pass'),
+    # mc_zicclsm_ooo_overlap: RC4+RC5 Zicclsm OoO TID-swallow + two-beat store commit
+    # (OpenWrt printc c=14505435 wedge reproducer).
+    ('mc_zicclsm_ooo_overlap','mc_zicclsm_ooo_overlap.S',  [], 'pass'),
     # mc_wrongpath_window: T19 two-hart wrong-path I$ install window (the
     # ooocoh-t18 boot failure shape) on the dual-hart SMT cores.
     ('mc_wrongpath_window',   'mc_wrongpath_window.S',     [], 'pass'),

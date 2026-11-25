@@ -271,6 +271,11 @@ Configure the proxy with environment variables (`TH_REMOTE_HOST`, `TH_REMOTE_ROO
 `TH_RSYNC_BIN`, `TH_SSH_PASSPHRASE`, `TH_SSH_PASSPHRASE_FILE`). Store credentials only in untracked
 files (e.g. `~/.config/librecore/th-remote.pass`), never in the repository.
 
+For turning a remote-harness symptom (e.g. an SoC/boot wedge) into an isolated,
+mutation-checked leaf test — leaf TBs, directed `verif/tests/custom/` programs,
+the `mc_verdict` exit-code decode, and the tracedb ingest loop — see
+`AGENTS-isolated-tests.md`.
+
 **Remote throughput policy (user request, 2026-09-21):** maximize useful remote parallelism,
 not nested oversubscription. Probe CPU affinity/count, available RAM, active work and free disk
 before a batch; budget the sum of worker compiler/model threads against that capacity. The current

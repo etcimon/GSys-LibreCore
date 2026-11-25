@@ -18,12 +18,20 @@ UNROLL_STMTS = 131072
 # Verilator (stock or g6lc fork).  -march=native adapts to the build host and
 # -DVL_SIMD_PREFER_512 only widens the SIMD tier when __AVX512F__ is defined,
 # so the pair is safe on non-AVX-512 hosts.  Set APU_VLT_NO_OPT=1 to opt out.
-CXX_FLAGS = '-march=native -DVL_SIMD_PREFER_512'
-OPT_MAKEFLAGS = 'OPT_FAST=-O3 OPT_SLOW=-O2 OPT_GLOBAL=-O2'
+CXX_FLAGS = '-march=native -DVL_SIMD_PREFER_512 -fno-semantic-interposition'
+OPT_MAKEFLAGS = 'OPT_FAST=-O3 OPT_SLOW=-O1 OPT_GLOBAL=-O2'
 
-# hyp8-style fork passes (clock-skip-sink + opt-in DFG peepholes).  Only emitted
-# when the selected verilator_bin actually carries them; mirrors the hyp8
-# harness's vlt_supports_flag() capability gate.
+# Proven Verilator codegen flags (measured on EPYC 4244P / GCC 16.2.0 znver4,
+# bit-exact cycles with --assert kept on):
+#   --x-initial fast           : skip VL_RAND_RESET init overhead (+4.4%)
+#   --inline-mult 500          : keep replicated FPnew/SRAM out-of-line (+3.5%)
+#   --output-split-cfuncs 2000 : split mega-NBA funcs for PGO+LTO I1 layout
+VLT_CODEGEN_FLAGS = ('--x-initial', 'fast', '--inline-mult', '500',
+                     '--output-split-cfuncs', '2000')
+
+# hyp8-style fork passes (clock-skip-sink + opt-in DFG peepholes).  Measured
+# 0 hits on --timing APU models (V3ClkSkip bails out on --timing; sentinel DFG
+# reports 0 matching candidates), so kept opt-in via APU_VLT_FORK_PASSES=1.
 FORK_FLAGS = ('-fclock-skip-sink', '-fdfg-peephole',
               '-fdfg-peephole-pack-byte-plane', '-fdfg-peephole-pack-predicates',
               '-fdfg-peephole-pack-bitwise-mux', '-fdfg-peephole-guard-empty-mask',
@@ -70,8 +78,8 @@ def perf_flags():
     """Codegen/runtime opts appended after the unroll policy."""
     if os.environ.get('APU_VLT_NO_OPT') == '1':
         return []
-    flags = ['-CFLAGS', CXX_FLAGS, '-MAKEFLAGS', OPT_MAKEFLAGS]
-    if _fork_supports():
+    flags = [*VLT_CODEGEN_FLAGS, '-CFLAGS', CXX_FLAGS, '-MAKEFLAGS', OPT_MAKEFLAGS]
+    if os.environ.get('APU_VLT_FORK_PASSES') == '1' and _fork_supports():
         flags += list(FORK_FLAGS)
     return flags
 

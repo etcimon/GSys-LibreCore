@@ -109,6 +109,35 @@ class PgoPolicyTests(unittest.TestCase):
         self.assertEqual(subprocess.run(['bash', str(wrapper), '-c', 'test.cpp'],
                                        capture_output=True).returncode, 2)
 
+    def test_perf_flags_and_pgo_use_lto_opt_in(self):
+        env_clean = dict(os.environ)
+        env_clean.pop('APU_VLT_NO_OPT', None)
+        env_clean.pop('APU_VLT_FORK_PASSES', None)
+        out = subprocess.check_output(
+            ['python3', str(HERE / 'apu_vlt_policy.py'), '--flags'],
+            env=env_clean, text=True).splitlines()
+        self.assertIn('--x-initial', out)
+        self.assertIn('--inline-mult', out)
+        self.assertIn('--output-split-cfuncs', out)
+        self.assertNotIn('-fclock-skip-sink', out)
+        noopt = subprocess.check_output(
+            ['python3', str(HERE / 'apu_vlt_policy.py'), '--flags'],
+            env=dict(env_clean, APU_VLT_NO_OPT='1'), text=True).splitlines()
+        self.assertNotIn('--x-initial', noopt)
+        wrapper = self.home / 'cxx.sh'
+        shutil.copy2(HERE / 'verilator-pgo-cxx.sh', wrapper)
+        compiler = self.home / 'fake-gcc'
+        compiler.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+        compiler.chmod(0o755)
+        (self.home / 'compiler').write_text(str(compiler))
+        (self.home / 'phase').write_text('use')
+        no_lto = subprocess.check_output(['bash', str(wrapper), '-c', 'm.cpp'],
+                                         env=dict(env_clean, APU_PGO_USE_LTO='0'), text=True)
+        self.assertNotIn('-flto=auto', no_lto)
+        with_lto = subprocess.check_output(['bash', str(wrapper), '-c', 'm.cpp'],
+                                           env=dict(env_clean, APU_PGO_USE_LTO='1'), text=True)
+        self.assertIn('-flto=auto', with_lto)
+
 
 if __name__ == '__main__':
     unittest.main()

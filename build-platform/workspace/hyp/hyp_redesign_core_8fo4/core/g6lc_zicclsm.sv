@@ -40,7 +40,11 @@ module g6lc_zicclsm
     output logic        st_valid_o,
     output logic [G6LCCfg.XLEN-1:0] st_result_o,
     output exception_t  st_ex_o,
-    output logic [G6LCCfg.TRANS_ID_BITS-1:0] st_tid_o
+    output logic [G6LCCfg.TRANS_ID_BITS-1:0] st_tid_o,
+    input  logic        ld_head_checked_i,
+    input  logic        lu_replay_fu_i,
+    output logic        ld_replay_o,
+    output logic [G6LCCfg.TRANS_ID_BITS-1:0] ld_replay_id_o
 );
   localparam int unsigned W = G6LCCfg.IS_XLEN64 ? 8 : 4;
 
@@ -89,6 +93,8 @@ module g6lc_zicclsm
     assign st_result_o   = st_result_fu_i;
     assign st_ex_o       = st_ex_fu_i;
     assign st_tid_o      = st_tid_fu_i;
+    assign ld_replay_o    = 1'b0;
+    assign ld_replay_id_o = '0;
   end else begin : gen_on
     typedef enum logic [2:0] {
       IDLE,
@@ -107,18 +113,32 @@ module g6lc_zicclsm
     lsu_ctrl_t beat0, beat1;
     logic [63:0] b0_in64, b0_aligned, b1_assembled, st_b1_data;
     logic is_load;
+    logic ld_match, st_match, ld_match_idle, st_match_idle;
+    logic [2:0] off_eff;
     logic hold_v_q, hold_v_d;
     logic [63:0] hold_r_q, hold_r_d;
     fu_op        hold_op_q, hold_op_d;
     logic [G6LCCfg.TRANS_ID_BITS-1:0] hold_tid_q, hold_tid_d;
 
     assign off = ctrl_i.vaddr[2:0];
+    assign off_eff = (state_q == IDLE) ? off : off_q;
     assign sz = extract_transfer_size(ctrl_i.operation);
     assign n0 = 4'(W) - {1'b0, off};
     assign n1 = 4'(1 << unsigned'(sz)) - n0;
     assign split_now = ctrl_i.valid && zicclsm_eligible(ctrl_i.operation, ctrl_i.fu) &&
                        !ctrl_i.is_speculative_load_miss && wraps(off, sz);
     assign is_load = orig_q.fu == LOAD;
+`ifdef G6LC_MUT_ZICCLSM_TID_SWALLOW
+    assign ld_match      = is_load && ld_valid_fu_i;
+    assign st_match      = !is_load && st_valid_fu_i;
+    assign ld_match_idle = 1'b0;
+    assign st_match_idle = 1'b0;
+`else
+    assign ld_match      = is_load && ld_valid_fu_i && (ld_tid_fu_i == orig_q.trans_id);
+    assign st_match      = !is_load && st_valid_fu_i && (st_tid_fu_i == orig_q.trans_id);
+    assign ld_match_idle = (ctrl_i.fu == LOAD) && ld_valid_fu_i && (ld_tid_fu_i == ctrl_i.trans_id);
+    assign st_match_idle = (ctrl_i.fu == STORE) && st_valid_fu_i && (st_tid_fu_i == ctrl_i.trans_id);
+`endif
 
     // A136 + A10: byte-granular 8:1 muxes replace three 64-bit dynamic shifts
     // and 64-bit mask subtractors. Beat-0 data is right-aligned by off_q at
@@ -129,7 +149,7 @@ module g6lc_zicclsm
     assign orig_data64 = 64'(orig_q.data);
     for (genvar b = 0; b < 8; b++) begin : gen_byte_mux
       logic [2:0] b0_src, b1_src, st_src;
-      assign b0_src = 3'(b) + off_q;
+      assign b0_src = 3'(b) + off_eff;
       assign b0_aligned[b*8 +: 8] = b0_in64[b0_src*8 +: 8];
       assign b1_src = 3'(b) - n0_q[2:0];
       assign b1_assembled[b*8 +: 8] = (4'(b) < n0_q)
@@ -159,6 +179,8 @@ module g6lc_zicclsm
       end
       beat0.valid = 1'b1;
       beat1.valid = 1'b1;
+      beat0.is_speculative_load_miss = orig_q.is_speculative_load_miss | ctrl_i.is_speculative_load_miss;
+      beat1.is_speculative_load_miss = orig_q.is_speculative_load_miss | ctrl_i.is_speculative_load_miss;
     end
 
     always_comb begin
@@ -168,7 +190,7 @@ module g6lc_zicclsm
       off_d          = off_q;
       n0_d           = n0_q;
       n1_d           = n1_q;
-      hold_v_d       = 1'b0;
+      hold_v_d       = hold_v_q;
       hold_r_d       = hold_r_q;
       hold_op_d      = hold_op_q;
       hold_tid_d     = hold_tid_q;
@@ -183,51 +205,106 @@ module g6lc_zicclsm
       st_result_o    = st_result_fu_i;
       st_ex_o        = st_ex_fu_i;
       st_tid_o       = st_tid_fu_i;
+      ld_replay_o    = 1'b0;
+      ld_replay_id_o = ctrl_i.trans_id;
 
       unique case (state_q)
         IDLE: begin
-          if (split_now) begin
-            state_d      = B0_ACTIVE;
-            orig_d       = ctrl_i;
-            off_d        = off;
-            n0_d         = n0;
-            n1_d         = n1;
-            ctrl_o       = ctrl_i;
+          if (hold_v_q) begin
+            ctrl_o.valid = 1'b0;
             pop_ld_byp_o = 1'b0;
             pop_st_byp_o = 1'b0;
-            if (ctrl_i.fu == LOAD) begin
-              ctrl_o.vaddr     = {ctrl_i.vaddr[G6LCCfg.VLEN-1:3], 3'b000};
-              ctrl_o.operation = G6LCCfg.IS_XLEN64 ? LD : LWU;
-              ctrl_o.be        = '1;
+          end else if (split_now) begin
+`ifndef G6LC_MUT_ZICCLSM_UNCHECKED_SPLIT
+            // RC6: a younger wrapping load whose older stores are unresolved
+            // (!ld_head_checked_i) would pin lsu_bypass in B0_WAIT while
+            // load_unit waits on ld_checked_i -> circular deadlock if an older
+            // store sits behind it in lsu_bypass or IQ. Replay immediately so
+            // older stores drain; the load refetches cleanly at commit head.
+            if (G6LCCfg.OoOEn && (ctrl_i.fu == LOAD) && !ld_head_checked_i) begin
+              state_d        = IDLE;
+              ctrl_o.valid   = 1'b0;
+              pop_ld_byp_o   = 1'b1;
+              pop_st_byp_o   = 1'b0;
+              ld_replay_o    = 1'b1;
+              ld_replay_id_o = ctrl_i.trans_id;
             end else begin
-              ctrl_o.be = ((8'((8'b1 << n0) - 1)) << off);
+`endif
+              state_d      = B0_ACTIVE;
+              orig_d       = ctrl_i;
+              off_d        = off;
+              n0_d         = n0;
+              n1_d         = n1;
+              ctrl_o       = ctrl_i;
+              pop_ld_byp_o = 1'b0;
+              pop_st_byp_o = 1'b0;
+              if (ctrl_i.fu == LOAD) begin
+                ctrl_o.vaddr     = {ctrl_i.vaddr[G6LCCfg.VLEN-1:3], 3'b000};
+                ctrl_o.operation = G6LCCfg.IS_XLEN64 ? LD : LWU;
+                ctrl_o.be        = '1;
+              end else begin
+                ctrl_o.be = ((8'((8'b1 << n0) - 1)) << off);
+              end
+              if (ctrl_i.fu == LOAD && lu_replay_fu_i) begin
+                state_d      = IDLE;
+                pop_ld_byp_o = 1'b1;
+              end else if (ld_match_idle) begin
+                if (ld_ex_fu_i.valid) begin
+                  ld_valid_o   = 1'b1;
+                  pop_ld_byp_o = 1'b1;
+                  state_d      = IDLE;
+                end else begin
+                  ld_valid_o   = 1'b0;
+                  beat0_data_d = G6LCCfg.XLEN'(b0_aligned);
+                  state_d      = B1_ACTIVE;
+                end
+              end else if (ctrl_i.fu == LOAD && pop_ld_fu_i) state_d = B0_WAIT;
+              if (st_match_idle) begin
+                if (st_ex_fu_i.valid) begin
+                  st_valid_o   = 1'b1;
+                  pop_st_byp_o = 1'b1;
+                  state_d      = IDLE;
+                end else begin
+                  st_valid_o   = 1'b0;
+                  state_d      = B1_ACTIVE;
+                end
+              end else if (ctrl_i.fu == STORE && pop_st_fu_i) state_d = B0_WAIT;
+`ifndef G6LC_MUT_ZICCLSM_UNCHECKED_SPLIT
             end
-            if (ctrl_i.fu == LOAD && pop_ld_fu_i) state_d = B0_WAIT;
-            if (ctrl_i.fu == STORE && pop_st_fu_i) state_d = B0_WAIT;
+`endif
           end
         end
         B0_ACTIVE: begin
           ctrl_o       = beat0;
           pop_ld_byp_o = 1'b0;
           pop_st_byp_o = 1'b0;
+`ifdef G6LC_MUT_ZICCLSM_TID_SWALLOW
           ld_valid_o   = 1'b0;
           st_valid_o   = 1'b0;
-          if (is_load && ld_valid_fu_i) begin
+`endif
+          if (is_load && lu_replay_fu_i) begin
+            state_d      = IDLE;
+            pop_ld_byp_o = 1'b1;
+          end else if (ld_match) begin
             if (ld_ex_fu_i.valid) begin
               ld_valid_o   = 1'b1;
               pop_ld_byp_o = 1'b1;
               state_d      = IDLE;
             end else begin
+              ld_valid_o   = 1'b0;
               beat0_data_d = G6LCCfg.XLEN'(b0_aligned);
               state_d      = B1_ACTIVE;
             end
           end else if (is_load && pop_ld_fu_i) state_d = B0_WAIT;
-          if (!is_load && st_valid_fu_i) begin
+          if (st_match) begin
             if (st_ex_fu_i.valid) begin
               st_valid_o   = 1'b1;
               pop_st_byp_o = 1'b1;
               state_d      = IDLE;
-            end else state_d = B1_ACTIVE;
+            end else begin
+              st_valid_o   = 1'b0;
+              state_d      = B1_ACTIVE;
+            end
           end else if (!is_load && pop_st_fu_i) state_d = B0_WAIT;
         end
         B0_WAIT: begin
@@ -235,25 +312,29 @@ module g6lc_zicclsm
           ctrl_o.valid = 1'b0;
           pop_ld_byp_o = 1'b0;
           pop_st_byp_o = 1'b0;
+`ifdef G6LC_MUT_ZICCLSM_TID_SWALLOW
           ld_valid_o   = 1'b0;
           st_valid_o   = 1'b0;
-          if (is_load && ld_valid_fu_i) begin
+`endif
+          if (ld_match) begin
             if (ld_ex_fu_i.valid) begin
               ld_valid_o   = 1'b1;
               pop_ld_byp_o = 1'b1;
               state_d      = IDLE;
             end else begin
+              ld_valid_o   = 1'b0;
               beat0_data_d = G6LCCfg.XLEN'(b0_aligned);
               state_d      = B1_ACTIVE;
             end
           end
-          if (!is_load && st_valid_fu_i) begin
+          if (st_match) begin
             if (st_ex_fu_i.valid) begin
               st_valid_o   = 1'b1;
               pop_st_byp_o = 1'b1;
               state_d      = IDLE;
             end else begin
-              state_d = B1_ACTIVE;
+              st_valid_o   = 1'b0;
+              state_d      = B1_ACTIVE;
             end
           end
         end
@@ -261,37 +342,62 @@ module g6lc_zicclsm
           ctrl_o         = beat1;
           pop_ld_byp_o   = 1'b0;
           pop_st_byp_o   = 1'b0;
+`ifdef G6LC_MUT_ZICCLSM_TID_SWALLOW
           ld_valid_o     = 1'b0;
           st_valid_o     = 1'b0;
-          if (is_load && pop_ld_fu_i) state_d = B1_WAIT;
-          if (!is_load && pop_st_fu_i) state_d = B1_WAIT;
-          if (ld_valid_fu_i && ld_ex_fu_i.valid) begin
-            ld_valid_o   = 1'b1;
-            pop_ld_byp_o = 1'b1;
+`endif
+          if (is_load && lu_replay_fu_i) begin
             state_d      = IDLE;
-          end
-          if (st_valid_fu_i && st_ex_fu_i.valid) begin
+            pop_ld_byp_o = 1'b1;
+          end else if (ld_match) begin
+            if (ld_ex_fu_i.valid) begin
+              ld_valid_o   = 1'b1;
+              pop_ld_byp_o = 1'b1;
+              state_d      = IDLE;
+            end else begin
+              ld_valid_o   = 1'b0;
+              hold_v_d     = 1'b1;
+              hold_r_d     = b1_assembled;
+              hold_op_d    = orig_q.operation;
+              hold_tid_d   = orig_q.trans_id;
+              pop_ld_byp_o = 1'b1;
+              state_d      = IDLE;
+            end
+          end else if (is_load && pop_ld_fu_i) state_d = B1_WAIT;
+          if (st_match) begin
             st_valid_o   = 1'b1;
+            st_result_o  = orig_q.data;
+            st_ex_o      = st_ex_fu_i;
+            st_tid_o     = orig_q.trans_id;
             pop_st_byp_o = 1'b1;
             state_d      = IDLE;
-          end
+          end else if (!is_load && pop_st_fu_i) state_d = B1_WAIT;
         end
         B1_WAIT: begin
           ctrl_o       = orig_q;
           ctrl_o.valid = 1'b0;
           pop_ld_byp_o = 1'b0;
           pop_st_byp_o = 1'b0;
+`ifdef G6LC_MUT_ZICCLSM_TID_SWALLOW
           ld_valid_o   = 1'b0;
           st_valid_o   = 1'b0;
-          if (is_load && ld_valid_fu_i) begin
-            hold_v_d     = 1'b1;
-            hold_r_d     = b1_assembled;
-            hold_op_d    = orig_q.operation;
-            hold_tid_d   = orig_q.trans_id;
-            pop_ld_byp_o = 1'b1;
-            state_d      = IDLE;
+`endif
+          if (ld_match) begin
+            if (ld_ex_fu_i.valid) begin
+              ld_valid_o   = 1'b1;
+              pop_ld_byp_o = 1'b1;
+              state_d      = IDLE;
+            end else begin
+              ld_valid_o   = 1'b0;
+              hold_v_d     = 1'b1;
+              hold_r_d     = b1_assembled;
+              hold_op_d    = orig_q.operation;
+              hold_tid_d   = orig_q.trans_id;
+              pop_ld_byp_o = 1'b1;
+              state_d      = IDLE;
+            end
           end
-          if (!is_load && st_valid_fu_i) begin
+          if (st_match) begin
             st_valid_o   = 1'b1;
             st_result_o  = orig_q.data;
             st_ex_o      = st_ex_fu_i;
@@ -304,10 +410,17 @@ module g6lc_zicclsm
       endcase
 
       if (hold_v_q) begin
-        ld_valid_o  = 1'b1;
-        ld_result_o = finish_load(hold_op_q, hold_r_q);
-        ld_tid_o    = hold_tid_q;
-        ld_ex_o     = '0;
+`ifndef G6LC_MUT_ZICCLSM_TID_SWALLOW
+        if (!ld_valid_fu_i) begin
+`endif
+          ld_valid_o  = 1'b1;
+          ld_result_o = finish_load(hold_op_q, hold_r_q);
+          ld_tid_o    = hold_tid_q;
+          ld_ex_o     = '0;
+          hold_v_d    = 1'b0;
+`ifndef G6LC_MUT_ZICCLSM_TID_SWALLOW
+        end
+`endif
       end
 
       // OoO wrong-path recovery for an in-flight split: a cancelled_mask
@@ -323,19 +436,29 @@ module g6lc_zicclsm
           ctrl_i.is_speculative_load_miss) begin
         state_d        = IDLE;
         ctrl_o.valid   = 1'b0;
+`ifdef G6LC_MUT_ZICCLSM_TID_SWALLOW
         ld_valid_o     = 1'b0;
         st_valid_o     = 1'b0;
+`else
+        if (ld_match) begin
+          ld_valid_o   = 1'b0;
+          hold_v_d     = 1'b0;
+        end
+        if (st_match) st_valid_o = 1'b0;
+`endif
         pop_ld_byp_o   = is_load;
         pop_st_byp_o   = !is_load;
       end
 
       if (flush_i) begin
         state_d      = IDLE;
+        hold_v_d     = 1'b0;
         ctrl_o.valid = 1'b0;
         ld_valid_o   = 1'b0;
         st_valid_o   = 1'b0;
         pop_ld_byp_o = 1'b0;
         pop_st_byp_o = 1'b0;
+        ld_replay_o  = 1'b0;
       end
     end
 

@@ -35,9 +35,17 @@ VLT_FLAGS = (
     "-fdfg-peephole-fuse-transpose-reductions",
     "--dumpi-sentinel",
     "--no-assert",
+    "--x-initial-fast",
+    "--x-assign-fast",
+    "--inline-mult-500",
+    "--output-split-cfuncs-2000",
 )
 VLT_FLAG_EXPANSIONS = {
     "--dumpi-sentinel": ["--dumpi-sentinel", "1"],
+    "--x-initial-fast": ["--x-initial", "fast"],
+    "--x-assign-fast": ["--x-assign", "fast"],
+    "--inline-mult-500": ["--inline-mult", "500"],
+    "--output-split-cfuncs-2000": ["--output-split-cfuncs", "2000"],
 }
 SENTINEL_PROBE_OPS = (
     "bit_select_concat",

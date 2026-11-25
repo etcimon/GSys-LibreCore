@@ -346,6 +346,7 @@ module store_buffer
   // ---------------- helper records ----------------
   // stb_insert S2 writeback record
   logic                    s1_v;
+  logic [G6LCCfg.TRANS_ID_BITS-1:0] s1_tid;
   logic                    s2_wr_valid;
   logic [DEPTH_SPEC-1:0]   s2_slot_oh;
   entry_t                  s2_entry;
@@ -356,6 +357,8 @@ module store_buffer
   logic                    commit_push_valid;
   entry_t                  commit_push_entry;
   logic                    commit_pend_v;
+  logic                    commit_pend2_v;
+  entry_t                  commit_pend2_entry;
   // stb_drain records
   entry_t [DEPTH_COMMIT-1:0] cmt_queue_n;
   logic                    drain_commit_ready, drain_no_st_pending, drain_gnt;
@@ -514,6 +517,7 @@ module store_buffer
       .live_after_i      (live_after),
       .oldest_live_tid_i,
       .s1_v_o            (s1_v),
+      .s1_tid_o          (s1_tid),
       .s2_wr_valid_o     (s2_wr_valid),
       .s2_slot_oh_o      (s2_slot_oh),
       .s2_entry_o        (s2_entry),
@@ -536,6 +540,7 @@ module store_buffer
       .spec_entries_i (speculative_queue_q),
       .commit_i,
       .commit_trans_id_i,
+      .drain_ready_i  (commit_status_cnt_q < $bits(commit_status_cnt_q)'(DEPTH_COMMIT)),
       .head_oh_o      (spec_head_oh),
       .head_entry_o   (spec_head),
       .head_valid_o   (spec_head_valid),
@@ -543,7 +548,9 @@ module store_buffer
       .pop_oh_o       (commit_pop_oh),
       .push_valid_o   (commit_push_valid),
       .push_entry_o   (commit_push_entry),
-      .pend_v_o       (commit_pend_v)
+      .pend_v_o       (commit_pend_v),
+      .pend2_v_o      (commit_pend2_v),
+      .pend2_entry_o  (commit_pend2_entry)
   );
 
   // debug aliases of the retired ring pointers (census, leaf benches)
@@ -574,15 +581,18 @@ module store_buffer
   // profile whose scoreboard tids are not globally unique, this match must
   // also compare the entry's .hart — recorded SMT2 obligation (single-hart
   // hyp8: tid identity is complete).
-  logic commit_tid_present;
+  logic commit_tid_present, commit_tid_in_s1;
   always_comb begin
     commit_tid_present = 1'b0;
     for (int unsigned i = 0; i < DEPTH_SPEC; i++)
       commit_tid_present |= spec_valid_q[i] &&
           (speculative_queue_q[i].trans_id == commit_trans_id_i);
   end
+  assign commit_tid_in_s1 = G6LCCfg.RVZicclsm &&
+      ((s1_v && (s1_tid == commit_trans_id_i)) ||
+       (valid_i && (trans_id_i == commit_trans_id_i)));
   assign commit_ready_o  = drain_commit_ready && !commit_pend_v &&
-                          (!G6LCCfg.OoOEn || commit_tid_present);
+                          (!G6LCCfg.OoOEn || (commit_tid_present && !commit_tid_in_s1));
 
   assign rvfi_mem_paddr_o = spec_head.address;
 
@@ -710,6 +720,11 @@ module store_buffer
           commit_push_entry.cbo_op == CBO_ZERO &&
           ((commit_push_entry.address[11:0] >> CBOZ_OFF_W) ==
            (page_offset_i >> CBOZ_OFF_W))))) begin
+      page_offset_matches_now = 1'b1;
+      po_commit_match = 1'b1;
+    end
+    if (commit_pend2_v &&
+        po_eq(commit_pend2_entry.address[11:0], page_offset_i)) begin
       page_offset_matches_now = 1'b1;
       po_commit_match = 1'b1;
     end
@@ -1329,7 +1344,9 @@ module store_buffer
         if (i != j) begin : gen_pair
           spec_order_matches_anchor :
           assert property (@(posedge clk_i) disable iff (!rst_ni)
-                           (spec_valid_q[i] && spec_valid_q[j]) |->
+                           (spec_valid_q[i] && spec_valid_q[j] &&
+                            (!G6LCCfg.RVZicclsm ||
+                             (speculative_queue_q[i].trans_id != speculative_queue_q[j].trans_id))) |->
                            (spec_older_q[i][j] == ooo_older(speculative_queue_q[i].trans_id,
                                                            speculative_queue_q[j].trans_id)))
           else $error("[Speculative Queue] age of slots %0d/%0d (tids %0d/%0d) disagrees with the anchor %0d",

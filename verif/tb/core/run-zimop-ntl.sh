@@ -146,6 +146,11 @@ set +e
 "$OUT/zicclsm_mut/tb" > "$OUT/zicclsm_mut.log" 2>&1
 grep -q "ZICCLSM_ON" "$OUT/zicclsm_mut.log" || { echo "FAIL mutation G6LC_MUT_ZICCLSM_OFF not caught"; cat "$OUT/zicclsm_mut.log"; exit 1; }
 set -e
+build_zicclsm zicclsm_tid_mut "+define+G6LC_MUT_ZICCLSM_TID_SWALLOW"
+set +e
+"$OUT/zicclsm_tid_mut/tb" > "$OUT/zicclsm_tid_mut.log" 2>&1
+grep -q "ZICCLSM_OOO_TID_SWALLOW" "$OUT/zicclsm_tid_mut.log" || { echo "FAIL mutation G6LC_MUT_ZICCLSM_TID_SWALLOW not caught"; cat "$OUT/zicclsm_tid_mut.log"; exit 1; }
+set -e
 
 build_za64rs() {
   verilator "${VFLAGS[@]}" \

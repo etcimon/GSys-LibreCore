@@ -28,6 +28,10 @@ local valid_vlt_flags = {
     ["-fdfg-peephole-fuse-transpose-reductions"] = true,
     ["--dumpi-sentinel"] = true,
     ["--no-assert"] = true,
+    ["--x-initial-fast"] = true,
+    ["--x-assign-fast"] = true,
+    ["--inline-mult-500"] = true,
+    ["--output-split-cfuncs-2000"] = true,
 }
 local valid_probe_ops = {
     ["bit_select_concat"] = true,

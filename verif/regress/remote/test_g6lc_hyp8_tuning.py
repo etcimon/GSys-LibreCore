@@ -305,3 +305,30 @@ class NativeOverlayTests(unittest.TestCase):
                          "strided-bit-columns", "circular-age-compare",
                          "scatter-eq-mask", "wide-mux-guard"} <= ops)
         self.assertEqual(len(meta["sentinelProbes"]), 4)
+
+    @unittest.skipUnless(lua_binary(), "requires Lua on PATH")
+    def test_apu_vgsys_perf_policy_gating_and_flags(self):
+        apu_policy = Path(__file__).parent / "apu_vgsys_perf.lua"
+        flags_timing, meta_timing = plan_verilator_flags(
+            "Vtb_g6lc_apu_vgtop", "--binary --timing --assert", apu_policy)
+        self.assertIn("--x-initial", flags_timing)
+        self.assertIn("--inline-mult", flags_timing)
+        self.assertIn("500", flags_timing)
+        self.assertIn("--output-split-cfuncs", flags_timing)
+        self.assertIn("2000", flags_timing)
+        self.assertNotIn("-fclock-skip-sink", flags_timing)
+        self.assertNotIn("-fdfg-peephole-pack-bitwise-mux", flags_timing)
+        self.assertNotIn("clockSkip", meta_timing)
+
+        flags_notiming, meta_notiming = plan_verilator_flags(
+            "Vtb_g6lc_apu_vgtop", "--cc --no-timing --assert", apu_policy)
+        self.assertIn("-fclock-skip-sink", flags_notiming)
+        self.assertEqual(meta_notiming["clockSkip"][0]["policy"], "opportunistic")
+
+        rules, meta_ov = select_policy(
+            "Vtb_g6lc_apu_vgtop", "--binary --timing --assert", apu_policy,
+            markers=("->assertOn()", "VL_ONEHOT"),
+            sentinel_info={"dfg": {"masked_reduction": 3}})
+        self.assertEqual({op for _, _, op in rules}, {"assert-guard-hoist"})
+        self.assertIn("-fdfg-peephole-guard-empty-mask", meta_ov.get("vltFlags", []))
+        self.assertNotIn("-fdfg-peephole-fuse-transpose-reductions", meta_ov.get("vltFlags", []))

@@ -7375,3 +7375,1418 @@ in `verif/regress/remote/hyp8/tracedb/ingest.py` (deployed to
 Also confirmed `mini_l2_hot_scan` PASS @ 1,164,882 cycles (`l2_hit=5953,
 l3_hit=1025`, all 4 cores retired) and `hyp8-bootprobe-cycq2-t1` complete at
 400,000 cycles (`req=24 switches=24 aborts=0`, core 0 `h0=64359, h1=32596`).
+
+## RFIX-131a-NEW — hyp8-fast OpenWrt witness wedge @ ~14.5M: LSU/store operand-readiness deadlock (DIAGNOSIS, fix pending)
+
+First fast-model (`hyp8-fast-gcc13-t2`, Lua+noassert+GCC13.3+PGO ~1.385kcyc/s)
+OpenWrt v24.10.2 witness (`localmc-stage/fw_payload.elf` sha 04f3b24b) reached
+**first UART (277 bytes)** then core0 hart0 froze `retired=5,041,373
+last_pc=0x8000a012` (OpenSBI `printc` epilogue) → `mc_verdict` **126**
+(ran-then-stopped, `mc_last_wfi=0`). Prior 50M witness never got past 3.7M.
+
+### [hang] LSQ decode (run `hyp8-witness-fast-openwrt`, the smoking gun)
+```
+LSQ st[0] id=18 addr_v=1 data_v=1 addr=0x80053e30   <- RESOLVED (NOT the blocker)
+LSQ st[1..7] id=19,20,24,32,33,35,38 addr_v=0 data_v=0 addr=0x0  <- 7 UNRESOLVED
+LSQ ld[0..7] id=25..48 addr_v=1 done=0 addr=0x80053e20-58,0x8004211c
+IQ issue_valid=0 win_v=0 take_grant=0  lsu_rdy=1  D$ rd_req=0 mshr_vld=0 wbuf empty
+```
+- `st_q.addr_v`/`data_v` are set by the SAME `ev_addr`/`ev_data` events that
+  drive `st_resolved`/`st_data_res` (g6lc_lsq_slot.sv:379-404). So st[0]
+  (addr_v=1,data_v=1) is fully resolved — **the coherence/write-ack-loss
+  hypothesis is DISPROVEN** (fabric idle, zero in-flight mem ops).
+- The 7 unresolved stores = prologue `sd`/CBO at pc `0x80009fd8-0x8000a038`
+  (SBX fu=2 op=38/46/41). Dispatched into LSQ but **never issued** — operand
+  phys regs never readied → `ev_addr`/`ev_data` never fire → `st_resolved`
+  never fires → `unres_q`/`dwait_q` (g6lc_lsq_release.sv) block younger
+  same-line loads → commit-head `ld` done=0 → hart0 freeze.
+- IQ `ready=0`/`issue_valid=0` globally + `lsu_rdy=1`: system-wide operand
+  starvation, NOT a memory/fabric stall.
+
+### Mechanism (operand-readiness deadlock)
+Store dispatched→LSQ entry (addr_v=0)→waits in issue stage for operand phys
+regs (`stall_rs1/rs2/rs3` in issue_read_operands.sv; `rs1_rdy` from
+g6lc_rename_resolve → grp_rs*_ready → IQ disp_rs*_ready_i). If the operand's
+producer phys reg never becomes ready → store never issues → addr_v=0 forever.
+Circular knot: younger same-line loads `dwait`/`unres` on the stuck stores;
+their own data depends on producers that may themselves be blocked.
+**Suspect class = the same operand-read/issue-drop family already fixed in
+issue_read_operands.sv (ALU2/FPU/MULT collisions) + rename/scoreboard
+phys-reg ready-tracking (g6lc_freelist leak / g6lc_rename_resolve rs*_rdy).**
+
+### Discriminating run in flight
+`hyp8-witness-fast-coh` pid 625027, 16M cap, windowed `+trace_from=14M
++trace_to=16M +ld_state +lsq_trace +tlb_trace +smt_stats
++smt_mem_watch=0x80053e00 +hang_dump=2000`. stdout block-buffered → all dumps
+flush at exit. `+lsq_trace` names which store tid blocks which load and whether
+`st_resolved`/`st_data_res`/`ld_alloc`/`unres`/`dwait` ever transition;
+`+hang_dump` SBX `prd`/IQ `prs1,prs2,ready` pin the stuck phys reg.
+ETA ~2.7h to the ~14.5M wedge (firmware ~1.1kcyc/s instrumented).
+
+### Next
+1. Harvest coh log → identify blocking store tid + missing event (addr vs data)
+   + stuck phys reg / producer tid.
+2. Leaf TB in verif/tb/ (template: tb_g6lc_lsq.sv tasks do_alloc/do_addr/
+   do_sdata/wait_verdict + run_*_leaf.sh positive/+oracle_negative/G6LC_MUT_*),
+   OR issue_read_operands/rename leaf if operand path implicated.
+3. Fix BOTH trees (hyp_redesign_core_8fo4 + hyp_redesign_corev_apu_8fo4).
+4. Directed repro in verif/tests/custom/ + witness re-run.
+
+### Update — opcode decode correction + directed cohort 1 (all PASS)
+- SBX `fu=2 op=38/46/41` decodes (g6lc_core_pkg enum, ADD=0): **op=38=SD,
+op=41=SW, op=46=SB** — plain SD/SW/SB prologue stores, NOT AMO/CBO. The
+`addr_v=0` means the store's rs1 (sp base) / AGU address operand never
+readied — points at scoreboard/rename phys-reg readiness or a stuck
+producer (likely the prologue `addi sp` or an older load), not AMO ordering.
+- Directed cohort 1 on `hyp8-fast-gcc13-t2` (manual SSH path — Windows lacks
+  rsync so `py --data` fails; used `shell` + repo `/opt/testharness/repo`
+  multicore sources + pushed gaps): mc_store_load_new_line, mini_spo_st_fwd,
+  mini_stq_alias_jal, mini_stq_flush_fwd, mini_stq_press_smt, mini_wt_delay_ld
+  → **ALL PASS** (723–500494 cyc). LSQ store-forward/ordering healthy in
+  isolation → bug needs the specific OpenWrt-boot dependency knot.
+- Cohort 2 launched (smode/wrongpath/cbo/amo/liveness, 13 tests) →
+  `/opt/testharness/runs/hyp8-mc-manual/output2/`.
+- NOTE for future: `run_hyp8_mc_directed.py` needs rsync for `--data`; on
+  Windows hosts push `.S` via `shell` base64 chunks or reuse
+  `/opt/testharness/repo/verif/tests/custom/` + `TH_DATA_DIR` override.
+
+### BREAKTHROUGH — deadlock mechanism decoded from run1 [hang] SBX+IQ+LSQ
+Decoded the frozen scoreboard/IQ/LSQ (run `hyp8-witness-fast-openwrt`, hart0):
+- Stuck stores = SBX slots {18,19,20,24,32,33,35,38} = LSQ st ids
+  {19,20,24,32,33,35,38}: prologue `sd`/`sw`/`sb` @ pc 0x80009fd6-0x8000a006.
+- IQ operand table (`prs1`/`prs2`/`ready=00000010`) names each store's
+  unready phys-reg sources:
+    ST19/20/24 prs1=78  <- SBX slot17 `addi sp` (ALU) @0x80009fd4  (sp base)
+    ST33     prs1=86   <- SBX slot29 LD @0x80009fee -> prd=86
+    ST35     prs1=165  <- SBX slot34 LD @0x80009ffc -> prd=165
+    ST38     prs1=84   <- SBX slot27 ALU @0x80009fe8 -> prd=84
+    ST32     prs1=173  <- (producer TBD)
+- The producers slot29/slot34 are themselves STUCK LOADS (LSQ ld id=29,34
+  done=0, addr=0x80053e58). So stores ST33/ST35 legitimately RAW-wait on
+  loads that cannot complete.
+- Loads complete only when `unres_q`(older unresolved same-line stores) AND
+  `dwait_q`(data-matched stores) empty (g6lc_lsq_release.sv). The epilogue
+  loads (slot44 `ld s0,48(sp)` @0x800a014 = commit head) dwait on the
+  unresolved prologue stores → commit head frozen → mc_verdict 126.
+- IQ also shows STALE/garbage entries: fu∈{0,6,8,10,12,14}, op∈{132,148,16,28},
+  pc=0x13fa8…/0x14a31…/0x13ea8…, prs up to 173 — consistent with wrong-path /
+  squash-residue phys-reg confusion (recurring defect class).
+
+### Deadlock cycle (register RAW + LSQ memory ordering)
+  store ST35 (0x9ffe) needs phys165 = LD34 (0x9ffc, older)  [legal RAW]
+  LD34 reads 0x80053e58, dwaits on OLDER unresolved stores (slots<34)
+  those older stores (18,19,20,24,32) need phys regs held by loads/ops that
+  are themselves blocked → operand starvation propagates → all stuck.
+At least one edge is FALSE (else program-order semantics can't deadlock):
+candidates = (a) load dwait on non-aliasing/younger store (LSQ CAM/age bug),
+(b) store operand phys-reg mis-rename onto a stuck/wrong-path producer,
+(c) phys-reg ready/busy tracking lost across SMT hart switch.
+NEXT: run2 windowed `+lsq_trace` (unres/dwait/st_resolved transitions per
+tid) + `+hang_dump` pins the false edge; then leaf TB on g6lc_lsq_release /
+issue_read_operands / g6lc_rename.
+
+### run2 windowed trace (hyp8-witness-fast-coh, +trace_from=14M +lsq_trace +smt_stats +smt_mem_watch=0x80053e00) — LSQ EXONERATED, freeze pinned ~14.505M
+- `[lsq]` per-load transitions in window: loads with `unres=0` complete
+  (`done=1 rel=1`, e.g. id=7,11); loads with non-zero `unres` stay `done=0`
+  forever (id=25,29,34,36,41-44). `st_resolved=fff808000000001f` and
+  `st_data_res` are BIT-FROZEN from wedge onset — no store ever resolves again.
+- DECODED unres masks vs st_resolved: e.g. id=41-44 unres={23,24,28,32,33,35,38};
+  NONE of those slot bits are in st_resolved{0-4,43,51-63} → the loads wait on
+  GENUINELY-UNRESOLVED stores. **LSQ unres/dwait ordering is CORRECT — not the
+  false edge.** (id=25 unres even shrank 0x11c0000→0x1180000 as a store resolved.)
+- `[smt-flow] wt_txv` write-transactions to 0x80053d{a0,a8,b0,b8}, 0x80053e58,
+  0x80042118, 0x10000000 flowed normally until **c≈14505453**, then STOP — the
+  store pipeline froze at ~14.505M (matches run1 last_pc=0x8000a012 printc epi).
+- `[ldport] dreq=0 gnt=0` throughout wedge — loads never reach the memory port;
+  they are stuck UPSTREAM in IQ on operand phys-reg readiness (prs1/prs2).
+- CONCLUSION: stores are operand-starved because their phys-reg producers never
+  write back. The false edge is in phys-reg readiness/rename/squash — NOT LSQ.
+  Leading loci: (b) rename bound a store operand to a wrong/squashed producer,
+  or (c) a producer's wb_prd→rsX_rdy wakeup was lost across SMT/cancel; IQ
+  garbage entries (fu∈{0,6,8,10,12,14}, pc=0x13fa8…) = squash-residue signature.
+- NEXT: hang_dump (full SBX+IQ+LSQ at freeze) on run2 exit names the exact stuck
+  phys reg + its producer tid; then leaf TB on g6lc_iq wakeup / g6lc_rename /
+  scoreboard phys-ready path.
+
+### run2 hang_dump ([smt-stall] final, cyc=15999986 hart=0) — freeze state fully decoded
+Verdict: `program exit code 0` + `FAIL: a core ran and then stopped retiring (126)`.
+UART stuck at 277 bytes (OpenSBI mid-print). [mc_cache] l2_wtrk_full=0 dram_latency=0
+→ NOT L2/DRAM/coherence. [smt-drain] switches=306 aborts=0, wait_sb=55766 dominant.
+
+WEDGED hart0 ([smt-stall] final block):
+- commit head: `head slot=48 pc=0x8000a014 op=37 fu=1(LOAD) issued=1 cvld=0 hart=0`
+  = `ld s0,48(sp)` OpenSBI printc epilogue — SAME as run1.
+- scoreboard masks `sbm iss=ffffffffffffffff vld=fffe28804ce7fbff canc=fff808000000001f
+  repl=0000080000000000` — canc mask == earlier st_resolved (resolved==cancelled stores).
+- `ldu st=1 tid=41 paddr=0x80053e28 dreq=0 rvld=0` — LOAD tid=41 parked at 0x80053e28.
+- `stu st=0` store unit IDLE; `sqe i=0 tid=18 hart=0 addr=0x80053e30 cbo=90 live=1 canc=0`
+  — store tid=18 @0x80053e30 LIVE, not cancelled, sitting in store queue UNSENT.
+- `sqh scnt=1 oltid=48 ldtid=41 ldhart=0 lpo=e28 sbempty=0`.
+- `dsp ivld=0 iack=0 iro raw=0 rs1=0 rs2=0` — NO issue grant, NO operand stall flags.
+- `lsu_cmt=0 lsu_rdy=0 wbem=1 wbni=1` — LSU NOT READY, writeback empty.
+- gap=1494553 cycles wedged. harts parked at pc=0x800085fe (wfi loop).
+
+SMOKING GUN: store tid=18 @0x80053e30 is LIVE in the store queue but `stu st=0`
+(store unit not processing) and `lsu_rdy=0`. Load tid=41 @0x80053e28 (SAME 64B
+line 0x80053e00 = smt_mem_watch target) dwaits on it. The store never issues →
+never gets addr_v/data_v → never resolves → load dwaits → commit head frozen.
+Load tid=41 holds the LSU/ldu (st=1) while store tid=18 can't get lsu_rdy →
+circular stall AT THE LSU/ISSUE BOUNDARY, upstream of LSQ ordering (which is
+verified correct). Next: find why lsu_rdy=0 / store not granted — IQ operand
+phys-reg (prs1/prd producer) vs LSU-ready gating vs store-queue head-of-line.
+
+### printc disasm + alias check — conservative unres CONFIRMED correct; bug is phys-reg producer starvation
+fw_payload.elf `printc` epilogue (sp=frame base 0x80053e08):
+  0x8000a00e ld s1,40(sp) -> 0x80053e30 ; 0x8000a010 ld ra,56(sp)->0x80053e40
+  0x8000a012 ld s0,48(sp) -> 0x80053e38 ; 0x8000a014 ld s2,32(sp)->0x80053e28 (HEAD)
+  0x8000a016 addi sp,64 ; 0x8000a018 ret
+Store tid=18 @0x80053e30 = prologue `sd s1,40(sp)` (saves s1). Head load tid=41
+`ld s2,32(sp)` @0x80053e28 reads 0x28-0x2f; store writes 0x30-0x37 → ADJACENT,
+NON-OVERLAPPING. Load's unres-block on addr_v=0 store is CORRECT conservative
+behaviour (cannot prove non-alias without store address). LSQ fully exonerated.
+
+lsu_bypass (core/lsu_bypass.sv): ready_o = (status_cnt_q==0), 2-bit cnt over a
+2-deep queue; pop_ld/pop_st from g6lc_zicclsm FSM. status_cnt underflow/leak
+=> ready_o=0 forever => lsu_rdy=0. Documented bug class (store_unit.sv:387
+"0->3 lsu_ready low for good"; T35/T40). lsu_rdy=0 seen in freeze dump —
+consistent with bypass holding the stuck load tid=41 (symptom) OR a leaked
+count (cause). pop imbalance under OoO younger-cancel (no full flush) is the
+prime suspect for a permanent count leak.
+
+SmtDrainedHandoff=1 (g6lc64_hyp8_mc_config_pkg.sv:340): scoreboard bmiss cancel
+hart-filter BYPASSED (scoreboard.sv:643,842) — blanket-cancels every slot in
+the ring window on a mispredict. Safe ONLY if drain empties backend first
+(gen_ooo_switch_drained asserts it; $display-only without +smt_drain_strict).
+[smt-drain] showed switches=306 aborts=0, wait_sb=55766 — if any switch left
+residual OoO state, cross-hart cancel could orphan a phys reg.
+
+ROOT-CAUSE LOCUS (final): store tid=18 operand phys regs never ready. Its
+rs1=sp / rs2=s1 producers either (a) were wrongly cancelled (SmtDrainedHandoff
+blanket cancel or same-hart mispredict) leaving rename busy[] set + IQ
+prs-bound with no wb_prd wakeup, or (b) sit in the same circular web. Next:
+leaf TB on g6lc_iq wakeup (wb_prd==prs->rsX_rdy) + g6lc_rename busy/ckpt restore
++ lsu_bypass status_cnt pop balance; directed repro = printc prologue/epilogue
+knot + SMT sibling + injected mispredict.
+
+## RFIX-131a-NEW2 — RTL audit of phys-reg starvation path (this session)
+
+Audited the four suspect loci against the freeze (store tid=18 operand phys
+regs never ready => no ev_addr/ev_data => addr_v=0/data_v=0 => unres block).
+
+1. g6lc_iq.sv wakeup (L142-173, 251-383): comb q_wake sets rsX_rdy on
+   wb_valid&&wb_prd==prs (int has !=0 guard; FP separate fwb path). Persists:
+   q_wake->q_chain->q_after_issue->q_d->q_q. Dispatch-time same-cycle WB
+   capture (L558-572) covers wb-in-dispatch-cycle. ready[e] requires
+   rs1&&rs2&&rs3_rdy. A119 oldest-ready grant is pure function of queue state
+   (no issue_ack comb loop). => wakeup path looks CORRECT.
+
+2. g6lc_rename.sv busy lifecycle: busy_d[p] cleared at WRITEBACK
+   (L670 wb_valid_i&&wb_prd!=0 -> busy_d[wb_prd]=0), NOT at commit. So
+   rsX_ready=!busy_q[p] goes 1 the cycle after wb. Same-cycle dispatch+wb is
+   covered by IQ capture. Writeback->ready window is closed. => NOT the leak.
+
+3. g6lc_rename.sv mispredict repair (L728-748): "repair not reinstate".
+   squashed = ckpt_alloc_q[level] & ~free_rep; only the resolving hart's
+   ckpt_alloc is squashed (mis_hart = ckpt_hart_q[level]). Per-hart correct
+   for same-hart. busy_d &= ~squashed frees the squashed phys regs.
+
+4. SMT drain gate (cva6.sv L2052, L1968): ss_drdy = smt_sb_empty &&
+   no_st_pending_commit && !flush_ctrl_id && ooo_drained_id; ooo_drained_id =
+   rob_empty && iq_empty && !lsq_busy (g6lc_ooo_dispatch.sv:250). Scoreboard
+   IS checked (smt_sb_empty). Drain is thorough -> single-residency holds ->
+   SmtDrainedHandoff blanket bmiss cancel (scoreboard.sv:842 bypasses hart
+   filter) only sees resident hart's slots. => cross-hart contamination via
+   residual scoreboard entries is UNLIKELY (drain waits for sb_empty).
+
+5. FINDING: g6lc_ooo_dispatch.sv:427 `.flush_hart_i('0)` — rename's per-hart
+   flush (reclaim one hart's phys regs + clear its ckpts) is TIED OFF. Under
+   drained handoff this is benign IF every handoff fully drains+commits the
+   outgoing hart (its phys regs freed at commit). But it means there is NO
+   mechanism to reclaim a hart's speculative phys regs on park other than the
+   global flush_i. If a hart ever parks with leaked busy[] (e.g. a phys reg
+   whose producer was cancelled but not commit-freed and not squash-freed),
+   flush_hart_i would be the recovery — and it's disabled.
+
+REFINED ROOT-CAUSE LOCUS: a phys reg PR stays busy[] forever. Its producer's
+writeback never fires (wb_valid for PR absent) because the producer was
+cancelled/squashed, yet rename's squash set (ckpt_alloc&~free_rep) did NOT
+include PR. Desync candidates: (a) scoreboard cancelled_mask hits a slot whose
+phys-reg alloc is NOT in the resolving ckpt's ckpt_alloc (window mismatch:
+trans_id window vs allocation window); (b) the producer's busy bit was set by
+an allocation that ckpt_alloc never recorded (multi-port alloc / same-cycle
+ckpt race); (c) free_rep wrongly excludes PR (a commit-free that never landed).
+Consumer (store tid=18 rs2=s1, or the IQ entries) bound prs=PR waits for
+wb_prd==PR forever -> starvation -> LSQ unres -> commit-head load dwait ->
+mc_verdict 126. Matches ALL evidence incl. lsu_rdy=0 (bypass holds load).
+
+NEXT: harvest hyp8-witness-iqdump (pid 706788, +stall_census +hang_dump=2000
++ s_m_stats, 16M budget) -> [hang] IQ dump gives per-entry prs1/prs2 +
+rsX_rdy + hart at the freeze -> names the stuck phys reg + producer tid/pc.
+Then leaf TB on the identified desync + G6LC_MUT_* isolation.
+
+## RFIX-131a-NEW3 — MAJOR REFINEMENT: proximate cause = lsu_bypass stuck entry
+
+Decoded the real [smt-stall] final block (run2, cyc=15999986 hart=0):
+- head slot=48 pc=0x8000a014 op=37 fu=1 cvld=0 issued=1  (epilogue LOAD)
+- ldu st=1 tid=41 paddr=0x80053e28 dreq=0  (load unit holds tid=41, NO data req)
+- stu st=0 ; lsu_cmt=0 lsu_rdy=0            (store unit idle; LSU NOT READY)
+- sqe i=0 tid=18 addr=0x80053e30 live=1 canc=0 (store RESOLVED, in store queue)
+- sqh oltid=48 ldtid=41 lpo=e28 ; stq scnt=1
+
+KEY: store tid=18 is NOT operand-starved — it is RESOLVED (addr+data known,
+live, in store_buffer speculative queue). The earlier phys-reg theory is likely
+WRONG. The real proximate stall is lsu_rdy=0.
+
+lsu_ready_o = lsu_bypass_i.ready_o = (status_cnt_q==0)   [load_store_unit.sv:1093,
+lsu_bypass.sv:90-91]. lsu_rdy=0 => bypass NON-EMPTY => a stuck LSU entry.
+The bypass outputs lsu_ctrl_o=mem_q[read_pointer] (head) to the LSU; it pops
+only via pop_ld/pop_st which route load_unit.pop_* -> g6lc_zicclsm ->
+pop_*_byp -> lsu_bypass.pop_*. If the head entry never pops, status_cnt_q stays
+>0 => lsu_ready=0 forever => load tid=41 (dreq=0) can't issue => commit head
+(load) can't complete => store tid=18 can't drain => mc_verdict 126.
+
+Prime suspects for the stuck bypass entry:
+(a) g6lc_zicclsm FSM: pop_*_byp suppressed (forced 0) in B0_ACTIVE/B0_WAIT/
+    B1_ACTIVE states (g6lc_zicclsm.sv:175-223). A Zicclsm/CBO op held across
+    beats whose pop is dropped => bypass leak. store tid=18 carries cbo=90.
+(b) A cancelled op pushed into bypass then dropped before FU pop => status_cnt
+    leak (documented class; T35 marks is_speculative_load_miss but does NOT pop).
+(c) status_cnt_q underflow (2-bit) from a pop-without-push => ready_o=0 forever.
+(d) pop_ld&&pop_st same-cycle mem_n='0 path vs status_cnt double-decrement.
+
+NEXT: hyp8-witness-iqdump (pid 706788, +stall_census +hang_dump=2000) -> the
+[hang] hd_print dump prints "LSU bypass cnt=N | e0 fu=.. tid=.. specmiss=.. |
+e1 .." + full IQ prs1/prs2/rsX_rdy + SB head. That names the stuck bypass
+entry's fu/tid and the IQ wait set -> discriminate (a)-(d). Then leaf TB on
+lsu_bypass+zicclsm pop balance or the identified unit; fix both trees; witness.
+
+## RFIX-131a-NEW4 — harvest plan + bypass discriminator (iqdump run armed)
+
+hyp8-witness-iqdump pid 706788 running (+stall_census +hang_dump=2000
++smt_stats, lean plusargs, 16M budget). hd_print fires <=3x at
+since_ack=3000/4000/5000 cyc after commit stalls (~14.503-14.505M) and dumps:
+  [hang] SB head (slot/issued/valid/cancelled/replay/fu/op/pc/tid/ex)
+  [hang] IQ[e] tid fu op pc rs1_rdy rs2_rdy rs3_rdy may_bypass ready prs1 prs2
+  [hang] IQ issue_valid/ack st_unresolved st_live md_stall stl_stall
+  [hang] LSQ st[i]/ld[i] id addr_v data_v/done addr
+  [hang] "LSU bypass cnt=N rp=R | e0 v=.. fu=.. tid=.. specmiss=.. | e1 .."
+       + SU state/tid_q/treq/dtlb_hit/st_ready + LU state/ldbuf_v
+       + STQ spec/commit counts + amo_rdy
+
+DISCRIMINATOR for the stuck bypass entry (lsu_rdy=0 => status_cnt_q!=0):
+- cnt=3 (or >2 on a 2-deep queue) => status_cnt UNDERFLOW/corruption
+  (pop-without-push; e.g. flush_i cleared bypass but FU still popped, or
+  pop_st&&pop_ld path). Fix = guard pops / clamp count.
+- cnt=1 or 2 with e0/e1 fu/tid => a LEGIT entry never popped. fu=LOAD =>
+  load tid dwaits (store-ordering/forwarding/TLB); fu=STORE => store_unit/
+  store_buffer/commit-order stall; fu=CBO/zicclsm => g6lc_zicclsm beat FSM
+  held pop_*_byp=0 (g6lc_zicclsm.sv:175-223).
+- IQ prs1/prs2 of waiting entries names any phys-reg wait set (cross-check
+  the phys-reg theory; likely empty if bypass is sole blocker).
+
+Leaf-TB target selection AFTER dump: lsu_bypass (pop-balance/underflow,
+cva6_cfg_t dep), g6lc_zicclsm (beat-pop FSM), load_unit/store_unit pop
+generation, or store_buffer head-gate — whichever fu/tid the bypass head shows.
+
+## rfix131a — lsu_bypass desync CONFIRMED via leaf TB (build-tree DEPTH=4)
+
+### Correction to earlier read
+- Build-tree `lsu_bypass.sv` is DEPTH=4, 3-bit `status_cnt`, 2-bit ptrs, REGISTERED head (`head_q`), `count_o=status_cnt_q`.
+- `lsu_ready_o` is NOT `ready_o`(=empty, unconnected). It is `count_o < 4` (load_store_unit.sv:1234). So `lsu_rdy=0` ⇒ `status_cnt_q >= 4` (full OR desynced-over), NOT underflow.
+- pop_ld/pop_st to bypass are mutually exclusive (g6lc_zicclsm `pop_ld_byp_o=is_load; pop_st_byp_o=!is_load`) ⇒ `pop_ld_i && pop_st_i` is DEAD CODE ⇒ the `do_flush=flush||(both-pop)` clear-all-4 clause never fires. (Source depth-2 version is correct; the depth-2→4 port kept clear-all but it's unreachable.)
+
+### Leaf TB built + ran on remote (verilator g6lc fork)
+Files: `verif/tb/core/tb_g6lc_lsq_bypass{,_pkgs}.sv` + `run-lsq-bypass.sh`.
+Stub `config_pkg`/`g6lc_core_pkg` (packed g6lc_cfg_t + fu_t) avoid the full config closure (g6lc_config_pkg/l15.tmp.h).
+Result: **over-push desyncs status_cnt.** Driving `lsu_req_valid_i` while count=4:
+  count_o went 4 → 5 → 7 (3-bit wrap) while only 4 slots exist; `mem_n` write ptr laps read ptr and overwrites head. Once count>4, `lsu_full`(issue) stays true forever → no new grants, pops can't realign → **permanent lsu_rdy=0 → LSU freeze → OpenWrt wedge.** Matches hang-dump `lsu_rdy=0`.
+
+### Reachability of over-push (prime suspect = upstream accounting)
+`issue_read_operands.sv:277` `lsu_full = !lsu_ready_i || (lsu_count_i + |lsu_valid_q| + lsu_pipe_q >= 4)` — counts bypass occupancy + "two AGU-shadow grants" (lsu_valid_q, lsu_pipe_q).
+Grant→bypass path has EXTRA stage(s): issue lsu_valid_q/pipe_q → lsu_valid_o → load_store_unit `lsu_valid_i` → **AGU pipeline `lsu_valid_q` (load_store_unit.sv:313,330, active when `HypCfg.LsuAguStages==2`)** → lsu_valid_sel → bypass push.
+If the AGU stage is not fully covered by the 2-shadow accounting → in-flight pushes undercounted by 1 → a push lands when count==4 → over-push → desync. NEEDS [hang] `LSU bypass cnt=` to confirm cnt>4 vs legit-4.
+
+### Discriminator still armed
+`hyp8-witness-iqdump` (pid 706788) ~6M/14.5M cyc. `[hang]` dump prints `LSU bypass cnt=N | e0/e1 fu/tid`:
+- cnt ∈ {5,6,7} ⇒ DEFINITIVE over-push desync → fix = correct lsu_full accounting (or bypass saturate).
+- cnt == 4 with valid head ⇒ legit-full, head stuck on memory/TLB/store_buffer → different root cause.
+
+### Fix direction (pending discriminator)
+- If over-push confirmed: fix `lsu_full` in issue_read_operands to account for the AGU-stage in-flight grant (or add margin), so count never exceeds DEPTH. Optionally ALSO harden bypass (ignore push when status_cnt_q==DEPTH) as defense — but dropping a push loses the op, so upstream fix is primary.
+
+## rfix131a — iqdump [hang] dump: bypass EMPTY; wedge is DISPATCH-side, not LSU
+
+`hyp8-witness-iqdump` fired `[hang]` 9x. Decisive lines (all 9 identical):
+- `LSU bypass cnt=0 rp=0 | e0/e1 v=0` — bypass EMPTY (not full/desynced). The over-push desync confirmed in the leaf TB is a REAL latent bug but is NOT this wedge.
+- `SB head slot=0 issued=0 valid=0 | commit_ptr=0 issue_ptr=0` — scoreboard EMPTY.
+- `IQ issue_valid=0 issue_ack=0 st_unresolved=0 st_live=0` — nothing issuing, no store-queue entries.
+- `LU req valid_i=0 ... wbuf_not_ni=1 st_empty=1 no_st=1` — load/store units idle.
+- `FE head v=1 pc=0x8000f726 iq_rdy=0` + `IQF ready=0` — fetch HAS an instruction but it cannot dispatch into IQ/SB.
+
+=> ENTIRE backend (SB/IQ/LSU/store-buffer) EMPTY + IDLE, yet core not advancing. The fetched instruction never reaches dispatch/rename. This is a **dispatch/fetch-interface stall**, upstream of the LSU — NOT memory, NOT bypass, NOT operand writeback.
+
+Prime suspects now:
+- `issue_quiesce_i = smt_quiesce || (NrHarts>1 && halt_ctrl)` (g6lc_core.sv:3380) freezing dispatch — SMT drain/halt handshake stuck.
+- IQ "not ready" (iq_rdy=0) despite empty IQ → dispatch-side credit/valid bug, not fullness.
+- Rename/dispatch ack (`issue_instr_issue_id`/`issue_ack`) handshake wedge.
+- pc=0x8000f726 differs from prior wedges (0x8000a014/0x800085fe) → possibly a different hart/core or a later stall point; need per-hart [hang] attribution.
+
+NEXT: pull `smt-drain`/`halt`/`switch`/`FE:`/`IQF:` lines + per-hart labels to name which hart/core and whether quiesce/halt is stuck. Remote host is CPU-saturated (199%) making greps time out — retry when load drops or use the [hang] window already captured.
+
+## rfix131a — wedge ISOLATED to fetch/dispatch circular deadlock (cf_hold + bp_pend)
+
+Decoding the iqdump [hang] FE + IQF lines (the smoking gun):
+- `FE: head v=1 pc=0x8000f726 cf_hold=1 iq_rdy=0 halt=0 reseed=0 flush=0 replay=0 misp=0 fe_v=00000111 fe_rdy=00000000 ic_rdy=1`
+- `IQF: ... ready=0 fe_valid=00000111 pos_present=00001111 block_any=11111000 consumed=00000000 | bp_pend=1 bp_tgt=0x8000f726`
+
+Mechanism (`fetch_B/frontend.sv` bp_pend_q FSM ~L385-436, cf_hold_q in gen_ftq):
+- `bp_pend_q` sets on branch resolve/reseed-redirect (bp_tgt=target, bp_misp_ttl=7) and clears on (a) icache_dreq in target window, (b) reseed to a different window, or (c) bp_misp_ttl countdown→0.
+- `cf_hold_q` (FTQ control-flow hold) is asserted while a redirect/branch-pend is unresolved.
+- DEADLOCK: backend is EMPTY (SB/IQ/LSU all idle, issue_valid=0) so the branch that would resolve bp_pend never dispatches/executes → bp_pend never clears → cf_hold holds fetch → nothing new fetched → backend stays empty → bp_pend re-arms/never times out (TTL starved because an earlier else-if keeps matching, e.g. reseed_now/redir). CIRCULAR fetch↔dispatch livelock.
+- `iq_rdy=0`/`IQF ready=0` with EMPTY IQ ⇒ dispatch-side not-ready is NOT fullness — points to issue_quiesce_i (smt_quiesce||halt_ctrl) or an IQ-accept credit/valid bug freezing dispatch, which is what keeps the backend empty and starves bp_pend resolution.
+
+ROOT-CAUSE CANDIDATES (ranked):
+1. `issue_quiesce_i = smt_quiesce || (NrHarts>1 && halt_ctrl)` (g6lc_core.sv:3380) stuck → dispatch frozen → empty backend → bp_pend starves. Check smt_quiesce/halt_ctrl/smt_sb_empty handshake.
+2. IQ ready/credit bug: iq_rdy=0 despite empty IQ (bad not-ready or credit leak).
+3. bp_pend/cf_hold livelock independent of dispatch: redirect re-arms each cycle so bp_misp_ttl never decrements (earlier else-if priority starves the TTL branch).
+
+NEXT: pull halt_ctrl/smt_quiesce/issue_quiesce + iq_rdy driver + per-hart attribution; then leaf-TB the frontend bp_pend/cf_hold FSM or the dispatch quiesce gate; fix RTL; witness re-run.
+
+## rfix131a — SMOKING GUN: redirect/mispredict LIVELOCK (epoch incrementing)
+
+Across the 9 [hang] dumps `epoch` went 2 → 0 → 3 (non-monotonic but CHANGING) and `pc` head is pinned at `0x8000f726` every dump. `D$` all-zero (no mem traffic), `ST_FRONT v=00`. Interpretation:
+- Each mispredict/redirect FLUSHES the backend → explains why SB/IQ/LSU/bypass are ALL empty at dump time.
+- `bp_pend_q`/`cf_hold_q` re-arm every pass; `bp_misp_ttl_q` (7-cycle timeout) is STARVED because an earlier-priority else-if (branch-resolve set, or `reseed_now`/redirect re-arm to same window) keeps matching → bp_pend never times out → cf_hold never releases.
+- Net: **a repeatedly-mispredicted branch near pc=0x8000f726 livelocks the frontend** — fetch→predict→mispredict→redirect→flush(empty backend)→refetch same PC→repeat. No instruction ever retires → OpenWrt boot wedge.
+
+This supersedes the LSU/bypass/phys-reg/memory hypotheses (all disproven by empty backend + idle fabric). The bypass over-push desync remains a real latent bug (leaf TB) but is NOT this wedge.
+
+ROOT-CAUSE LOCUS: `fetch_B/frontend.sv` bp_pend_q/cf_hold_q/redirect arbitration + the branch-predictor (BHT/BTB) returning a self-consistent-but-wrong prediction, OR a redirect-target bug sending the core back to 0x8000f726. The `bp_misp_ttl` starvation (else-if priority) is a concrete RTL suspect: the TTL decrement is the LAST else-if so any continuously-true earlier condition (reseed_now, icache_dreq same_win, or repeated resolve) prevents it.
+
+NEXT: (a) confirm pc=0x8000f726 is a branch & get its predicted vs actual target from a windowed `[win]`/`+smt_flow_trace` run or disasm of the payload at that VA; (b) leaf-TB the frontend bp_pend/cf_hold FSM reproducing resolve→redirect→re-arm starvation of bp_misp_ttl; (c) fix RTL (likely give bp_misp_ttl decrement priority or fix redirect target); (d) witness re-run.
+
+## rfix131a — pc=0x8000f726 is `wfi` in sbi_hsm_init (OpenSBI HSM hart-start wait) — NOT a mispredict livelock
+
+Disasm of fw_payload.elf @0x8000f6e0-0x8000f780:
+```
+8000f722: li s2,2
+8000f724: j  8000f72a
+8000f726: wfi                     <-- the pinned [hang] pc
+8000f72a: mv a0,s1
+8000f72c: jal atomic_read          ; poll hart_state
+8000f730: bne a0,s2,8000f726       ; != HSM_STATE_STARTED -> loop to wfi
+8000f734: csrw mie,s3
+```
+This is OpenSBI `sbi_hsm_init`: a hart parks in a `wfi`+`atomic_read` poll until its HSM state == started(2). `bp_pend`/`cf_hold`/`epoch` churn = the WFI wake→poll→branch-back loop, i.e. LEGITIMATE idle-wait, not a redirect livelock. The stall-detector flags no-retire as a hang — possibly a secondary hart correctly parked, OR a hart whose HSM-start IPI never arrives.
+
+Per-core stall-census @10M (cores 1,2; 2 harts each, SMT):
+- ret ~356-358k/hart, IPC=0.036 (pathologically low). `empty` asymmetry: core[1] hart0 empty=5.37M vs hart1=221k.
+- `notissued mul≈1.6M` dominates → MUL-latency-bound OR multiplier throughput bug.
+- D$/mem all-zero → no memory traffic; consistent with harts parked/crawling, not a mem wedge.
+- [hang] dumps tagged c=1,c=4 → cores 1 and 4 are the flagged ones.
+
+REVISED root-cause candidates:
+1. **HSM-start IPI lost**: secondary hart(s) never receive the start doorbell → parked in sbi_hsm_init wfi forever → mc_verdict (if boot expects all harts). Check CLINT/ipi/sbi_hsm doorbell path.
+2. **MUL-bound crawl**: IPC 0.036 with notissued-mul=1.6M → multiplier issue/complete path pathologically slow or serialized → boot too slow → verdict timeout (not true deadlock).
+3. The wfi hart may be EXPECTED-idle (non-boot hart); the real wedge could be a DIFFERENT hart/core still in early boot — need per-hart pc attribution (which hart is at 0x8000f726 vs progressing).
+
+NEXT: (a) get per-hart last_pc/retired to see if a boot hart is stuck elsewhere vs secondaries legitimately parked; (b) check UART byte count (did OpenSBI/Linux print?); (c) if MUL-bound, profile multiplier issue rate; if HSM, trace the start-IPI.
+
+## rfix131a — ALL [hang] dumps show pc=0x8000f726 wfi (sbi_hsm_init) across harts; UART=0
+
+- All 9 [hang] dumps (cores 1,4 × harts) pin the SAME pc=0x8000f726 `wfi` in `sbi_hsm_init`, with differing `epoch` (0/2/3) = the WFI wake→poll→bne-back loop. Multiple harts parked waiting for HSM state==started.
+- ZERO UART/OpenSBI/Linux console bytes in the log (only `[boot] npc=0x10040` bootrom traces). Boot never printed the OpenSBI banner to the captured UART → stuck before/at early SBI, OR console unhooked.
+- Interpretation: secondary harts are correctly parked in sbi_hsm_init WFI awaiting the HSM-start IPI; they will sit there until the primary hart issues `sbi_hsm_hart_start`. If the primary is itself stalled (MUL-bound IPC 0.036) or the start-IPI/coherence is lost, they wait forever → mc_verdict.
+
+REMAINING DISCRIMINATOR (needs one more probe):
+- Which hart/core is the PRIMARY/boot hart and what is ITS last_pc? If primary is progressing (slowly, MUL-bound) → perf issue; if primary also parked/deadlocked → HSM-start or earlier wedge.
+- Does `atomic_read(hart_state)` on a secondary ever observe the primary's store? (coherence across harts — the l1_inval/inv_owed path).
+- UART=0: is console output expected on this model, or is boot genuinely pre-banner?
+
+The run continues (pid 706788, ~10M cyc). If it reaches max-cycles/timeout without verdict-progress, the [hang]+census data above is the diagnosis: harts parked in sbi_hsm_init WFI + MUL-bound primary.
+
+## [turn] CRITICAL CORRECTION — [hang] dumps are SECONDARY-hart false-positives; real wedge is PRIMARY hart
+
+Retirement census proves ONE hart is the boot/primary and IS progressing:
+- cyc=6M:  hart0 ret=357954 hart1=355889 (cores1,2 ~356k, frozen)
+- cyc=8M:  ONE core hart0 ret=2261802 (+1.9M)  <- PRIMARY BOOT HART RUNNING
+- cyc=10M: same hart0 ret=3137699 (+875k/2Mcyc = IPC~0.44, healthy)
+- all 9 [hang] dumps show pc=0x8000f726=wfi (sbi_hsm_init) = SECONDARY harts parked in WFI (legit idle -> stall-detector false-positive)
+- bypass cnt=0 / empty backend / iq_rdy=0 in those dumps = SECONDARY hart state (parked=WFI=correct idle), NOT the wedge
+
+CONCLUSION: earlier "dispatch deadlock / bypass-desync / fetch-livelock" reads chased SECONDARY-hart false-positives.
+REAL wedge remains run2's [smt-stall] on PRIMARY hart0: commit head `ld s2,32(sp)`@0x8000a014 (printc epilogue)
+cvld=0 issued=1; LSU load tid=41 @paddr=0x80053e28 dreq=0 (held); store tid=18 @0x80053e30 resolved in sqe;
+lsu_rdy=0; mc_verdict 126.
+
+lsu_rdy=0 decode (load_store_unit.sv:1234): lsu_ready_o=(lsu_count_o<4); lsu_count_o=status_cnt_q; bypass.ready_o=empty UNCONNECTED.
+=> lsu_rdy=0 means status_cnt>=4 = bypass FULL (legit 4-deep OR desynced >4). NOT "non-empty".
+Two sub-cases now: (a) count==4 legit-full + head entry stuck in load/store unit (head-of-line block),
+(b) count>4 over-push desync (leaf-TB-confirmed latent bug). Need PRIMARY bypass cnt+head to split.
+
+lsu_bypass.sv full audit: status_cnt free-running 3-bit; push++/pop_ld--/pop_st-- same-cycle net-0 OK;
+flush resets all; pop_s clears mem.valid only (entry popped); head_q registered capture.
+Over-push needs lsu_req_valid_i(=lsu_valid_sel, LSU AGU A1 out) while cnt>=4. IRO lsu_full=
+!lsu_ready_i||(count_i+|valid_q|+pipe_q>=4). In-flight grant transit: IRO lsu_valid_q->lsu_valid_o->LSU
+AGU lsu_valid_q(A1)->lsu_valid_sel->push = ~2cyc; IRO tracks valid_q+pipe_q=2 stages. Timing analysis
+suggests pipe_q covers the push cycle (blocks at cnt+1>=4). Over-push reachability STILL UNPROVEN —
+leaf TB only proved desync IF over-pushed, not that IRO can over-push.
+
+## [turn] FULL WEDGE DECODE from run2 (hyp8-witness-fast-coh) [smt-stall] @cyc=15999986 hart=0
+
+PRIMARY hart0 (boot hart) frozen gap=1.49M cyc, sbn=64 (scoreboard full-ish), hwfi=0 hplain=1 = TRUE stall (not WFI).
+Other harts (hart=1 + parked threads) show sbem=1/sbn=0 EMPTY scoreboard + pc=0x8000f726=wfi = legit parked (the earlier [hang] dumps were these).
+
+WEDGE STATE (all hart=0, the boot core's active thread):
+- head slot=48 pc=0x8000a014 op=37 fu=1(LOAD) cvld=0 issued=1 repl=0 ppend=0 pmod=0
+- ldu st=1 tid=41 paddr=0x80053e28 dreq=0 rvld=0   <- load unit ACTIVE on tid=41, paddr resolved, NOT requesting D$ data
+- stu st=0                                          <- store unit IDLE
+- lsu_cmt=0 lsu_rdy=0                               <- bypass FULL (count>=4)
+- stq ccnt=0 crp=7 cvld=0 scnt=1                    <- commit q empty; spec q has 1 entry
+- sqh scnt=1 srp=0 swp=0 oltid=48 ldtid=41 ldhart=0 lpo=e28 pom=0 sbempty=0
+- sqe i=0 tid=18 hart=0 addr=0x80053e30 cbo=90 fk=0 canc=0 live=1 m12=0   <- ONE spec store, LIVE, same 64B line as load
+- sbm iss=ffff... vld=fffe28804ce7fbff canc=fff808000000001f repl=0000080000000000  <- replay bit43 set
+- dsp pc=0x8000a00e tid=41 fu=1                     <- dispatch next = the load
+
+DISASM (printc @0x80009fd4): prologue sp-=64 then sd s0,48(sp)@9fd6->0x80053e30 | sd s2,32(sp)@9fd8->0x80053e20 |
+sd ra,56(sp)@9fdA->0x80053e38 | sd s1,40(sp)@9fe2->0x80053e28 ; loop has .insn 0x409c0007@a000 (atomic) + sw a5,0(s1)@a006.
+Epilogue loads: ld s1,40(sp)@a00e->0x80053e28(tid41) | ld ra,56(sp)@a010 | ld s0,48(sp)@a012->0x80053e30 | ld s2,32(sp)@a014(HEAD)->0x80053e20.
+
+MECHANISM: printc PROLOGUE stores (sd s0/s1/s2/ra -> stack 0x80053e20-38) are stuck `live=1` in store_buffer
+SPECULATIVE queue (resolved addr+data, NOT drained to WT-dcache). EPILOGUE loads read the SAME addresses.
+Load tid=41 (ld s1,40(sp)) has paddr resolved but dreq=0 -> dwait-blocked on same-line unresolved store(s).
+Commit head ld s2,32(sp) can't retire. Bypass fills to 4 -> lsu_rdy=0 -> no new LSU issue -> DEADLOCK.
+ppend=0 => NOT the COH_OOO phys_pending circular-wait (N1d) path. repl bit43 set somewhere in SB.
+
+OPEN: why won't spec store tid=18 drain? Candidates: (a) store->load forward (stb_fwd, StoreFwdCycles=3) failing so
+loads dwait instead of forwarding; (b) spec-store drain stalled on program-order/dcache-write-port/commit ordering;
+(c) store data operand never readied (but it reached spec q => likely resolved); (d) cbo=90 special-op path.
+cbo_t=logic[7:0]; cbo=90=0x5A is the raw op field — for a normal `sd` expect CBO_NONE; verify CBO_NONE ordinal==90
+or tid=18 is a special (AMO/CBO) op. NEXT: confirm CBO_NONE value + why spec store won't drain; then leaf-TB
+store_buffer drain / stb_fwd same-line forward; fix both RTL trees; witness re-run.
+
+## [turn] iqdump run COMPLETED — deterministic repro + stall-census GOLD
+mc_verdict: "all 4 cores retired" + "exit code 0" + "FAIL: a core ran then stopped retiring (126)".
+[smt-stall] hart=0 IDENTICAL to run2 (deterministic): head ld s2,32(sp)@a014 cvld=0; ldu tid41 paddr=0x80053e28
+dreq=0; sqe tid18 addr=0x80053e30 live=1; lsu_rdy=0; ppend=0.
+[stall-census] gen_core[0]: hart0=BOOT(active,ret=5,022,808 ipc=0.314) vs hart1=SMT-sibling(parked,ret=377,079 ipc=0.024).
+  hart0: held st_sb=396552  inflight st=657693 ld=2416132  notissued br=1272671 alu=2400539 st=472350
+  hart1: notissued mul=1778196 inflight mul=280707  (parked thread MUL backlog)
+Both census lines at=gen_core[0] => ONE physical core, 2 SMT threads; thread0 boot+wedged, thread1 parked.
+DECODE: tid18=`sd s0,48(sp)`@0x80009fd6 (prologue) & tid41=`ld s1,40(sp)`@0x8000a00e (epilogue) share line 0x80053e00.
+Store stuck live=1 in store_buffer SPEC queue; loads dwait same-line; commit head frozen.
+PRIME SUSPECT now: store->WT-dcache drain stalled — either program-order/commit promotion OR COH_OOO
+invalidation-ack withheld by a parked peer (inv_ready low while WFI). store_buffer/drain files have NO
+inv_* refs -> coherence ack wait lives in cache_subsystem (wt_dcache/g6lc_inval_retain/wt_dcache_wbuffer).
+NEXT TURN: trace store drain -> wt_dcache write -> inval-ack wait; check if parked hart1/core-peer holds
+inv_ready low; leaf-TB the drain/inval handshake; fix both RTL trees; witness re-run.
+
+## [turn] ROOT CAUSE NARROWED — phys-reg operand starvation -> LSQ unresolved -> store/load deadlock
+
+Decoded iqdump [hang] IQ+SBX dumps for PRIMARY hart0 @wedge (the real stall, not secondary WFI):
+
+LSQ unres decode: ld_alloc id=41 `older=0000004b01180000` = unres store tids {19,20,24,32,33,35,38}
+= the 7 prologue `sd/sw/sb/cbo` saves @0x80009fd8-0x8000a006. ALL dwait_set masks=0 => loads NOT
+data-wait blocked; they wait on unres (older stores' ADDRESSES unresolved = never issued to LSU).
+
+IQ operand state @wedge: EVERY entry ready=00000000 (loads/branches) or 00000010 (stores, 1 operand
+ready). NOTHING operand-ready. Stores fu=2 need rs1+rs2; prs1=78 for ALL `sd ..(sp)` => phys78 = the
+shared STACK-PTR phys-reg is the hot unready operand.
+
+SBX producer map (prd): phys78 produced by slot17 `addi sp,sp,-64`@0x80009fd4 (fu=3 ALU) AND
+slot55 `ld a5,0(a0)`@0x8000a026 (fu=1 LOAD) => phys78 DOUBLE-PRODUCED = phys-reg lifetime conflict.
+If `ld a5` (a stuck load) holds phys78 while `sd ..(sp)` stores still have it bound as rs1, stores
+can't issue -> LSQ unresolved -> epilogue loads dwait -> commit head frozen -> bypass full -> deadlock.
+
+FREE LOGIC (g6lc_ooo_dispatch.sv:494-497): free_en=commit_arch && rd!=0 && tid_old!=0;
+free_prd=tid_old_q[tid]. Frees the OLD phys of a committing writer. phys78 freed only when the reg
+it maps to is rewritten+commits. `ld a5` grabbing phys78 means phys78 was returned to free pool while
+`sd ..(sp)` stores still had it pending => PREMATURE FREE / phys-reg lifetime bug (rename/freelist/
+dispatch). Same defect class as prior scoreboard phys-reg desync work.
+
+TRIGGER CANDIDATES: (a) SMT context switch (hart0<->hart1, [smt-drain] wait_sb dominant) leaking
+phys-reg free/busy across threads; (b) squash/mispredict repair_mask freeing an in-use reg;
+(c) scoreboard slot/tid reuse making tid_old_q point at wrong phys; (d) commit-free firing before
+younger IQ readers consumed the old phys.
+
+NEXT: instrumented witness run (+commit_trace window +iqdump_from=14M +smt_flow_trace +lsq_trace)
+to capture phys78 alloc/free/writeback sequence -> pinpoint the premature free -> leaf-TB rename/
+freelist -> fix both RTL trees -> witness re-run.
+
+## [turn] PHYS-REG OWNERSHIP CYCLE — the deadlock mechanism (refined)
+
+SMT phys-reg organization (verified):
+- free_q/rsv_q = SINGLE shared bitmap (g6lc_freelist.sv:68), NOT hart-partitioned.
+- map_q[NH][32] per-hart arch->phys (g6lc_rename.sv:142). PRF write banked by
+  commit_instr.hart_id (commit_stage.sv:154-164 whart_o). PRF_LIVE=FL_NB*(1+31*NH)+NP*4
+  (dispatch:166) — each bank must hold every hart's arch regs (rfix131a-11 fix).
+- scoreboard mem_q[NR_SB_ENTRIES] SHARED, trans_id global-unique, hart-tagged per slot
+  => tid_old_q[tid]/free_prd target the CORRECT phys (no trans_id collision).
+- free_en=commit_arch && rd!=0 && tid_old!=0; free_prd=tid_old_q[tid] (dispatch:494-497)
+  frees the OLD phys a committing writer replaces. In-order commit => old phys's
+  readers (all older) already consumed => normally safe.
+
+DEADLOCK CYCLE (hart0, all hart=0):
+  store `sd ..(sp)` prs1=phys78  -- needs phys78 as operand (sp base)
+  phys78 ALSO produced by `ld a5,0(a0)` @0x8000a026 (slot55) -- a LOAD
+  `ld a5` is itself a load that dwaits on unresolved stores (unres mask)
+  => phys78 owned by PENDING `ld a5`; stores can't read it => can't issue
+  => stores stay unresolved => `ld a5` (and all same-line loads) dwait forever
+  => CIRCULAR: stores need phys78; phys78 needs `ld a5`; `ld a5` needs stores resolved.
+
+For this to be a BUG (not legal), phys78 must have been FREED+REALLOCATED to `ld a5`
+while the `sd ..(sp)` stores still had it bound as a pending operand. In-order commit
+makes the epilogue-addi free safe ONLY if stores already read phys78 -- they didn't
+(they're stuck). So EITHER:
+  (a) phys78 was freed by a path OTHER than the safe in-order commit-free
+      (squash repair_mask / restore / release / a wrong-path commit), OR
+  (b) the stores' prs1=78 binding is STALE -- bound to phys78-as-sp in a PRIOR
+      printc call, survived (not squashed/cancelled) into the current call where
+      phys78 was legitimately reused by `ld a5`, OR
+  (c) a store-operand read of phys78 was never registered as a "reader", so the
+      free-tracking freed phys78 despite pending store consumers.
+
+IQ had GARBAGE entries (fu in {0,6,8,10,12,14}, pc=0x13fa8/0x14a31, prs to 173)
+=> wrong-path/squash residue present => (b)/(c) wrong-path-leak is a live suspect.
+
+NEXT (remote ovh_calltorch DOWN - ssh conn reset): when back, run instrumented
+witness: +commit_trace window +iqdump_from=14M +smt_flow_trace +lsq_trace +ld_trace
+to capture phys78 alloc->free->realloc->writeback sequence. Leaf TB target:
+g6lc_freelist/g6lc_rename/dispatch free-vs-reader ordering + store-cancel leak.
+
+## [turn] SMT DRAIN-HANDOFF phys-reg leak — leading root-cause hypothesis
+
+Cancel path EXONERATED for the wedge store: G6LC_FETCH_B is defined
+(Flist.g6lc_hyp8:11) => sb_cancel.sv:133 cancels ALL younger window entries
+(keep-exemptions are dead code). tid=18 store canc=0 => it is CORRECT-path,
+legitimately live => bug is NOT a missed wrong-path cancel.
+
+CAVEAT (fragile, not the active wedge): sb_cancel.sv:130 bypasses the same-hart
+filter under SmtDrainedHandoff (`|| G6LCCfg.SmtDrainedHandoff`) => a hart0
+mispredict cancels EVERY younger scoreboard slot incl. any residual hart1
+entries. Safe only if drained handoff truly leaves zero cross-hart residue.
+
+LEADING HYPOTHESIS — SMT drained-handoff phys-reg leak:
+- phys pool free_q is SHARED across harts (g6lc_freelist.sv:68); only map_q[NH]
+  and commit_hart_i are per-hart. phys78 produced by BOTH `addi sp`(slot17) and
+  `ld a5`(slot55) on hart0 => phys78 freed+realloc'd while `sd ..(sp)` stores
+  still held it bound as a pending operand => operand-starvation deadlock.
+- Mechanism: an SMT hart switch (or an incomplete drain — [smt-drain] shows
+  wait_sb dominance) fails to fully quiesce the outgoing hart's OoO state
+  (scoreboard/LSQ/phys-reg allocations). Residual phys-reg busy/free or a
+  restore_mask that frees an in-flight reg => phys78 wrongly returns to the
+  pool => `ld a5` grabs it => stores starve => LSQ unres => store/load deadlock.
+- restore_i/restore_mask_i (freelist flush/amap rebuild) is the prime suspect
+  for freeing a reg still owned by in-flight ops after a switch.
+
+BLOCKER: remote ovh_calltorch DOWN (ssh mux conn reset, ~5 retries) => cannot
+launch instrumented witness / build leaf TB / harvest iqdump. No local verilator
+(src tree only, no verilator_bin; iverilog present but unsuitable for g6lc SV).
+
+READY-TO-RUN when remote returns (run_hyp8_witness.py interface):
+  HYP8_INT_TAG=<iqdump4/stgfwd integration tag>  HYP8_FW_SHA256=04f3b24b...
+  HYP8_TOHOST=0x80041730  HYP8_MAX_CYCLES=16000000
+  HYP8_PLUSARGS="+core_notrace +hang_dump +hang_dump=2000 +rvfi_notrace
+    +smt_stats +stall_census +time_out=16000000 +lsq_trace +ld_trace
+    +commit_trace +commit_trace_from=14000000 +commit_trace_to=15500000
+    +smt_flow_trace +trace_from=14000000 +trace_to=16000000"
+Captures phys78 alloc->free->realloc->writeback + per-tid LSQ events + bypass
+contents => names the premature free / drain-leak => leaf TB on
+freelist/rename-restore/drain-quiesce => fix both RTL trees -> witness re-run.
+
+## [turn] phys78 DOUBLE-PRODUCTION CONFIRMED in iqdump [hang] dump @cyc=14507433 hart0
+
+Full SBX+IQ decode (hd_print via stall_census, lsu_ready=1 => LSU ready but STARVED,
+NOT bypass-full — confirms operand-readiness is the proximate stall):
+
+SBX prd=78 producers (phys78 = the contested phys-reg):
+  slot17 pc=0x80009fd4 fu=3(ALU) prd=78   = `addi sp,sp,-64`  (window-A sp)
+  slot55 pc=0x8000a026 fu=1(LOAD) op=37 prd=78 = `ld a5,0(a0)` (window-B load)
+=> phys78 produced by BOTH an ALU sp-write AND a later LOAD => phys-reg lifetime
+   conflict: phys78 freed+realloc'd to `ld a5` while window-A `sd ..(sp)` stores
+   still hold prs1=78 bound as pending operand.
+
+IQ consumers of phys78 (prs1=78), ALL ready=00000010 (rs2 ready, phys78 NOT):
+  IQ[2] tid=19 sd pc=0x80009fd8 prs1=78 prs2=74
+  IQ[5] tid=20 sd pc=0x80009fda prs1=78 prs2=76
+  IQ[6] tid=24 sd pc=0x80009fe2 prs1=78 prs2=4
+  (+ghost IQ[34/37/38] tid=0 prs1=78 = wrong-path residue, fu=0 op=0)
+Other stores on OTHER unready phys: tid=33 prs1=86(load29), tid=35 prs1=165(load34),
+tid=32 prs1=173, tid=38 prs1=84. Loads fu=1 produce those phys (slot25/27/29/34/36).
+
+Duplicate-PC windows: slots41-47 & 48-63 share pc 0x8000a014-0x8000a038 => TWO
+in-flight printc/print windows; window-B `ld a5`@0x8000a026 (slot55) grabbed phys78.
+
+DEADLOCK (final): window-A stores prs1=78 wait on phys78; phys78 owned by window-B
+`ld a5` (a load that itself dwaits on unresolved stores) => circular operand stall
+=> LSQ unres {19,20,24,32,33,35,38} addr_v=0 => epilogue loads dwait => commit head
+`ld s2,32(sp)` frozen => mc_verdict 126.
+
+ROOT-CAUSE locus: phys-reg freed while younger-window store-readers pending.
+Suspects: (a) squash repair_mask `squashed=g_alloc&~free_rep` freeing an in-use reg;
+(b) commit-free of tid_old firing before store-operand reads registered;
+(c) SMT drained-handoff leaving phys78 free while window-A stores alive;
+(d) free-list bank accounting handing out an allocated reg.
+
+RUNNING: hyp8-witness-physdbg pid 767807 (+iqdump_from=12M every=25k +smt_flow_trace
++smt_flow_lo/hi +trace_from/to +lsq_trace +stall_census +hang_dump=2000 +smt_stats
++smt_mem_watch=0x80053e00). iqdump dumps @sc_cyc>=12M show phys78 alloc->free->realloc
+transition => names exact premature-free cycle/mechanism. ~2h to wedge window.
+Parser ready: .devin-tmp/parse_phys.py <log> 78.
+
+## [turn] Parallel repro attempt: mc_printc_dep.S on fast-gcc13-t2 model
+
+Found existing faithful repro `verif/tests/custom/multicore/mc_printc_dep.S`
+(untracked, never committed/run). printc-shaped emit(): prologue sd saves ->
+ld/st cursor load-modify-store -> epilogue ld reloads SAME line + data-dep
+branches; hart1 SMT sibling stressor on shared core0 backend. Compiled remote
+gcc-14.2 -> /tmp/mcpc_{4096,16384}.elf (tohost=0x53400).
+
+Launched instrumented on the SAME model binary as the witness
+(runs/hyp8-fast-gcc13-t2/output/model/Variane_testharness) via setsid+--allow-overlap
+(12-core box, load~2, witness pid767807 uses ~2 cores -> headroom OK):
+  mcpc_4096i:  +stall_census +hang_dump=50000 +iqdump_from=0 +iqdump_every=1M cap6M
+  mcpc_16384i: +stall_census +hang_dump=200000 +iqdump_from=0 +iqdump_every=2M cap8M
+NOTE: +hang_dump fires on ANY >Nth-cyc ack gap incl. legitimate WFI parks ->
+early [hang] dumps @cyc~50k are parked-hart false-positives (halt=1 sb_empty=1
+pc=0x10040), NOT the wedge. Real signal = stall-census per-2M + iqdump windows.
+
+OPEN Q: does clean bare-metal start reproduce phys78 premature-free, or does it
+need OpenWrt's prior phys-reg fragmentation? stall-census @2M decides.
+
+## [turn] Mechanism narrowed to squash-repair phys-reg premature-free; SMT-drain EXONERATED
+
+RTL audit results (build tree core/ooo/):
+- `flush_hart_i` TIED OFF at g6lc_ooo_dispatch.sv:555 -> SMT switch uses FULL
+  drain (ooo_drained=rob_empty&&iq_empty&&!lsq_busy), NOT per-hart phys flush.
+  => per-hart-flush phys-leak hypothesis DEAD.
+- LSQ store `id`==SB trans_id; `st_resolved[t]=cancelled_mask_i[t]||...`
+  (g6lc_lsq.sv:1098). Stores in unres mask => NOT cancelled => LIVE.
+- Rename repair (g6lc_rename_recover.sv): `squashed = g_alloc & ~free_rep`
+  (L548) where g_alloc=checkpoint alloc-mask gathered via rec_oh_q; frees into
+  free_d/busy_d. ckpt_alloc_q[s] accumulates pub_mark_i[hart(s)] = phys regs the
+  checkpoint's OWN hart allocates while s pending (L415-416,469-470,486-488).
+- commit-free `free_prd[c]=tid_old_q[tid]` (dispatch:497) cannot reach phys78:
+  only a younger sp-rewrite (epilogue addi sp,+64, slots45/49) has tid_old=78 and
+  it cannot commit before the older stuck stores (in-order).
+
+FINALIST MECHANISMS for phys78 double-production (slot17 addi sp->78 live +
+slot55 ld a5->78 live, stores 19/20/24 prs1=78 live-unready):
+ (A) squash-repair frees phys78 via a checkpoint whose alloc-mask wrongly
+     includes it (window-boundary/ring-accounting bug: rel2 unwind L547,
+     ckpt_cnt/head, or pub_mark hart-tag pollution) while `addi sp` survives.
+ (B) stale wrong-path IQ/LSQ/store_buffer entries survive cancel (cancelled_mask
+     SB-indexed; IQ invalidate via i_arb; LSQ st_resolved forced) -> ghost
+     entries (IQ tid=0 fu=0 prs1=78 seen) hold phys78; live same-line loads
+     dwait on leaked LSQ store entries -> deadlock.
+DISCRIMINATOR the witness gives: smt_flow control (mispredict/flush) + iqdump
+SBX prd=78 ownership + IQ prs1=78 liveness over 12M-15.8M -> exact free cycle +
+whether stores were cancelled (cnc) before starving.
+
+RUN STATE: witness pid767807 healthy @~4M cyc (stall-census 4M printed),
+~1175cyc/s -> iqdump window 12M in ~1.9h, wedge 14.5M in ~3.4h. MUL-bound crawl
+(notissued mul~1.5M/hart) is a SEPARATE perf drag, not the wedge. mcpc bare-metal
+repro tests killed (too slow ~300cyc/s, clean-start unlikely to repro).
+
+## [turn] printc disasm decoded — phys78 2nd producer is emit_empty ALTERNATE path
+
+fw_payload.elf objdump 0x80009fd4-0x8000a03e:
+  80009fd4 addi sp,sp,-64     -> sp=phys78 (P_sp)   [slot17, ALWAYS runs]
+  80009fd6/8/a/2 sd s0/s2/ra/s1,(sp)  -> prologue stores bind prs1=phys78
+  80009fe0 beqz a1,8000a01a   -> emit_empty ALTERNATE path branch
+  ...normal path... 8000a00e epilogue: ld s1/ra/s0/s2,(sp); 8000a016 addi sp,+64; ret
+  8000a01a emit_empty: ld a5,0(a0)@8000a01c.. 8000a026 ld a5,0(a0) -> prd=78 [slot55]
+       8000a032 addi sp,sp,64; ret
+=> slot55 `ld a5`@0x8000a026 is on the CONDITIONAL emit_empty path (a1==0).
+   phys78 double-production therefore implicates the `beqz a1` BRANCH
+   speculation/misppredict: wrong-path `ld a5` allocated phys78 while the
+   surviving-path `addi sp`+stores still reference it => squash-repair or
+   wrong-path-leak premature-free. Strengthens finalist A/B (both need a
+   mispredict/squash event).
+
+INSTRUMENTATION ARMED (3 parallel witnesses, ~6 cores of 12):
+  767807 main:   iqdump 12M-15.8M/25k + smt_flow + lsq_trace + stall_census (~3.4h->wedge)
+  wit_early:     iqdump 2M-6M/100k (MUL-starvation phys-reg phase)
+  wit_disp2:     +disp_trace trace_from=14M trace_to=14.6M + iqdump 14M-14.6M/25k
+                 -> event-level [disp] alloc prs1/prs2/prd + busyset + wbclr
+NOTE: +commit_trace/+cmt_trace/+ckpt_trace REJECTED by harness arg parser
+(printed usage, exited) — dropped; disp_trace is the phys-reg event trace.
+Decode helper: .devin-tmp/trace_phys.py <log> 78  (producers/consumers/busyset/
+wbclr + free-realloc inference + smt-flow control events).
+
+## [turn] rename publish/checkpoint audit + replay/duplicate-entry lead
+
+publish (g6lc_rename_publish.sv:143-158): new checkpoint's alloc-mask opens as
+YOUNGER same-hart lanes in the SAME dispatch group (q>p), then accumulates all
+of the checkpoint-hart's allocs while pending (recover L415/469 pub_mark).
+Semantics look correct for single dispatch group; suspect = GROUP/CROSS-CYCLE
+boundary or ring reuse.
+
+Replay lead: duplicate SBX entries (slot44&48 @0x8000a014 prd23/74, 45&49
+@0x8000a016) = an instruction dispatched twice. sb_lifecycle replay bit set by
+lu_replay (load-unit) + phys_replay (COH phys-pending, exonerated ppend=0).
+`ld a5`@0x8000a026 is a LOAD -> replayable. A replayed-then-redispatched load
+re-binding phys78 while the OLD store readers linger = the double-production.
+WITNESS will show replay bit + gen on the dup slots + whether cancel reached IQ/LSQ.
+
+STATUS: mechanism requires temporal trace. 3 witnesses armed (see prior note).
+Decode: .devin-tmp/trace_phys.py <log> 78.
+
+## [turn] Directed repro v2 (alternating a1 -> emit_empty) + witness inventory
+
+mc_printc_dep.S v2: a1 now ALTERNATES &counter<->0 every emit call -> printc's
+internal `beqz a1` mispredicts EVERY call -> wrong-path squash churn on shared
+phys pool. emit_empty given its OWN epilogue (no s1 restore) matching real
+printc @0x8000a02c -- fixed a replica bug that would have corrupted caller s1.
+Compiled remote gcc-14.2 -> /tmp/mcpc_alt.elf (md5 8ad30cfb, tohost=0x80001000).
+Launched setsid pid 796430: +stall_census +iqdump 0-2M/200k, cap 2M cyc.
+STATUS: crawling under load (4 sims x ~2 cores on 12-core box, load~6).
+
+WITNESS INVENTORY (all fw_payload.elf, tohost=0x80041730, hyp8-fast-gcc13-t2 model):
+  767807 main:   iqdump 12M-16M  max16M  ~91min elapsed -> iqdump window ~45min out
+  785597 early:  iqdump 2M-8M    max8M   ~26min, log /tmp/wit_early.log=559MB(!)
+  787167 disp:   trace_from/to=14M-16M + iqdump 14M  -> event-level phys78 ~2.5h out
+  796430 mcpc:   directed bare-metal repro (this turn)
+NEXT DATA: wit_early finishes ~1h; main iqdump window ~45min; disp_trace ~2.5h.
+
+## [turn] phys78 = DOUBLE-ALLOCATION; freelist handed it out twice
+
+Reframed mechanism (cleaner than premature-free-of-live): phys78 was in the
+free pool, picked by addi sp (slot17, committed->busy), then FREED back to the
+pool while its store-consumers (prs1=78) were still in-flight, then picked
+AGAIN by ld a5@0x8000a026 (slot55). Now phys78 is bound to two live producers
+=> stores wait on phys78-busy (ld a5's pending wb) which never completes (ld a5
+itself stuck/cancelled-pending) => store<->load ordering deadlock.
+
+Freelist audit (g6lc_freelist.sv:74-175): pick excludes rsv_q; commit sets
+free_d[prd]=0; commit-free/repair/kill set free_d|=mask. DOUBLE-ALLOC requires
+a free of phys78 landing while addi sp's consumers still reference it. Two
+free paths can do that:
+  (A) repair_mask over-inclusion: a checkpoint's ckpt_alloc wrongly spans
+      phys78's legit (pre-checkpoint) allocation -> squash frees live phys78.
+      pub_alloc_v row = hit?port_val : live?ckpt_alloc|pub_mark[hart] : hold.
+      Suspect: ckpt_hart_q[s] mis-tag OR rel2/ring boundary -> wrong hart/window.
+  (B) commit-free ordering: free_prd=tid_old_q[tid] frees the phys that was
+      mapped to rd BEFORE this instr's rename. Needs an sp-writer (or any reg
+      previously->78) to COMMIT while stores pending -- blocked by in-order
+      commit UNLESS the freeing instr is on a different (correct) path.
+  (C) wrong-path LEAK (strongest fit w/ disasm): ld a5@0x8000a026 is on the
+      CONDITIONAL emit_empty path. If beqz-a1 speculated empty but actual was
+      normal (or the reverse squash left it), a leaked IQ/LSQ entry holds
+      phys78 busy forever -> stores starve. Matches "stores live-unready,
+      backend otherwise idle" freeze.
+
+Directed repro mcpc_alt (alternating a1 -> beqz mispredict every call) built +
+launched but CRAWLING (~36cyc/s under 4-sim load) -> killed to free CPU for
+witnesses; parked harts 2-7 flooded hang_dump (noise). Test itself is sound
+(faithful emit replica + emit_empty epilogue fix); needs a quieter box or
+hart0-only hang attribution to be useful.
+
+WITNESS PROGRESS: main 767807 @ cyc=8.0M (iqdump window opens 12M, ~50min);
+wit_early 785597 @ c=2.62M tracing (log 1.6GB, disk OK 369G free);
+wit_disp 787167 @14M window (~2.5h). ipc=0.045, mul retiring (133k), drain
+wait_sb-dominated.
+
+## [turn] Checkpoint/rename/freelist deep audit — mechanism space mapped, width-commit EXONERATED
+
+Audited the full phys-reg free path for the phys78 double-allocation:
+- ckpt_slot(h,v)=h*CKPT_PER_HART+(v mod CKPT_PER_HART): STATIC per-hart slice,
+  CKPT_PER_HART pow2 (asserted). live_slot(s) finds hart by s>=hh*CKPT_PER_HART
+  then ring-window [head,head+cnt). sb_cnt[gp]=PREFIX branch count (ge<gp,
+  same-hart) -> distinct slots, no collision. All consistent.
+- freelist: pick excludes rsv_q; commit free_d[prd]=0; commit-free/repair/
+  kill free_d|=mask; release drops rsv. Double-alloc needs a free landing while
+  consumers in-flight.
+- Recent-commit lead 40aebfee8 "checkpoint width 6->8b" REVIEWED: pure width
+  widening + SLOT_W indexing, guard `<CKPT_DEPTH` precedes index -> EXONERATED
+  as direct cause (logic sound).
+- NO free-event trace plusarg exists in rename_recover/freelist (only
+  equiv_report counters + a void-select $display). disp_trace is best
+  available: alloc(busy_prs/rs_rdy)/busyset/wbclr/grant/kill/rdy brackets the
+  free; realloc(prd=78 twice) confirms it.
+
+Decode tool ready: .devin-tmp/trace_phys.py <log> 78  (full event vocab).
+
+TIMELINE: main 767807 ~8-9M (iqdump opens 12M ~40min, wedge ~14.5M ~70min);
+early 785597 c=3.1M/8M (~50min); disp 787167 <14M (~2h, best instrumentation).
+
+## [turn] Witness health confirmed — primary hart progressing to wedge
+
+stall-census is PER-CORE (multiple cores x SMT hart pairs). Corrected read:
+- PRIMARY boot hart (one core's hart0): ret=2,261,802 @cyc=8M -> ipc~0.28,
+  healthy progress toward printc wedge (~14.5M). NOT stuck.
+- Secondary harts ret~358k (parked/light) -> the ipc=0.045 I quoted was a
+  SECONDARY hart, not the boot hart. Boot is fine.
+- mc_printc_dep directed repro: deterministic stall @commit~1560 across 3
+  launches BUT ambiguous (parked-hart hang_dump noise, no per-hart wedge
+  attribution, crawls under load) -> killed; bare-metal lacks OpenWrt phys-reg
+  fragmentation context anyway. Witnesses are the reliable path.
+- Decode tool hardened: .devin-tmp/trace_phys.py now does full event vocab +
+  general double-alloc scan (any prd alloc'd >1x), robust to phys renumbering.
+
+ETA: main iqdump window (12M) ~55min; wedge region ~14.5M ~90min; disp_trace
+(787167, best instrumentation) ~2h.
+
+## [turn] Instrumentation verified + status checkpoint
+
+disp witness 787167 plusargs CONFIRMED: +disp_trace trace_from/to=14M-14.6M,
++iqdump 14M-14.6M/25k, max16M, hang_dump=2000. Covers likely wedge region.
+main 767807 iqdump 12M-16M/25k = wider safety net (catches freeze whenever it
+forms). early 785597 tracing 2M-8M (secondary value).
+
+Decode pipeline ready: .devin-tmp/trace_phys.py <log> [REG] [TID] — parses
+alloc/busyset/wbclr/grant/kill/rdy + double-alloc scan. phys78 deterministic
+(same ELF+config -> same phys assignment) but tool robust to renumbering.
+
+BLOCKED-ON-DATA: ~55min to main iqdump window, ~90min to wedge region, ~2h to
+disp_trace. No faster reliable path (no free-event trace plusarg exists;
+rebuild ~40min+ not worth it vs waiting). All analysis exonerations +
+mechanism map in worklog (8211+ lines).
+
+## rfix131a — phys78 free-timing EXONERATION (cancel precedes free, provably safe)
+
+Traced the mispredict->phys-free ordering end to end:
+- `issue_stage.sv:560` drives OoO `mispredict_i = resolved_branch_i.valid && is_mispredict`.
+- `resolved_branch_i` is the branch unit's REGISTERED B2 record -> `mispredict_i`, `bmiss_o`,
+  and `cancelled_mask_o` (sb_cancel.sv, always_comb off the same registered record) ALL fire
+  on the SAME cycle T.
+- `g6lc_rename_recover.sv:711-720`: on mispredict_i, `rec_v_q <= sel_take` (registered) -> the
+  phys free via repair_mask fires at T+1.
+- IQ/ROB/LSQ squash `cancelled_mask_i` entries at T (same cycle as mispredict).
+
+=> IQ/LSQ cancel at T, phys free at T+1, earliest realloc T+2. The freed phys CANNOT be
+re-grabbed while a stale IQ/LSQ entry still references it. **Mechanism C's cancel/free window
+is exonerated for the mispredict path.**
+
+Remaining finalists for phys78 premature-free:
+- (A) squash-repair `ckpt_alloc` over-inclusion: checkpoint restore frees phys78 though a
+  correct-path producer (addi sp slot17) still owns it. Subtlest; needs trace.
+- (B) commit-free ordering: `free_prd=tid_old_q` frees phys78 while younger store-readers
+  (prs1=78) still pending. In-order commit argues against, but SMT/port arbitration may
+  reorder.
+- (D-new) replay/duplicate-SBX: slot44&48,45&49 duplicates suggest a re-dispatched instr
+  re-bound phys78. Check `[disp]` replay/`vanish` events in disp_trace window.
+
+Witnesses (all ALIVE @ ~16:33): main 767807 cyc=10.0M (iqdump opens 12M, ~20min);
+early 785597 cyc=4.12M (in 2-8M window); disp 787167 cyc=3.0M (disp_trace opens 14M, ~2h).
+Decode: `.devin-tmp/trace_phys.py <log> 78` (disp) + `.devin-tmp/iqdump_phys.py <log> 78`.
+
+## rfix131a — PRECISE free-site localization: `squashed = g_alloc & ~free_rep`
+
+Pinned the exact phys-free expression in `g6lc_rename_recover.sv:548`:
+```
+if (rec_v_q) begin
+  rel2 = (g_pos < g_cnt) ? g_pos : 0;
+  squashed = g_alloc & ~free_rep;      // g_alloc = ckpt_alloc_q[rec_oh_q]
+  map_d[g_hart] = g_map;
+  free_d = free_d | squashed;          // <-- phys78 freed HERE if in ckpt_alloc
+  busy_d = busy_d & ~squashed;
+```
+`g_alloc[i] = ckpt_alloc_q[rec_oh_q][i]` = the SELECTED checkpoint's accumulated
+speculative-alloc mask. `ckpt_alloc_q[s]` is built two ways
+(`g6lc_rename_publish.sv`):
+- init on checkpoint create = `pub_ck_aval` = phys of YOUNGER same-hart lanes q>p
+  in the SAME dispatch group (line 143-153) — correctly excludes older prologue.
+- accumulate while live = `ckpt_alloc_q[s] |= pub_mark_i[ckpt_hart_q[s]]`
+  (recover pub_alloc_v, line ~415) — ORs the owner-hart's per-cycle alloc marks.
+
+=> phys78 is wrongly freed IFF phys78 ended up in `ckpt_alloc_q[<beqz ckpt>]`.
+Sub-mechanisms to discriminate in disp_trace (787167) / iqdump (767807):
+  S1 ring-slot reuse: ckpt_alloc_q[s] not fully reset when slot s is re-written by a
+     new checkpoint (pub_ck_aval write-hit path must overwrite, not OR).
+  S2 mark-accumulation timing: addi sp's pub_mark lands in beqz's checkpoint window
+     due to a publish/dispatch group or hart-slice skew under SMT.
+  S3 wrong checkpoint selected: rec_oh_q/rec_level picks a ckpt whose window wrongly
+     spans addi sp (checkpoint retire `n_ret`/`ckpt_head` drift).
+  S4 ckpt_hart_q misassign: slot owner hart wrong -> hart0 allocs marked into a slot
+     later read under wrong hart scope.
+Watch `[disp] alloc` for prd=78 + `[disp] kill`/`vanish` + publish ckpt writes;
+`iqdump_phys.py`/`trace_phys.py` extract the sequence.
+
+## rfix131a — decode tools verified + ready
+- `.devin-tmp/trace_phys.py` regexes checked 1:1 against the actual `[disp]` $display
+  strings in `ooo/g6lc_ooo_dispatch.sv:1804-1885` (alloc/busyset/wbclr/grant/kill/take/
+  pop/iro/rdy/vanish). Added missing `pop` event. Syntax OK.
+- `.devin-tmp/iqdump_phys.py` parses `[hang] SBX/IQ/IQd` snapshot blocks for prd/prs==REG.
+- Both take `<log> <reg>`; run on the witness logs the moment windows open.
+
+## rfix131a — NEW free-path candidate E: stale rename-lane record + global kill_all
+`g6lc_rename.sv:183` `lane_dies = l.v && (kill_all || kill_hart[l.hart])`;
+`kill_all = mispredict_i || flush_i || flush_unissued_i` is GLOBAL (any hart's
+mispredict kills ALL in-flight rename lanes). Killed lanes' picks return via
+`kill_pick_mask` -> freelist `free_d |= kill_pick_mask` (recover:520).
+DANGER: r1_q/s2_q/rra_lane stage regs are NOT cleared on drain/kill — a stale
+record whose prd was already PUBLISHED (phys78 -> addi sp, free_q[78]=0) can be
+re-killed by a LATER hart's mispredict -> `free_d[78]=1` while addi sp owns it
+-> realloc to ld a5 -> double-producer. Comment at :187-196 acknowledges stale
+records; s2_v_q/lane_dies gating may have a hole.
+SMT angle: kill_all is not hart-qualified -> hart1 mispredict can free hart0 phys.
+TRACE DISCRIMINATOR: phys78 free coincident with `[disp] kill why=flush/
+staged_cancel/cand_cancel/vanish` (NOT a ckpt repair) => candidate E.
+trace_phys.py already logs kill events; correlate kill c= vs alloc prd=78 c=.
+
+## rfix131a — candidate E refined: kill_pick_mask stage-valid gating audit
+`kill_pick_mask` (rename.sv:217-243) returns dying lanes' picks to free.
+- r1 lanes gated by `r1_v_q &&` (line 218), s2 by `s2_v_q &&` (line 226) ->
+  stage-drained stale records EXCLUDED. Safe.
+- **rra_lane gated ONLY by `rra_occ` = OR(rra_lane[p].v) (line 213-215,236)**
+  under RRS==2 resolve-kernel RR-a register. If rra_lane[p].v is not cleared
+  when the lane leaves the resolve kernel, a STALE record (prd already
+  published->allocated, e.g. phys78->addi sp) dies on the next kill_all
+  (GLOBAL: any hart mispredict) -> free_d[78]=1 -> realloc to ld a5.
+  PRIME SMT-specific suspect: global kill_all + possibly-stale rra_lane.v.
+VERIFY: does rra_lane[p].v clear on resolve-kernel drain/publish? Check
+where rra_lane is assigned (resolve kernel output reg) and its clear condition.
+TRACE: phys78 free coincident with [disp] kill (why=flush/staged_cancel/
+cand_cancel/vanish) at a mispredict cycle => candidate E/rra; coincident with
+checkpoint repair (no kill) => S1-S4 ckpt_alloc.
+
+## rfix131a — candidate E largely EXONERATED (v-bit hygiene is correct)
+Audited the stale-lane-record kill path end to end:
+- r1/s2 kill_pick_mask gated by stage-valid r1_v_q/s2_v_q (rename.sv:218,226).
+- rra_q[p].v is re-driven EVERY cycle by lane_v_i[p] = parent's kill-masked
+  surviving-v (resolve.sv:171-172), NOT the stale r1_q[p].v — the stale-v hole
+  the comment warns about is explicitly closed. rra_o=rra_q is clean.
+- prod_dies/lane_dies only fire on genuinely in-flight (reserved, un-published)
+  picks -> returning them is correct.
+=> kill_pick_mask does NOT free an already-published phys. Candidate E demoted.
+
+REMAINING PRIME SUSPECT: ckpt_alloc over-inclusion -> squashed=g_alloc&~free_rep
+(recover.sv:548) frees phys78 iff it's wrongly in ckpt_alloc_q[beqz_ckpt].
+Sub-mechanisms S1 slot-reuse reset / S2 mark-accum skew / S3 retire-head drift /
+S4 ckpt_hart_q misassign — all need the disp_trace/iqdump window to discriminate.
+
+## rfix131a — coherent hypothesis: REPLAY + ckpt_alloc mark accumulation
+Audited pub_alloc_v (recover.sv:413-421): a LIVE checkpoint slot accumulates
+ckpt_alloc_q[s] |= pub_mark_i[ckpt_hart_q[s]] — i.e. EVERY phys the owner hart
+allocates that cycle is OR'd into ALL its live checkpoint slots.
+pub_mark_i[h] is per-cycle (current publish group only), so phys78 (addi sp)
+only enters beqz's ckpt if addi sp PUBLISHES while beqz's ckpt is live.
+addi sp is program-order OLDER than beqz -> normally publishes first -> safe.
+BUT the duplicate SBX entries (slot44&48,45&49) indicate REPLAY: if addi sp's
+group is killed+re-dispatched while beqz's ckpt is already live, the replayed
+addi sp re-publishes phys78 -> mark lands in beqz's ckpt_alloc -> on beqz
+mispredict repair, squashed frees phys78 while the (replayed) addi sp + its
+sd-store readers still own it -> double-alloc -> store starvation -> wedge.
+DISCRIMINATOR in disp_trace: a SECOND [disp] alloc/dispatch of the addi-sp pc
+(0x80009fd4) or its tid AFTER beqz's ckpt creation, coincident with a kill/
+replay. Look for duplicate alloc of prd=78 or re-dispatch of slot17's pc.
+
+## rfix131a — witness config verified + sim confirmed healthy
+767807 plusargs confirmed: iqdump_from=12M iqdump_every=25000 iqdump_to=15.8M
+(~152 snapshots covering the ~14.5M wedge), trace_from/to=12M-15.8M,
+max-cycles=16M, stall_census, hang_dump=2000. Census prints lag actual sc_cyc;
+IQ[] lines=0 confirms actual cycle still <12M. utime +801 jiffies/4s = ~200%
+CPU -> computing, not wedged. ETA to iqdump window ~10-15min wall.
+Note: stall-census hart=0/1 ret~356k ipc=0.036 is a SECONDARY-core/MUL-bound
+hart (per-core census), NOT the primary boot hart — consistent with parked/
+slow siblings; primary progresses separately.
+
+## rfix131a — iqdump window OPEN, baseline captured, anomaly detector defined
+767807 entered iqdump window: cyc=12.097M, IQ[] snapshots flowing (every 25k).
+BASELINE phys78 lifecycle (snapshot @12.1M, core0): ONE SBX producer
+(slot8 pc=0x8001290e prd=78) + IQ consumers prs2=78 ready=0 (normal in-flight
+wait). Garbage IQ entries (fu=0/op=0/pc=0x250f0..) present even in HEALTHY
+snapshots -> benign dead-slot residue, NOT the bug signature.
+phys78 cycles through many functions (0x80012xxx etc) — pool recycling is normal.
+WEDGE ~14.5M is ~2.4M cyc (~24min) out; snapshots every 25k will densely cover it.
+ANOMALY DETECTOR for 14M+ data: a snapshot with >=2 SBX slots sharing the same
+prd (double-producer) OR an IQ consumer prs=X stuck ready=0 across consecutive
+snapshots after its producer slot disappears/cancels. SBX shows only issued
+slots, so 2 issued slots with same prd = definitive double-alloc.
+
+## rfix131a — detector v2 armed remotely; transient dups = normal recycling
+KEY LEARNING: SBX shows only issued slots and phys regs recycle fast, so a
+prd duplicated across 2 issued slots is usually TRANSIENT (old slot's phys
+freed+realloc'd while old still shows issued=1). The mass-dup at cyc=12375000
+(13 prds across slot pairs) did NOT persist -> normal recycling, NOT the bug.
+The BUG = a prd duplicated across MANY CONSECUTIVE snapshots (both producers
+stuck, e.g. printc phys78 wedge freezes them issued forever).
+dup_prd2.py tracks per-snapshot dup prds + persistence + frozen SB head.
+REMOTE detector armed: /tmp/detect2.sh re-greps cyc/SB-head/SBX and runs it.
+FROZEN-head caveat: SB head shows pc=0x800085fe frozen from 4.85M->12.5M = a
+PARKED sibling hart (hd_print reports port-0 head's hart), NOT the wedge —
+wedge is printc epilogue ~0x8000a014 on hart0. Watch for persistent dup prd
+on hart=0 slots near ~14.5M instead.
+Sim at 12.5M, wedge ~14.5M (~20min). Detector validated: 0 persistent dups
+so far = healthy.
+
+## rfix131a — detector confirmed clean through 12.55M; ~25min to wedge
+/tmp/detect2.sh re-scan @12.55M: 0 persistent dup prds (only transient
+recycling noise). FROZEN head=0x800085fe = parked sibling (port-0 hart), not
+wedge. Sim ~1300 cyc/s -> ~14.5M wedge in ~25min. Detector catches the bug
+when a prd stays duplicated across consecutive snapshots (both producers
+stuck issued). Next: re-run detect2.sh as cyc->14M+, then pull full
+SBX+IQ+IQd block at the dup cycle for slot/tid/pc + consumer ready detail.
+
+## rfix131a — main-tree vs hyp-tree ckpt_alloc semantics compared (algorithm OK)
+Main `core/ooo/g6lc_rename.sv` (monolith, known-good) does ckpt_alloc
+accumulation INLINE in one next-state block:
+- per allocating lane: `for s: if ckpt_hart_d[s]==hart_i[p] ckpt_alloc_d[s]|=picked_mask`
+  (line 597-598) — accumulates into ALL live ckpts of the lane's OWN hart,
+  including ckpts taken earlier in the same group (correct: lane is younger).
+- ckpt creation (615-627): `ckpt_alloc_d[slot]='0` AFTER the lane's own alloc
+  processing -> the branch's own rd-alloc (jal/jalr link reg) does NOT enter
+  its own checkpoint. Younger ports accumulate via the same 597-598 loop.
+HYP tree splits this across rename_read->resolve->publish->recover with
+REGISTERED ckpt_alloc_q/ckpt_hart_q and per-hart pub_mark_i aggregation.
+ALGORITHM IS EQUIVALENT -> bug is a hyp8-REWORK implementation regression:
+pipeline/register timing skew OR ckpt_hart_q owner mis-index under SMT
+(cross-hart mark contamination), NOT a design-algorithm error.
+This narrows fix locus to the split-module handshake, resolvable only by
+the 14M+ iqdump/disp trace showing WHICH phys + WHICH ckpt slot.
+
+## rfix131a — WEDGE ROOT CAUSE CAPTURED: phys-reg 78 ORPHANED (busy, no producer)
+Completed run `hyp8-witness-iqdump` (pid 706788) reached cyc=14509433 on
+gen_core[0], verdict 126. Its final [hang] dumps are the REAL wedge (earlier
+cyc=4.8M dumps were core[3] WFI false-positives). Decoded the frozen state:
+
+CONFIRMED FACTS (hang dump cyc=14507433/14508433/14509433, core[0]):
+- SB head slot=48 pc=0x8000a014 op=37 issued=1 commit_ptr=issue_ptr=48 —
+  commit frozen at printc epilogue `ld s2,32(sp)`.
+- phys78 DOUBLE-PRODUCED: SBX slot17 pc=0x80009fd4 prd=78 (addi sp,sp,-64,
+  correct path) AND SBX slot55 pc=0x8000a026 prd=78 (ld a5,0(a0)).
+- Disasm (fw_payload.elf, toolchain objdump): 0x8000a026 `ld a5,0(a0)` is in
+  the EMIT_EMPTY block 0x8000a01a-0x8000a034, reached ONLY via
+  `beqz a1,8000a01a` @0x80009fe0. Wedge head 0x8000a014 is the NORMAL
+  epilogue -> a1!=0 -> beqz NOT-taken -> emit_empty is WRONG-PATH.
+- ENTIRE emit_empty block present in SBX as issued slots 51-61
+  (0x8000a01a..0x8000a034) — wrong-path speculation residue.
+- **phys78 ORPHANED: `grep IQd.*prd=78` = 0** — NO IQ entry produces phys78.
+  Yet consumers wait: IQ[2] tid19/sd s2,32(sp)@9fd8, IQ[5] tid20/sd ra@9fda,
+  IQ[6] tid24/sd s1@9fe2 all fu=2 op=38 prs1=78 ready=00000010 (not ready).
+  LSQ st[1..7] addr_v=0 data_v=0 (operand-starved). IQ issue_valid=0.
+- Other prs1=78 IQ entries (IQ34/37/38 pc=0, IQ66/69/70 pc=0x13f/0x13e) are
+  squash-residue garbage, consistent with wrong-path detritus in the IQ.
+
+MECHANISM (refined): phys78 allocated to correct-path addi sp (slot17), freed
+prematurely, realloc'd to wrong-path emit_empty ld a5 (slot55). slot55 then
+died (beqz mispredict squash) WITHOUT phys78 being returned -> phys78 left
+BUSY with no live producer -> permanent not-ready -> stores/epilogue starve.
+Three free paths in g6lc_rename_recover.sv: commit-free (L508 free_prd_i),
+kill-return (L519 kill_pick_mask_i, covers r1/s2/rra rename-pipeline lanes
+only), mispredict-squash (L548 squashed=ckpt_alloc&~free_rep). Orphan means
+slot55's phys78 was freed by NONE of them -> most likely NOT recorded in
+beqz ckpt_alloc_q (mark-accumulation gap / S2 timing skew) so the squash
+missed it, OR kill_pick_mask gap for a published-then-killed lane.
+
+NEXT DATA: disp_trace witness 787167 (event-level alloc/busyset/wbclr/kill/
+rdy for phys78) ~2h out; physdbg 767187 has 20M lsq + 175k mispredict +
+smt_flow events in 4.4GB log (wedged since ~14.5M, now 15.15M) — mineable
+but expensive. Decode tools ready.
+
+## rfix131a — wedge-event sequence decoded from physdbg smt-flow/[cnc] traces
+printc is called in a LOOP by `print` (jal printc @0x8000a514, return addr
+0x8000a518). Dense branch-mispredict churn precedes the freeze. Tail of the
+smt-flow `mispredict=1` stream (cycle=target):
+  ...14497177->0x80009fb8 14497244->0x80010e54  (nputs/printc <-> helper, alternating)
+  14505286->0x80009fbc
+  14505338->0x8000a05c   (printc+0x88 jal-nputs flush path return)
+  14505375->0x8000a062   (just past printc end)
+  14505439->0x8000a518   *** FINAL: return-into-print mispredict (printc `ret`) ***
+[cnc] c=14505439 tid=0/1 mask=0->1 kill=0->1 bmiss=1 brv=1 brmisp=1 brtid=50 iptr=5
+     c=14505440 mask=1->1 kill=1->0 sticky=0->1 brtid=59
+Last commit ack ~14505433; physdbg now cyc=15.15M since_ack=644k = frozen.
+
+INTERPRETATION: phys78 was orphaned during the dense speculation/squash churn
+(many mispredicts/sec). The final printc-ret mispredict is when commit froze —
+the prologue `sd` stores (prs1=78) + epilogue `ld` could never drain because
+phys78 is busy-with-no-producer. The bug is a RARE phys-reg lifetime race in
+the SMT OoO rename/recover free path, needing event-level alloc/free/cancel
+ordering to name. disp_trace witness 787167 (~2h) is the definitive source;
+physdbg's 20M lsq + 175k mispredict events are an alternative but costly mine.
+
+## rfix131a — bug localized to T1 item-9 ckpt_alloc row-vector rework
+smt-flow `slot` events (physdbg) resolve the cancelled-state question:
+- CORRECT path all cancelled=0: slot17 addi sp->phys78 result=0x80053e00,
+  slot23 beqz a1->0x80009fe2 (resolved NOT-taken, correct), prologue sd's.
+- WRONG path emit_empty slots 51-61 ALL cancelled=1 (squashed by beqz).
+  slot55 ld a5 @0x8000a026 cancelled=1, prd=78, NEVER wrote back (no wb).
+=> phys78 was realloc'd to a cancelled wrong-path instr and its free was MISSED.
+
+FREE-PATH audit (g6lc_rename_recover.sv):
+- L487 ckpt_alloc_d = pub_alloc_v  (T1 item-9 row vector, replaces per-entry loop)
+- pub_alloc_v[s] = t1_wr_s? t1_aval : t1_live_s? (alloc_q|t1_mk_s) : alloc_q
+- t1_mk_s[s] accumulates pub_mark_i[ckpt_hart_q[s]] into LIVE slots only
+- L548 squashed = g_alloc(=ckpt_alloc_q[sel], registered at select) & ~free_rep
+- L524-527 comment: "in-flight reservations are not free yet and are NEVER in
+  the checkpoint alloc masks" -> in-flight (reserved,unpublished) phys EXCLUDED.
+
+LEADING MECHANISM: phys78 allocated to slot55 (emit_empty) but its mark did not
+accumulate into beqz ckpt_alloc before the repair sampled it (pipeline skew /
+in-flight-reservation boundary) -> squash missed phys78 -> slot55 cancelled ->
+phys78 orphaned busy -> consumers starve. Bidirectional risk: same cone can
+over-include (premature free->realloc chaos) or under-include (orphan).
+FIX Locus: g6lc_rename_recover.sv pub_alloc_v/t1_mk_s accumulation + the
+in-flight reservation coverage at mispredict squash. Verify vs disp_trace 787167.
+
+## rfix131a — RACE HYPOTHESIS: younger wrong-path publish lands after repair select
+Timeline model for phys78 orphan:
+- beqz@0x80009fe0 predicted TAKEN -> emit_empty speculated (slots 51-61).
+- slot55 ld a5 allocates phys78 during speculation. Its mark enters
+  ckpt_alloc via pub_alloc_v combinationally at publish cycle T, but only
+  reaches ckpt_alloc_q (registered) at T+1.
+- Repair select captures g_alloc=ckpt_alloc_q[sel] REGISTERED. If beqz
+  resolves/selects within ~1cyc of slot55's publish, phys78 is absent from
+  the squash set -> squashed=ckpt_alloc&~free_rep misses it.
+- slot55 then cancelled (emit_empty squash) -> phys78 busy, no producer ->
+  ORPHAN -> stores/epilogue starve -> commit frozen @0x8000a014.
+Rare because it needs publish-vs-resolve cycle alignment; deterministic at
+14.5M because the print-loop mispredict cadence aligns there.
+Witness status: physdbg 767807 WEDGED @15.77M (frozen, done); iqdump 706788
+DONE verdict126 (mined); disp 787167 at 8M/14M -> disp_trace ~1.5-2h out.
+FIX direction: make squash set cover phys of ALL squashed instrs (not just
+ckpt_alloc snapshot) OR close the publish->ckpt_alloc_q 1cyc skew vs repair
+select. Exact line pending disp_trace confirmation of alloc/free ordering.
+
+## rfix131a — git archaeology: last recover.sv touch = 40aebfee8 (ckpt width 6->8b)
+Diff reviewed: pub_ck_slot_i widened 6->8b, SLOT_W=$clog2(CKPT_DEPTH) added for
+dynamic index. All changes are width-plumbing casts; commit validated (MC lint,
+scalar build, 7/7 smokes, depth-128 ckpt leaf). EXONERATED as the regression —
+bug predates it, lives in the T1 item-9 pub_alloc_v row-vector rework
+(g6lc_rename_recover.sv L413-421, applied L486-488) whose mark->ckpt_alloc
+accumulation has a publish-vs-repair-select coverage gap.
+
+## rfix131a — PRECISE BUG: phys free coverage gap at publish->ckpt_alloc boundary
+slot55 lifecycle: rename-read PICK phys78 (reserves it, out of free_d) ->
+resolve/publish sets busy[78]+pub_mark[hart0]|={78} -> recover accumulates into
+ckpt_alloc_d->ckpt_alloc_q (REGISTERED, +1cyc). Repair squash frees
+ckpt_alloc_q[sel]&~free_rep (registered snapshot at select).
+GAP: an instr past r1/s2/rra kill-stages but whose mark hasn't landed in
+ckpt_alloc_q when beqz's repair selects -> phys78 not in squash set ->
+slot55 cancelled -> phys78 orphaned busy. kill_pick_mask only covers
+r1/s2/rra (rename-pipeline) lanes; published-but-unmarked phys falls through.
+This is a genuine coverage hole in the T1 item-9 rework, rare (needs
+publish-vs-select cycle alignment), deterministic at 14.5M (print-loop
+mispredict cadence).
+FIX CANDIDATES (need sim verify): (a) repair squash OR-in current-cycle
+pub_mark_i[rec_hart] filtered to younger-than-branch; (b) move mark->ckpt_alloc
+earlier (pick-time); (c) free squashed phys from scoreboard tid_prd_q of
+cancelled slots (authoritative, bypasses ckpt_alloc timing). Option (c) most
+robust but invasive. disp_trace 787167 (~1.5h) confirms exact ordering.
+
+## rfix131a — BUG CHARACTERIZATION FINAL: twilight-zone phys free gap
+slot55 is PUBLISHED (in SBX, past r1/s2/rra kill stages) so kill_pick_mask
+does NOT cover it; but its ckpt_alloc mark sits in ckpt_alloc_d (combinational)
+for 1 cycle before reaching ckpt_alloc_q. If beqz's repair select (registered
+snapshot) fires inside that 1-cycle window, phys78 is in NEITHER kill_pick_mask
+NOR ckpt_alloc_q -> squash misses it -> slot55 cancelled -> phys78 orphaned.
+This is the precise coverage hole. Rare (1-cycle alignment), deterministic at
+14.5M (print-loop mispredict cadence phases it in).
+Witnesses: disp 787167 @10M -> disp_trace 14M-14.6M ~1-1.5h; physdbg wedged.
+NEXT: decode disp_trace phys78 alloc->mark->free->cancel ordering to confirm
+the 1-cycle gap, then surgical fix in g6lc_rename_recover.sv (extend kill
+coverage OR fresher ckpt_alloc for repair) + port to core/ + witness re-run.
+
+## rfix131a — WEDGE SEQUENCE DECODED from physdbg iqdump/smt-flow (run 767807)
+Extracted /tmp/wedge145.bin (offset ~4.05G) + we.txt (smt-flow 14498079-14530000).
+FATAL mispredict c=14505439 target=0x8000a518 (brtid=50, jal-printc return).
+Preceding: 14505286->9fbc, 14505338->a05c, 14505375->a062 (dense print-loop churn).
+KEY allocs (smt-flow id==SBX slot):
+  tid=55 slot55 ld a5 pc=0x8000a026 alloc_c=14505423 wb=0 ret=0  -> CANCELLED (wrong-path emit_empty)
+  tid=48 ld s2  pc=0x8000a014 alloc_c=14505411 (commit head, loops)
+  tid=17 slot17 addi sp pc=0x80009fd4 alloc_c=14505502 wb=40 ret=39 -> correct-path, SURVIVES
+  tid=23 beqz   pc=0x80009fe0 alloc_c=14505514
+  tid=44/47 next-iter ld_s2/ret alloc_c=14505532/14505544
+SEQUENCE: wrong-path emit_empty ld a5 (tid55) grabs phys78 @14505423 -> beqz
+mispredict @14505439 cancels it -> phys78 freed+realloc'd to correct-path
+addi sp (tid17) @14505502 -> but phys78 ends ORPHANED: IQd prd=78 count=0 (no IQ
+producer) -> epilogue stores prs1=78 starve -> commit head ld_s2 frozen -> wedge.
+=> phys78 double-allocation across squash boundary confirmed at EVENT level.
+Remaining: exact free line (S1-S4) needs +disp_trace alloc/busyset/wbclr/kill.
+Witness 787167 (disp) now sole sim, ~2.3h elapsed, disp window 14M-14.6M.
+
+## rfix131a — REFINEMENT: phys78 producer DID writeback; disconnect is wb->ready
+smt-flow shows tid=17 (slot17 addi sp,pc=0x80009fd4,gen=97988):
+  alloc_c=14505502 -> wb cycle=14505512 data=0x80053e00 (correct new sp) issued=1 cancelled=0
+So phys78's correct-path producer EXECUTED+WB'd 63cyc after the fatal mispredict.
+Yet post-wedge: IQd prd=78 count=0 AND stores prs1=78 (tid19/20/24 @0x80009fd8/a/f2)
+still ready=00000010 (rs1 not ready) -> consumers NEVER woke.
+=> phys78 wb did NOT set rs1_rdy for the bound consumers. Candidates:
+ (a) tid17 wb prd != 78 in hardware (SBX prd=78 but IQ/wb used other phys) -- rename inconsistency
+ (b) wb dropped by cancelled_mask/valid gating (tid17 gen-tag confused w/ cancelled tid55)
+ (c) IQ wakeup prs->prd match broken for realloc'd phys (generation/tag check)
+ (d) consumers bound prs1=78 to STALE phys78 gen (tid55) not tid17's -> match fails
++disp_trace wbclr/alloc events name which. Witness 787167 @12M.
+
+## rfix131a — RC4 RESOLVED: tracedb audit + disp_trace/ldfsm prove g6lc_zicclsm OoO TID-swallow
+Evaluated SQLite tracedb (`/opt/testharness/tracedb/hyp8-trace.sqlite`, 249 runs, 668,977 events):
+- All 4 `14296127...` OpenWrt boot witnesses (`642 fast-openwrt`, `653 fast-coh`, `654 iqdump`,
+  `655 physdbg`) hit the identical deterministic freeze on core0 hart0 at retired=5,022,808,
+  `hang.fu1.op37` @`pc=0x8000a014` (`ld s2,32(sp)`), last commit ack c=14,505,433, exit 126.
+  Zero assertions, zero AXI/PTW/IFE errors; L2/L3 `l2-age` stalls at c>=14,570,973 are purely
+  downstream idle-age observers 65,536 cycles after core0 froze.
+
+Root cause decoded from `+disp_trace` (`/tmp/wit_disp2.log`) + `[ldfsm]/[ldport]/[lsq-ev]`
+(`/tmp/wedge145.bin`) — overturned earlier `phys78` theory:
+- `tid=17` (`addi sp`, `prd=78`) DID write back at c=14505512 and woke `rs1=1` on `tid=18/19/20/21`
+  at c=14505513 (`ready=00000010` in the hang dump was `info_cls=C_ST`, not operand ready bits!).
+- Actual stalled producer = `tid=48` (`ld s2,32(sp)` @`0x8000a014`, `prd=74`), commit head!
+  `IQ[2] tid=19` (`sd s2,32(sp)`) had `rs1=1 rs2=0 prs2=74`, blocking `ST_FRONT` and all younger
+  stores/epilogue loads.
+- Exact crime scene (c=14505431..14505436):
+  1. c=14505431: aligned `tid=48` (`vaddr=0x80053e20`) granted D$ `ldbuf[0]` (`did=0`, `pop_ld`).
+  2. c=14505432: next `lsu_bypass` head is wrong-path `tid=51` (`ld a5,0(a0)` @`0x8000a01a`,
+     `vaddr=0x00000000000000ff` -> offset 7, wraps 8B word -> `split_now=1`!). `g6lc_zicclsm`
+     enters `B0_ACTIVE` with `beat0.vaddr=0xf8` (non-idempotent speculative debug-space load ->
+     `load_unit` parks in `WAIT_SPEC_LOAD<->IDLE` without popping).
+  3. c=14505434: D$ returns `rvld=1 rid=0` for `tid=48` -> `rpend_q[0] <= 1`.
+  4. c=14505435: `load_unit` publishes `ld_valid_fu_i=1, ld_tid_fu_i=48` and pops `ldbuf[0]`
+     (`did: 1->0` at c=14505436). `g6lc_zicclsm` is in `B0_ACTIVE` (`orig_q.trans_id=51`): it
+     unconditionally forced `ld_valid_o=0; st_valid_o=0;` AND checked `if (is_load && ld_valid_fu_i)`
+     WITHOUT checking `ld_tid_fu_i == orig_q.trans_id`! Result: `tid=48`'s writeback was swallowed
+     permanently (never reached scoreboard/PRF/LSQ) and `tid=51` stole `tid=48`'s data into
+     `B1_ACTIVE` until cancelled at c=14505439.
+
+Additional bugs fixed in the same `g6lc_zicclsm.sv` pass (BOTH trees: hyp + main `core/`):
+- TID-matched passthrough across `IDLE/B0_ACTIVE/B0_WAIT/B1_ACTIVE/B1_WAIT` (`ld_match`/`st_match`
+  compare `ld_tid_fu_i == orig_q.trans_id` / `st_tid_fu_i == orig_q.trans_id`); unrelated load and
+  store completions pass straight through untouched, including during `B0_WAIT`/`B1_WAIT` cancel.
+- `hold_v_q` collision arbitration: if an unrelated `ld_valid_fu_i` arrives on the cycle `hold_v_q`
+  would emit, passthrough wins while `hold_v_q` holds (`ctrl_o.valid=0` drains `ldbuf` cleanly).
+- `B1_WAIT` beat-1 load exception propagation (`ld_ex_fu_i.valid` now sets `ld_valid_o=1`, passes
+  `ld_ex_fu_i`, pops bypass, returns to `IDLE` instead of zeroing `ld_ex_o` via `hold_v_q`).
+- Sticky cancel propagation (`beat0/1.is_speculative_load_miss |= ctrl_i.is_speculative_load_miss`).
+- Same-cycle beat-0/beat-1 completion handling in `IDLE`/`B1_ACTIVE` (`ld_match_idle`, `st_match_idle`,
+  `off_eff`).
+
+Verification:
+- Leaf TB `verif/tb/core/tb_g6lc_zicclsm_hyp8.sv` + `verif/regress/remote/hyp8/run_zicclsm_leaf.sh`:
+  - Pre-fix: reproduced exact S1 `ZICCLSM_OOO_TID_SWALLOW` on `tid=48` in 5.5s.
+  - Post-fix: PASS positive (`pass_ld=8 pass_st=2`), `+oracle_negative` caught, mutation
+    `-DG6LC_MUT_ZICCLSM_TID_SWALLOW` caught.
+- Main-tree leaf `verif/tb/core/tb_g6lc_zicclsm.sv` + `verif/tb/core/run-zimop-ntl.sh`: PASS all
+  12 ISA leaves + off-knob mutations (also fixed pre-existing missing `ld_tid_fu=4` in TB).
+- Full-core directed repro `verif/tests/custom/multicore/mc_zicclsm_ooo_overlap.S`:
+  - Pre-fix (`hyp8-fast-gcc13-t2`): reproduced identical `fu=1 op=37` `LSQ ld addr_v=1 done=0`
+    `LSU bypass cnt=0` deadlock at cycle 5,333 in 6.8s!
+  - Rebuilding `hyp8-zicclsmfix-t2` to verify directed pass + OpenWrt witness past c=14.5M.
+
+## rfix131a — RC5 PROVEN & FIXED: store_buffer multi-beat Zicclsm store commit
+Proactive audit of `g6lc_zicclsm` wrapping stores -> `store_buffer` found `RC5`:
+- Two-beat wrapping stores (`sd`/`sw`/`sh` crossing 8B boundary) push `beat0` and `beat1` into
+  `store_buffer`'s speculative queue with the SAME `trans_id`, while `commit_stage` pulses
+  `commit_i` ONCE.
+- Pre-fix bugs proven by `verif/tb/core/tb_g6lc_stq_zicclsm_hyp8.sv`:
+  1. `stb_insert.sv` marked arriving `beat1` older than `beat0` (`ooo_older(T,T)==0` ->
+     `spec_older[beat1][beat0]=1`), tripping `spec_order_matches_anchor` under `--assert` and
+     reversing memory write order.
+  2. `stb_commit.sv` popped only 1 beat (`head_oh_o`), dropping half of every wrapping store
+     (`STQ_ZICCLSM_COMMIT_LOST expected 3 writes, got 2`) and stranding the other beat with stale
+     `trans_id=T` (deadlocking `MixCommit` on the next store via `head_mismatch_o=1`).
+  3. On coincident `commit_i && flush_i`, the stranded second beat was flushed instead of committed.
+- Fix applied in BOTH trees (`stb_insert.sv`, `stb_commit.sv`, `store_buffer.sv` + main
+  `core/store_buffer.sv`):
+  - Equal-TID age ordering (`j_older = (RVZicclsm && j_tid==trans_id_i) || ooo_older(...)`) so
+    `beat0` stays strictly older than `beat1`.
+  - Atomic two-beat pop (`pop_oh_o = commit_i ? (head_oh_o | beat1_oh) : '0`) into architectural
+    `pend_q` (`beat0`) + `pend2_q` (`beat1`, survives `flush_i`, drains once `!pend_v_q &&
+    commit_status_cnt_q < DEPTH_COMMIT`, participates in `page_offset_matches` + `commit_ready_o`
+    + `no_st_pending_o`).
+  - `commit_tid_in_s1` guard prevents committing `beat0` while `beat1` is still in `stb_insert` S1.
+- Verified:
+  - Hyp8 3-gate leaf `run_stq_zicclsm_leaf.sh`: `PASS tb_g6lc_stq_zicclsm_hyp8 wr_n=5`,
+    `+oracle_negative` caught, `-DG6LC_MUT_STQ_ZICCLSM_SINGLE_BEAT` caught.
+  - Main-tree `run-stq-commit-flush.sh`: PASS (positive + oracle_negative + prefix + mutants).
+
+## rfix131a — RC6 PROVEN & FIXED: g6lc_zicclsm unchecked-split ld_checked circular deadlock
+Full-core directed runs on `hyp8-zicclsmfix-t2` (RC4 only) proved RC4 moved `mc_zicclsm_ooo_overlap`
+past `0x80000088` (`ld a2` completed and woke `sd a2`), then exposed RC6 on BOTH
+`mc_zicclsm_ooo_overlap` (`SB head tid=50`, `LSU bypass cnt=4 rp=3`, `LU req tid=4 @0x80001045`)
+and `hyp8_zicclsm` (`SB head tid=20`, `LSU bypass cnt=4 rp=1`, `LU req tid=25 @0x8000104f`):
+- Mechanism: a younger wrapping load issued OoO ahead of an older unresolved store (`ld_checked_i==0`)
+  entered `g6lc_zicclsm` `B0_ACTIVE -> B0_WAIT` and held `lsu_bypass` head (`pop_ld_byp_o=0`,
+  `lsu_ready=0` at `cnt=4`); `load_unit` refused to publish `beat0` until `ld_checked_i==1`, while
+  the older store sat behind the wrapping load in `lsu_bypass`/IQ -> permanent circular deadlock.
+- Also fixed `RC6b`: `load_unit.lu_replay_o` (`wpo_replay`/`wsl_replay`) firing during `B0_ACTIVE`/
+  `B1_ACTIVE` popped `load_unit` without issuing to D$, which previously stranded `g6lc_zicclsm`
+  in `B0_WAIT`/`B1_WAIT` forever.
+- Fix in BOTH trees (`g6lc_zicclsm.sv` + `load_store_unit.sv`):
+  - Added `ld_head_checked_i`, `lu_replay_fu_i`, `ld_replay_o`, `ld_replay_id_o`.
+  - In `IDLE`, if `OoOEn && split_now && fu==LOAD && !ld_head_checked_i`: replay immediately
+    (`ld_replay_o=1`, `pop_ld_byp_o=1`, `ctrl_o.valid=0`, `state_d=IDLE`) so older stores drain
+    and the wrapping load refetches cleanly at commit head (`ld_checked_i==1`).
+  - In `IDLE`/`B0_ACTIVE`/`B1_ACTIVE`, `lu_replay_fu_i` aborts the split back to `IDLE` + pops bypass.
+  - Wired `lu_replay_o` / `replay_o` merge in `load_store_unit.sv`.
+- Verified:
+  - Hyp8 4-gate leaf `run_zicclsm_leaf.sh`: PASS positive + `+oracle_negative` +
+    `G6LC_MUT_ZICCLSM_TID_SWALLOW` (RC4) + `G6LC_MUT_ZICCLSM_UNCHECKED_SPLIT` (RC6).
+  - Main-tree `run-zimop-ntl.sh`: PASS all 12 ISA leaves + off-knob + TID-swallow mutations.
+  - Launching combined RC4+RC5+RC6 model build `hyp8-zicclsm-all-t2` -> directed suite + 50M-cycle
+    OpenWrt witness `hyp8-witness-zicclsm-all`.
+- Refinement (`hyp8-zicclsm-all-t3`): `hyp8-zicclsm-all-t2` proved `ld_checked_i[tid]` is 0 until
+  *after* `load_unit` sends `addr_valid` to LSQ, so gating `IDLE` on `ld_checked_i` replayed even
+  commit-head wrapping loads (livelock at `0x80000024` / `0x8000008a`). Fixed `.ld_head_checked_i`
+  in BOTH `load_store_unit.sv` trees to `!OoOEn || (lsu_ctrl_pre.trans_id == commit_tran_id_i)`
+  (identical to `load_unit.sv:903` `not_commit_time`): guarantees zero older stores when splitting,
+  zero livelock at commit head, zero `lsu_bypass` deadlock, and zero stale-beat memory-order risk.
+  Rebuilding `hyp8-zicclsm-all-t3` (`PID=1015980`) -> directed suite + 50M-cycle OpenWrt witness.
+- `hyp8-zicclsm-all-t3` (`sha=6a66cfe4…`) directed results:
+  - `hyp8_zicclsm`: **PASS** (`program exit code 0` in 3,048 cycles; previously deadlocked!).
+  - `mc_store_load_new_line`: **PASS** (`rc=0`, full 4-core).
+  - `mc_zicclsm_ooo_overlap`: cleared Phases 1 & 2 (256 overlapping misaligned+aligned loads, ZERO
+    deadlock!), hit `fail5` (`0x105`) in Phase 3 (`sd s9, 5(s3)` -> `ld t5, 5(s3)` read
+    `0x0000000000667788` — `beat0` right, `beat1` zeroes!).
+- **RC5b FOUND & FIXED (`NrStorePipeRegs==0` race)**: because `NrStorePipeRegs=0`, `beat1`'s
+  `st_valid_o` reaches `commit_stage` combinationally on the exact cycle `beat1` arrives on
+  `store_buffer.valid_i` (before `beat1` enters `s1_v_q`), while `beat0` is already in
+  `spec_valid_q` (`commit_tid_present=1`, `commit_tid_in_s1=0`). `commit_i` fired on that cycle,
+  popping only `beat0`; `beat1` landed later as a speculative entry and was evicted by `ld t5`'s
+  `RC6` replay-flush!
+  - Fix in BOTH `store_buffer.sv` trees: gate `commit_ready_o` on `!(RVZicclsm && valid_i &&
+    (trans_id_i == commit_trans_id_i))` in addition to `s1_v`.
+  - Added S3 (`NrStorePipeRegs==0` race) to `tb_g6lc_stq_zicclsm_hyp8.sv`, verified both leaf
+    gates (`run_stq_zicclsm_leaf.sh` + `run-stq-commit-flush.sh`), launched `hyp8-zicclsm-all-t4`
+    (`JOBS=6`) -> directed suite + 50M-cycle OpenWrt witness `hyp8-witness-zicclsm-all4`.
+
+
+
+
+## 2026-11-25T05:45Z — witness classification, OpenWrt provenance, and testharness performance notes
+
+### Witness state / benign secondary-hart halt classification
+
+The three detached OpenWrt witnesses (`hyp8-witness-zicclsmfix`, `hyp8-witness-zicclsm-all3`, `hyp8-witness-zicclsm-all4`) are still alive at ~199% CPU. Their stdout is block-buffered, so `run-hyp8.log` is not a live cycle counter: at the time sampled, `all3` had flushed only through cycle 8M and `all4` through cycle 6M even though the processes had run much longer. The lack of later rows is therefore not evidence of a simulator hang by itself. `%CPU` remains the only liveness signal until the next stdout flush.
+
+Useful positive classification from the flushed rows:
+
+* non-boot harts retire into `sbi_hsm_init` and then stop at identical retired counts/PCs:
+  `last_pc=0x8000f726`, with occasional earlier samples in `atomic_read` at `0x800085fe`.
+* Exact disassembly of the payload-resident OpenSBI shows:
+  * `0x8000f726: wfi` inside the `sbi_hsm_hart_wait()` loop inlined in `sbi_hsm_init`;
+  * `0x8000f72a..0x8000f730` reloads `atomic_read(&hdata->state)` and branches back to `wfi` while the state is not `SBI_HSM_STATE_START_PENDING`;
+  * `0x800085f0..0x80008604` is the full `atomic_read` epilogue/prologue, so `0x800085fe` is not a deadlock PC.
+* This is the architecturally expected cold-boot HSM park state for non-boot harts. The identical cycle/PC signature across independent witness models is deterministic shared firmware behavior, not a new RTL frontier. It should be graded as benign unless the boot hart itself stops making forward progress or Linux later fails to start secondary harts through HSM.
+
+The boot hart trajectory remains the only meaningful frontier signal. In `all3`, core0/hart0 progressed through libfdt (`fdt_next_tag`) at cycle 8M; in `all4`, the last flushed cycle 6M sample was `sbi_strlen`. No UART bytes have appeared yet, and the 14.5M-cycle `printc` frontier has not been positively re-evaluated from flushed evidence.
+
+Observability gap to close for future witness launches: progress lines should be line-flushed or emitted to stderr/unbuffered output (`stdbuf -oL`, explicit flush in the harness/probe, or runner-side pseudoterminal). Otherwise tracedb ingest inherently lags the actual simulation by arbitrary stdio block boundaries.
+
+### OpenWrt / firmware provenance resolved
+
+`/opt/testharness/runs/localmc-stage/output/fw_payload.elf` (sha256 `04f3b24b2320987a783bafaad9cd276b121362a815b37fd633552c9fe081631b`, size 67,308,328 bytes) exactly matches the local evidence artifact:
+
+`remote-runs.drvfs-bak/hyp8-firmware-r116/output/build-linux-mc/platform/generic/firmware/fw_payload.elf`
+
+So the firmware provenance is no longer unresolved. Embedded strings identify an OpenWrt toolchain kernel build:
+`OpenWrt GCC 13.3.0 r28739-d9340319c6`, plus `lzma-openwrt`, initramfs symbols, SiFive/virt device strings. This matches the `g6lc_qemu/openwrt` lineage: official `openwrt/openwrt` pinned at v24.10.2 plus the first-party sifiveu/virt ISA and kernel overlay patches, not the development-only `linux-dist/openwrt-*` forks. The remote `/opt/testharness/cache/openwrt*` build trees have since been cleaned, but the exact ELF evidence artifact remains local.
+
+### Testharness Verilator/Lua performance implementation (host-side research)
+
+The performance path is explicit and evidence-oriented:
+
+* `verif/regress/remote/hyp8/policies/hyp8_mc_fast.lua` requests `--no-assert`, opportunistic/required sink clock-skip, DFG bitwise-mux packing, and checked transforms such as packed rows/columns, strided bit columns, circular age compare, scatter equality masks, and wide-mux guards.
+* `verif/regress/remote/g6lc_tuning_driver.lua` is the constrained Lua driver. It exposes only a bounded capability API (`select_rule`, `select_verilator_flag`, `select_clock_skip`, sentinel probes), validates pass names and flags, and emits a machine-readable plan. This keeps Lua policy from becoming arbitrary build-script execution.
+* `hyp8-build-harness.sh` selects the g6lc Verilator fork, preferring compiler-PGO prefixes, applies the split-loops `.vlt`, capability-checks each policy flag against the selected `verilator_bin`, optionally strips assertions for fast models, and records clock-skip effectiveness. It also chooses native/x86-64-v3 code generation and simulation PGO stages independently from compiler PGO.
+* `run_vlt_pgo.py` separates (a) building the Verilator compiler with GCC PGO, trained through a hyp8 closure, from (b) verilate-only and full-model harness builds. It records census data (SplitVar, Unroll, MTask, scheduling) rather than relying on wall-clock anecdotes.
+* `agents/guides/AGENTS-verilator-performance.md` is the authoritative measurement baseline: the model is dominated by wide packed-struct operations, hybrid logic trigger evaluation, code footprint/I-cache misses, and unrolled OoO CAM scans. The guide explicitly warns that even the good speedups are multiplicative but insufficient for a full Linux boot in hours; milestones must remain architectural, not cycles alone.
+
+Practical implication for this effort: use the fast Lua/PGO model for witness reach, but never treat simulator throughput as proof of correctness. New RTL fixes still need isolated leaf tests and directed assembly before a witness. The witness is only the final frontier-movement gate.
+
+### Local WSL role
+
+Local WSL is usable for host-side analysis and artifact work: `rsync`, `python3`, `verilator`, and `riscv64-unknown-elf-objdump` are present. It is appropriate for disassembly, hash/artifact matching, scripting, and repository inspection. Per the current workflow constraint, RTL tests themselves should be launched/executed on the remote pinned testharness rather than treating local WSL test execution as qualification evidence.
+
+### Open timing/configurability review item for RC5b
+
+The RC5b guard adds a same-cycle `valid_i && trans_id_i == commit_trans_id_i` term into `commit_tid_in_s1` / `commit_ready_o`. Functionally this closes the `NrStorePipeRegs==0` beat1-arrival race, and the isolated leaf scenario passes. However, it is also a candidate combinational path from store completion/arrival into commit readiness. Before declaring the fix timing-final, quantify the path in the hyp8 8-FO4 timing flow or re-express it through existing staged state if the cone is material. Do not weaken the functional guard merely for timing; if the cone is too long, pipeline or restructure the commit arbitration while preserving the atomic two-beat Zicclsm commit semantics.

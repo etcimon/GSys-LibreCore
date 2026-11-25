@@ -15,7 +15,8 @@ if (( ! probe )); then
   case "$(cat "$here/phase")" in
     generate) flags+=("-fprofile-generate=$here/profile" -fprofile-update=atomic) ;;
     use) flags+=("-fprofile-use=$here/profile" -fprofile-correction
-                 -Werror=coverage-mismatch -Wno-error=missing-profile) ;;
+                 -Werror=coverage-mismatch -Wno-error=missing-profile)
+         [[ "${APU_PGO_USE_LTO:-0}" != 1 ]] || flags+=(-flto=auto) ;;
     *) echo "Invalid PGO compiler phase" >&2; exit 2 ;;
   esac
   printf 'PGO-CXX phase=%s flags=' "$(cat "$here/phase")" >&2

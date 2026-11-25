@@ -80,7 +80,9 @@ module tb_g6lc_zicclsm
       .st_valid_fu_i(st_valid_fu), .st_result_fu_i(st_result_fu),
       .st_ex_fu_i(st_ex_fu), .st_tid_fu_i(st_tid_fu),
       .st_valid_o(st_valid_on), .st_result_o(st_result_on),
-      .st_ex_o(st_ex_on), .st_tid_o(st_tid_on)
+      .st_ex_o(st_ex_on), .st_tid_o(st_tid_on),
+      .ld_head_checked_i(1'b1), .lu_replay_fu_i(1'b0),
+      .ld_replay_o(), .ld_replay_id_o()
   );
 
   g6lc_zicclsm #(
@@ -95,7 +97,9 @@ module tb_g6lc_zicclsm
       .ld_valid_o(), .ld_result_o(), .ld_ex_o(), .ld_tid_o(),
       .st_valid_fu_i(st_valid_fu), .st_result_fu_i(st_result_fu),
       .st_ex_fu_i(st_ex_fu), .st_tid_fu_i(st_tid_fu),
-      .st_valid_o(), .st_result_o(), .st_ex_o(), .st_tid_o()
+      .st_valid_o(), .st_result_o(), .st_ex_o(), .st_tid_o(),
+      .ld_head_checked_i(1'b1), .lu_replay_fu_i(1'b0),
+      .ld_replay_o(), .ld_replay_id_o()
   );
 
   initial clk = 1'b0;
@@ -144,34 +148,44 @@ module tb_g6lc_zicclsm
     ctrl_i.operation = LH;
     ctrl_i.vaddr = 64'h7;
     ctrl_i.trans_id = 4'd4;
-    @(posedge clk);
+    @(posedge clk); #1;
     if (ctrl_off.operation !== LH)
       $fatal(1, "ZICCLSM_ON wrap must stay unsplit with knob off");
     if (ctrl_on.operation !== LD || ctrl_on.vaddr[2:0] !== 3'd0)
       $fatal(1, "ZICCLSM_ON wrap beat0 op=%0d vaddr=%h", ctrl_on.operation, ctrl_on.vaddr);
     pop_ld_fu = 1'b1;
-    @(posedge clk);
+    @(posedge clk); #1;
     pop_ld_fu = 1'b0;
+    // Unrelated older load tid=2 completing in B0_WAIT must pass through untouched
     ld_valid_fu = 1'b1;
+    ld_tid_fu = 4'd2;
+    ld_result_fu = 64'h1234_5678_9abc_def0;
+    #1;
+    if (!ld_valid_on || ld_tid_on !== 4'd2 || ld_result_on !== 64'h1234_5678_9abc_def0)
+      $fatal(1, "ZICCLSM_OOO_TID_SWALLOW unrelated tid=2 dropped in B0_WAIT");
+    @(posedge clk); #1;
+    ld_valid_fu = 1'b1;
+    ld_tid_fu = 4'd4;
     ld_result_fu = 64'hAA00000000000000;
-    @(posedge clk);
+    @(posedge clk); #1;
     ld_valid_fu = 1'b0;
     ld_result_fu = '0;
-    @(posedge clk);
     if (ctrl_on.operation !== LD || ctrl_on.vaddr !== 64'h8)
       $fatal(1, "ZICCLSM_ON wrap beat1 vaddr=%h op=%0d", ctrl_on.vaddr, ctrl_on.operation);
     pop_ld_fu = 1'b1;
-    @(posedge clk);
+    @(posedge clk); #1;
     pop_ld_fu = 1'b0;
     ld_valid_fu = 1'b1;
+    ld_tid_fu = 4'd4;
     ld_result_fu = 64'h00000000000000BB;
-    @(posedge clk);
+    @(posedge clk); #1;
     ld_valid_fu = 1'b0;
+    #1;
     if (!ld_valid_on || ld_result_on[15:0] !== 16'hBBAA)
       $fatal(1, "ZICCLSM_ON wrap merge got %h valid=%0d", ld_result_on, ld_valid_on);
     if (ld_result_on[63:16] !== {48{1'b1}})
       $fatal(1, "ZICCLSM_ON lh sign-extend got %h", ld_result_on);
-    @(posedge clk);
+    @(posedge clk); #1;
     idle_bus();
     ctrl_i.valid = 1'b0;
 

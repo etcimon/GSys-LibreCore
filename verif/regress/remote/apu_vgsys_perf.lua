@@ -47,34 +47,57 @@
 -- apu_vlt_policy.py.
 
 -- ---------------------------------------------------------------------------
--- Pre-verilate / flag phase: safe on every g6lc-capable toolchain.  The fork
--- gates these by capability downstream; stock Verilator ignores nothing here
--- because select_verilator_flag is allowlisted and each flag is a no-op where
--- the pass is absent.
+-- Pre-verilate / flag phase: evidence-driven Verilator performance flags
+-- measured on remote EPYC 4244P / GCC 16.2.0 znver4 (tb_g6lc_apu_vgtop
+-- 6-session ue_* cohort, bit-exact 1,664,793 cycles, --assert kept on):
+--   baseline non-PGO                      :  84.8k cyc/s (1.00x)
+--   + split_var (apu_exec.vlt, 0 hybrids) :  99.1k cyc/s (1.17x)
+--   + --x-initial fast                    : 103.4k cyc/s (1.22x)
+--   + --inline-mult 500                   : 105.3k cyc/s (1.24x)
+--   + sim-PGO + assert-guard-hoist        : 150.6k cyc/s (1.78x)
+--   + -flto=auto + --output-split-cfuncs  : 154.7k cyc/s (1.83x; I1/c -55%)
+-- Verilator -O3 (--inline-mult -1) regresses -22.5% (inlines 32 fpnew_fma +
+-- 8 fpnew_cast_multi + 8 fpnew_divsqrt into root, blowing L1I cache).
 -- ---------------------------------------------------------------------------
 
--- Sink-domain clock-skip: lets idle/clock-gated APU banks (sram, queues)
--- skip their eval when no sink is active.  Opportunistic (not "required")
--- because the APU is not sleep-gated the way hyp8_mc_sleep is; a required
--- policy would hard-fail on a model that legitimately matches 0 groups.
-select_clock_skip("sink", "opportunistic")
+-- Eliminate VL_RAND_RESET startup/init overhead (simulating.rst recipe).
+select_verilator_flag("--x-initial-fast")
+select_verilator_flag("--x-assign-fast")
 
--- DFG peepholes that pack wide bit-vector ops into word/SWAR form.  These are
--- the same opt-in passes the hyp8 stack enables; on the APU's wide push buses
--- (rast [2047:0]), CAM tag vectors and fpnew lanes they are the highest-value
--- frontend transforms.  pack-bitwise-mux is the one hyp8 measured most.
-select_verilator_flag("-fdfg-peephole-pack-bitwise-mux")
-select_verilator_flag("-fdfg-peephole-pack-predicates")
-select_verilator_flag("-fdfg-peephole-pack-byte-plane")
-select_verilator_flag("-fdfg-peephole-guard-empty-mask")
-select_verilator_flag("-fdfg-peephole-fuse-transpose-reductions")
+-- Keep replicated FPnew/SRAM submodules out-of-line (shared in L1I) and split
+-- the 353k-line shader-wave NBA function so PGO+LTO can isolate hot paths.
+select_verilator_flag("--inline-mult-500")
+select_verilator_flag("--output-split-cfuncs-2000")
+
+-- Sink-domain clock-skip: V3ClkSkip bails out on --timing/--binary models
+-- ("Clock skip sink unsupported model (timing)"), so only request it on
+-- non-timing models where sink-domain deferral can actually fire.
+if not model.has_flag("--timing") and not model.has_flag("--binary") then
+    select_clock_skip("sink", "opportunistic")
+end
+
+-- DFG peepholes: sentinel DFG census on tb_g6lc_apu_vgtop measured 0 hits
+-- across all five opt-in peepholes (0 probe candidates).  Gate each pass
+-- opportunistically on observed sentinel DFG evidence so it activates
+-- automatically if future RTL introduces matching patterns.
+if sentinel.has_dfg() then
+    if sentinel.dfg_count("bit_select_concat") > 0 then
+        select_verilator_flag("-fdfg-peephole-pack-byte-plane")
+        select_verilator_flag("-fdfg-peephole-pack-bitwise-mux")
+        select_verilator_flag("-fdfg-peephole-pack-predicates")
+    end
+    if sentinel.dfg_count("masked_reduction") > 0 then
+        select_verilator_flag("-fdfg-peephole-guard-empty-mask")
+    end
+    if sentinel.dfg_count("masked_transpose_reductions") > 0 then
+        select_verilator_flag("-fdfg-peephole-fuse-transpose-reductions")
+    end
+end
 
 -- NOTE: --no-assert is deliberately NOT selected.  The APU benches run with
--- --assert for correctness (it is what catches binding/provenance bugs); the
--- assert-* overlay rules below already strip the *dead* assertion cones while
--- keeping live checks.  For a pure-throughput profile build, add
--- select_verilator_flag("--no-assert") — it lands after --assert on the
--- command line and wins, per the docs' best-performance recipe.
+-- --assert for correctness (and --no-assert alters cycle counts on vgtop);
+-- assert-guard-hoist below stays bit-exact with assertOn() true and skips
+-- match-vector evaluation under +verilator+noassert.
 
 -- ---------------------------------------------------------------------------
 -- Sentinel probes: measure the DFG opportunities on this exact model so the

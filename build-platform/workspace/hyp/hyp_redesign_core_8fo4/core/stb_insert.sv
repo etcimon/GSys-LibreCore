@@ -44,6 +44,7 @@ module stb_insert
     input  logic [G6LCCfg.TRANS_ID_BITS-1:0] oldest_live_tid_i,
     // pending-record occupancy (feeds the registered ready accounting)
     output logic                             s1_v_o,
+    output logic [G6LCCfg.TRANS_ID_BITS-1:0] s1_tid_o,
     // S2 writeback record: apply at the next edge into the queue state
     output logic                             s2_wr_valid_o,
     output logic [DEPTH_SPEC-1:0]            s2_slot_oh_o,
@@ -107,25 +108,33 @@ module stb_insert
         s1_entry_q.fwd_keep  <= fwd_keep_i;
         s1_tid_q             <= trans_id_i;
         for (int unsigned j = 0; j < DEPTH_SPEC; j++) begin
+          automatic logic [G6LCCfg.TRANS_ID_BITS-1:0] j_tid;
+          automatic logic                             j_older;
+          j_tid = (s1_slot_q[j] && s2_wr_valid_o) ? s1_tid_q : spec_tid_i[j];
+`ifdef G6LC_MUT_STQ_ZICCLSM_SINGLE_BEAT
+          j_older = ooo_older(j_tid, trans_id_i);
+`else
+          // Equal-TID two-beat Zicclsm stores: beat0 (already in slot j) is
+          // strictly older than arriving beat1 so beat0 drains first.
+          j_older = (G6LCCfg.RVZicclsm && (j_tid == trans_id_i)) ||
+                    ooo_older(j_tid, trans_id_i);
+`endif
           // spec_older[j][i]: entry j older than the arrival. The pending
           // S1 owner installs at this same edge, so its reserved slot is
           // live for the new row and its trans_id is the staged one, not
           // the array's current contents at that slot.
           s1_row_q[j] <= (live_after_i[j] || (s2_wr_valid_o && s1_slot_q[j])) &&
-                         (!AGE_EN ||
-                          ooo_older((s1_slot_q[j] && s2_wr_valid_o) ? s1_tid_q : spec_tid_i[j],
-                                    trans_id_i));
+                         (!AGE_EN || j_older);
           // spec_older[i][j]: the arrival older than entry j
           s1_col_q[j] <= (live_after_i[j] || (s2_wr_valid_o && s1_slot_q[j])) &&
-                         (AGE_EN &&
-                          !ooo_older((s1_slot_q[j] && s2_wr_valid_o) ? s1_tid_q : spec_tid_i[j],
-                                     trans_id_i));
+                         (AGE_EN && !j_older);
         end
       end
     end
   end
 
-  assign s1_v_o = s1_v_q;
+  assign s1_v_o   = s1_v_q;
+  assign s1_tid_o = s1_tid_q;
 
   // S2: the staged record becomes a queue writeback unless the entry was
   // cancelled while staged or a flush evicts it — identical in effect to

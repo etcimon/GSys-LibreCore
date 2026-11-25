@@ -133,8 +133,8 @@ def build_pgo(src, home, jobs):
     vltmk = build / 'include' / 'verilated.mk'
     if vltmk.is_file():
         real_cxx = str(Path(cxx).resolve())
-        text = re.sub(r'(?m)^(CXX\s*=\s*)\S+', r'\g<1>' + real_cxx,
-                      vltmk.read_text(), count=1)
+        text = re.sub(r'(?m)^((?:CXX|LINK)\s*=\s*)\S+', r'\g<1>' + real_cxx,
+                      vltmk.read_text())
         vltmk.write_text(text)
     (home / 'bin').mkdir(exist_ok=True)
     shutil.copytree(build / 'include', home / 'include', dirs_exist_ok=True)

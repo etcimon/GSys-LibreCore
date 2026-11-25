@@ -615,6 +615,11 @@ module load_store_unit
     assign lsu_ctrl_pre           = lsu_ctrl_byp;
   end
 
+  logic                                  zic_ld_replay, lu_replay_fu;
+  logic [CVA6Cfg.TRANS_ID_BITS-1:0]      zic_ld_replay_id, lu_replay_id_fu;
+  assign lu_replay_o    = zic_ld_replay | lu_replay_fu;
+  assign lu_replay_id_o = zic_ld_replay ? zic_ld_replay_id : lu_replay_id_fu;
+
   g6lc_zicclsm #(
       .CVA6Cfg   (CVA6Cfg),
       .lsu_ctrl_t(lsu_ctrl_t),
@@ -644,7 +649,11 @@ module load_store_unit
       .st_valid_o(st_valid),
       .st_result_o(st_result),
       .st_ex_o(st_ex),
-      .st_tid_o(st_trans_id)
+      .st_tid_o(st_trans_id),
+      .ld_head_checked_i(!CVA6Cfg.OoOEn || (lsu_ctrl_pre.trans_id == commit_tran_id_i)),
+      .lu_replay_fu_i(lu_replay_fu),
+      .ld_replay_o(zic_ld_replay),
+      .ld_replay_id_o(zic_ld_replay_id)
   );
 
   logic store_buffer_empty;
@@ -760,8 +769,8 @@ module load_store_unit
       .phys_id_o(phys_id_o[0]), .phys_hart_o(phys_hart_o[0]), .phys_size_o(phys_size_o[0]),
       .page_offset_matches_i(page_offset_matches),
       .page_offset_spec_only_i(page_offset_spec_only),
-      .lu_replay_o,
-      .lu_replay_id_o,
+      .lu_replay_o          (lu_replay_fu),
+      .lu_replay_id_o       (lu_replay_id_fu),
       .store_buffer_empty_i (store_buffer_empty),
       .no_st_pending_i      (no_st_pending_o),
       .st_fwd_valid_i       (st_fwd_valid),

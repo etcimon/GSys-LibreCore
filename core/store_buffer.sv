@@ -293,6 +293,30 @@ module store_buffer
     for (int unsigned i = 0; i < DEPTH_SPEC; i++)
       if (spec_head_oh[i]) spec_head = spec_head | spec_entry_t'(speculative_queue_q[i]);
   end
+  // Zicclsm two-beat store: both beats share spec_head.trans_id. Pop beat1
+  // atomically with beat0 into architectural commit_pend2_q so both survive
+  // flush_i and beat1 pushes into commit_queue on the next available cycle.
+  logic [DEPTH_SPEC-1:0] spec_beat1_oh;
+  spec_entry_t           spec_beat1_entry;
+  logic                  spec_beat1_valid;
+  logic                  commit_pend2_v_q, commit_pend2_v_n;
+  spec_entry_t           commit_pend2_entry_q, commit_pend2_entry_n;
+  always_comb begin
+    spec_beat1_oh    = '0;
+    spec_beat1_entry = '0;
+`ifndef G6LC_MUT_STQ_ZICCLSM_SINGLE_BEAT
+    if (CVA6Cfg.RVZicclsm && |spec_head_oh) begin
+      for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
+        if (spec_valid_q[i] && !spec_head_oh[i] &&
+            (speculative_queue_q[i].trans_id == spec_head.trans_id)) begin
+          spec_beat1_oh[i] = 1'b1;
+          spec_beat1_entry = spec_beat1_entry | spec_entry_t'(speculative_queue_q[i]);
+        end
+      end
+    end
+`endif
+  end
+  assign spec_beat1_valid = |spec_beat1_oh;
   assign spec_head_valid = |spec_head_oh;
   assign spec_head_mismatch = MixCommit && spec_head_valid &&
                               (spec_head.trans_id != commit_trans_id_i);
@@ -362,8 +386,8 @@ module store_buffer
     // the arrival takes the lowest free slot (a slot freed this cycle is
     // taken next cycle; the capacity assertion below guarantees a free one)
     spec_ins_oh = spec_lowest_set(~spec_valid_q);
-    // the head leaves on commit
-    spec_pop    = commit_i ? spec_head_oh : '0;
+    // the head (plus same-TID Zicclsm beat1) leaves on commit
+    spec_pop    = commit_i ? (spec_head_oh | spec_beat1_oh) : '0;
     // FSE S4 younger-only cancel: the verdict is a property of the entry,
     // looked up on its registered trans_id; the arrival is never cancelled
     // (the push guard tests trans_id_i). G1ah SMT+SS keeps fwd_keep entries.
@@ -399,8 +423,15 @@ module store_buffer
     // OoO the circular distance from the oldest live slot (U5.4), in order
     // the arrival is the youngest
     for (int unsigned j = 0; j < DEPTH_SPEC; j++)
+`ifdef G6LC_MUT_STQ_ZICCLSM_SINGLE_BEAT
       arrival_older_than[j] = live_after[j] &&
                               (!CVA6Cfg.OoOEn || ooo_older(speculative_queue_q[j].trans_id, trans_id_i));
+`else
+      arrival_older_than[j] = live_after[j] &&
+                              (!CVA6Cfg.OoOEn ||
+                               (CVA6Cfg.RVZicclsm && (speculative_queue_q[j].trans_id == trans_id_i)) ||
+                               ooo_older(speculative_queue_q[j].trans_id, trans_id_i));
+`endif
 
     // removals first: valid off, age rows and columns cleared
     for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
@@ -500,21 +531,30 @@ module store_buffer
     // Narrow control tags share the payload's allocation, head and commit events.
     logic [DEPTH_SPEC-1:0][2:0] spec_prot_q;
     logic [DEPTH_COMMIT-1:0][2:0] commit_prot_q;
-    logic [2:0] head_prot;
+    logic [2:0] head_prot, beat1_prot, pend2_prot_q;
     always_comb begin
-      head_prot = '0;
-      for (int i = 0; i < DEPTH_SPEC; i++)
-        if (spec_head_oh[i]) head_prot |= spec_prot_q[i];
+      head_prot  = '0;
+      beat1_prot = '0;
+      for (int i = 0; i < DEPTH_SPEC; i++) begin
+        if (spec_head_oh[i])  head_prot  |= spec_prot_q[i];
+        if (spec_beat1_oh[i]) beat1_prot |= spec_prot_q[i];
+      end
     end
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
-        spec_prot_q <= '0;
+        spec_prot_q  <= '0;
         commit_prot_q <= '0;
+        pend2_prot_q <= '0;
       end else begin
         if (valid_i && !cancelled_mask_i[trans_id_i])
           for (int i = 0; i < DEPTH_SPEC; i++)
             if (spec_ins_oh[i]) spec_prot_q[i] <= data_prot_i;
-        if (commit_i) commit_prot_q[commit_write_pointer_q] <= head_prot;
+        if (commit_i) begin
+          commit_prot_q[commit_write_pointer_q] <= head_prot;
+          if (spec_beat1_valid) pend2_prot_q <= beat1_prot;
+        end else if (commit_pend2_v_q && !commit_pend2_v_n) begin
+          commit_prot_q[commit_write_pointer_q] <= pend2_prot_q;
+        end
       end
     end
     assign req_port_o.data_prot = commit_prot_q[commit_read_pointer_q];
@@ -529,9 +569,12 @@ module store_buffer
     commit_status_cnt      = commit_status_cnt_q;
 
     commit_ready_o         = (commit_status_cnt_q < $bits(commit_status_cnt_q)'(DEPTH_COMMIT)) &&
-                             !spec_head_mismatch;
+                             !spec_head_mismatch && !commit_pend2_v_q &&
+                             !(CVA6Cfg.RVZicclsm && valid_i && (trans_id_i == commit_trans_id_i));
     // no store is pending if we don't have any element in the commit queue e.g.: it is empty
-    no_st_pending_o        = (commit_status_cnt_q == 0);
+    no_st_pending_o        = (commit_status_cnt_q == 0) && !commit_pend2_v_q;
+    commit_pend2_v_n       = commit_pend2_v_q;
+    commit_pend2_entry_n   = commit_pend2_entry_q;
     // default assignments
     commit_read_pointer_n  = commit_read_pointer_q;
     commit_write_pointer_n = commit_write_pointer_q;
@@ -599,6 +642,16 @@ module store_buffer
       commit_queue_n[commit_write_pointer_q] = spec_head;
       commit_write_pointer_n = commit_write_pointer_n + 1'b1;
       commit_status_cnt++;
+      if (spec_beat1_valid) begin
+        commit_pend2_v_n     = 1'b1;
+        commit_pend2_entry_n = spec_beat1_entry;
+      end
+    end else if (commit_pend2_v_q &&
+                 (commit_status_cnt_q < $bits(commit_status_cnt_q)'(DEPTH_COMMIT))) begin
+      commit_queue_n[commit_write_pointer_q] = commit_pend2_entry_q;
+      commit_write_pointer_n = commit_write_pointer_n + 1'b1;
+      commit_status_cnt++;
+      commit_pend2_v_n = 1'b0;
     end
 
     commit_status_cnt_n = commit_status_cnt;
@@ -696,6 +749,11 @@ module store_buffer
         po_commit_match = 1'b1;
         break;
       end
+    end
+    if (commit_pend2_v_q &&
+        po_eq(commit_pend2_entry_q.address[11:0], page_offset_i)) begin
+      page_offset_matches_now = 1'b1;
+      po_commit_match = 1'b1;
     end
     for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
       // Age filter is load-bearing for LIVENESS here, not just for data:
@@ -991,12 +1049,16 @@ module store_buffer
       commit_write_pointer_q <= '0;
       commit_status_cnt_q    <= '0;
       cboz_beat_q            <= '0;
+      commit_pend2_v_q       <= 1'b0;
+      commit_pend2_entry_q   <= '0;
     end else begin
       commit_queue_q         <= commit_queue_n;
       commit_read_pointer_q  <= commit_read_pointer_n;
       commit_write_pointer_q <= commit_write_pointer_n;
       commit_status_cnt_q    <= commit_status_cnt_n;
       cboz_beat_q            <= cboz_beat_n;
+      commit_pend2_v_q       <= commit_pend2_v_n;
+      commit_pend2_entry_q   <= commit_pend2_entry_n;
     end
   end
 
@@ -1187,7 +1249,9 @@ module store_buffer
         if (i != j) begin : gen_pair
           spec_order_matches_anchor :
           assert property (@(posedge clk_i) disable iff (!rst_ni)
-                           (spec_valid_q[i] && spec_valid_q[j]) |->
+                           (spec_valid_q[i] && spec_valid_q[j] &&
+                            (!CVA6Cfg.RVZicclsm ||
+                             (speculative_queue_q[i].trans_id != speculative_queue_q[j].trans_id))) |->
                            (spec_older_q[i][j] == ooo_older(speculative_queue_q[i].trans_id,
                                                            speculative_queue_q[j].trans_id)))
           else $error("[Speculative Queue] age of slots %0d/%0d (tids %0d/%0d) disagrees with the anchor %0d",
