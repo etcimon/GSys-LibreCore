@@ -161,7 +161,7 @@ module g6lc_fe_redirect
 
   // Flat parallel arb_valid / arb_src (replaces 7-arm case + 3-deep else-if chain)
   logic [3:0] low_src;
-  assign low_src   = replay_i ? SRC_REPLAY : (ov1_valid_i ? SRC_OV1 : (ov2_valid_i ? SRC_OV2 : SRC_NONE));
+  assign low_src   = replay_i ? SRC_REPLAY : (ov1_valid_i ? SRC_OV1 : (ov2_valid_i ? SRC_OV2 : arch_src));
   assign arb_valid = !arb_no_arch || replay_i || ov1_valid_i || ov2_valid_i;
   assign arb_src   = arb_no_arch ? low_src : arch_src;
 
