@@ -8738,6 +8738,15 @@ and `hyp8_zicclsm` (`SB head tid=20`, `LSU bypass cnt=4 rp=1`, `LU req tid=25 @0
   - Added S3 (`NrStorePipeRegs==0` race) to `tb_g6lc_stq_zicclsm_hyp8.sv`, verified both leaf
     gates (`run_stq_zicclsm_leaf.sh` + `run-stq-commit-flush.sh`), launched `hyp8-zicclsm-all-t4`
     (`JOBS=6`) -> directed suite + 50M-cycle OpenWrt witness `hyp8-witness-zicclsm-all4`.
+- `hyp8-zicclsm-all-t4` (complete **RC4 + RC5 + RC5b + RC6**) full-core directed verification:
+  - `mc_zicclsm_ooo_overlap`: **PASS** (`program exit code 0` after 45,770 cycles — all 3 phases:
+    cold-line+wrapping load overlap, mispredicted wrong-path `0x00ff` overlap, and wrapping
+    `sd s9, 5(s3)` -> `ld t5, 5(s3)` data verification).
+  - `hyp8_zicclsm`: **PASS** (`program exit code 0` after 3,052 cycles).
+  - `mc_store_load_new_line`: **PASS** (`rc=0`, full 4-core).
+  - OpenWrt witnesses advancing cleanly: `hyp8-witness-zicclsmfix` (`951101`, @12M+ cyc),
+    `hyp8-witness-zicclsm-all3` (`1054462`, @8M+ cyc), `hyp8-witness-zicclsm-all4` (`1107265`,
+    @6M+ cyc).
 
 
 
