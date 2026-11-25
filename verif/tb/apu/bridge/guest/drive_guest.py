@@ -169,31 +169,13 @@ def main():
         private = f"{INSTANCE or args.out}/ctsdata.img"
         shutil.copyfile(CTSDATA, private)
         CTSDATA = private
-        if CTS_SHARD:
-            idx, count = (int(x) for x in CTS_SHARD.split(","))
-            src = os.environ.get("G6LC_CTS_CASELIST",
-                                 "caselists/cts0-info-smoke.txt")
-            r = subprocess.run(["debugfs", "-R", f"cat /{src}", CTSDATA],
-                               capture_output=True, text=True)
-            cases = [c for c in r.stdout.splitlines() if c.strip()]
-            if r.returncode != 0 or not cases:
-                print(f"FATAL: cannot read /{src} from {CTSDATA}")
-                return 2
-            sub = f"{INSTANCE}/g6lc-shard.txt"
-            open(sub, "w").write("".join(c + "\n" for c in cases[idx::count]))
-            cmds = f"{INSTANCE}/debugfs-shard.cmd"
-            open(cmds, "w").write(f"rm /{SHARD_LIST}\nwrite {sub} /{SHARD_LIST}\n")
-            subprocess.run(["debugfs", "-w", "-f", cmds, CTSDATA],
-                           capture_output=True, check=True)
-            os.environ["G6LC_CTS_CASELIST"] = SHARD_LIST
-            print(f"[drive] shard {CTS_SHARD}: {len(cases[idx::count])} of "
-                  f"{len(cases)} cases from /{src}", flush=True)
         # G6LC_CTS_CASELIST_HOST=<name|path>: inject an arbitrary
         # caselist into the private CTSDATA image as
         # caselists/g6lc-custom.txt and run it. <name> resolves under
         # the source-tree caselists dir (GUEST_DIR/cts/caselists/);
         # an absolute/relative path is used as-is. Lets one leaf batch a
-        # custom case set without rebuilding ctsdata.img.
+        # custom case set without rebuilding ctsdata.img. Runs before the
+        # shard split so G6LC_CTS_SHARD slices the injected list.
         host_list = os.environ.get("G6LC_CTS_CASELIST_HOST", "")
         if host_list:
             base = INSTANCE or args.out
@@ -216,6 +198,25 @@ def main():
             print(f"[drive] custom caselist {src_path} -> /{dst} "
                   f"({sum(1 for l in open(src_path) if l.strip())} cases)",
                   flush=True)
+        if CTS_SHARD:
+            idx, count = (int(x) for x in CTS_SHARD.split(","))
+            src = os.environ.get("G6LC_CTS_CASELIST",
+                                 "caselists/cts0-info-smoke.txt")
+            r = subprocess.run(["debugfs", "-R", f"cat /{src}", CTSDATA],
+                               capture_output=True, text=True)
+            cases = [c for c in r.stdout.splitlines() if c.strip()]
+            if r.returncode != 0 or not cases:
+                print(f"FATAL: cannot read /{src} from {CTSDATA}")
+                return 2
+            sub = f"{INSTANCE}/g6lc-shard.txt"
+            open(sub, "w").write("".join(c + "\n" for c in cases[idx::count]))
+            cmds = f"{INSTANCE}/debugfs-shard.cmd"
+            open(cmds, "w").write(f"rm /{SHARD_LIST}\nwrite {sub} /{SHARD_LIST}\n")
+            subprocess.run(["debugfs", "-w", "-f", cmds, CTSDATA],
+                           capture_output=True, check=True)
+            os.environ["G6LC_CTS_CASELIST"] = SHARD_LIST
+            print(f"[drive] shard {CTS_SHARD}: {len(cases[idx::count])} of "
+                  f"{len(cases)} cases from /{src}", flush=True)
     server_log = open(f"{args.out}/server-run-{mode}.log", "wb")
 
     for p in (SOCK, CONSOLE, MON):
