@@ -51,6 +51,10 @@ module stb_fwd
     // the speculative/live-insertion sources and before the queued ones
     input  logic                             cmt_pending_valid_i,
     input  entry_t                           cmt_pending_entry_i,
+    // Zicclsm Beat-1 committed transfer staged in stb_commit's pend2_q:
+    // younger than cmt_pending (Beat 0) and cmt_queue, older than spec.
+    input  logic                             cmt_pend2_valid_i,
+    input  entry_t                           cmt_pend2_entry_i,
     // arriving-store candidates (the live valid_without_flush term and
     // the staged S1 insert record — both are program-younger terms the
     // emit folded into its same-cycle merge)
@@ -116,6 +120,8 @@ module stb_fwd
   logic [NB-1:0]               f1_pend_cand_q;
   logic                        f1_pend_cboz_q;
   logic [G6LCCfg.XLEN-1:0]     f1_pend_data_q;
+  logic [NB-1:0]               f1_pend2_cand_q;
+  logic [G6LCCfg.XLEN-1:0]     f1_pend2_data_q;
   logic [DEPTH_SPEC-1:0][DEPTH_SPEC-1:0] f1_older_q;
   logic [$clog2(DEPTH_COMMIT)-1:0] f1_cmt_rd_ptr_q;
   logic                            f1_v_q;
@@ -141,6 +147,8 @@ module stb_fwd
   logic                             f1_pend_match_c;
   logic [NB-1:0]                    f1_pend_cand_c;
   logic                             f1_pend_cboz_c;
+  logic                             f1_pend2_match_c;
+  logic [NB-1:0]                    f1_pend2_cand_c;
 
   for (genvar i = 0; i < DEPTH_SPEC; i++) begin : gen_f1_spec
     assign f1_spec_match_c[i] =
@@ -212,6 +220,16 @@ module stb_fwd
       assign f1_pend_cand_c[b] = f1_pend_match_c && cmt_pending_entry_i.be[b];
     end
   end
+`ifdef G6LC_MUT_STQ_NO_PEND2_FWD
+  assign f1_pend2_match_c = 1'b0;
+  assign f1_pend2_cand_c  = '0;
+`else
+  assign f1_pend2_match_c =
+      cmt_pend2_valid_i && pa_eq(cmt_pend2_entry_i.address, req_pa_i);
+  for (genvar b = 0; b < NB; b++) begin : gen_f1_pend2_b
+    assign f1_pend2_cand_c[b] = f1_pend2_match_c && cmt_pend2_entry_i.be[b];
+  end
+`endif
   for (genvar k = 0; k < 2; k++) begin : gen_f1_ins
     assign f1_ins_match_c[k] =
         ins_valid_i[k] &&
@@ -243,6 +261,7 @@ module stb_fwd
       f1_ins_cand_q  <= '0; f1_ins_cboz_q  <= '0; f1_ins_data_q <= '0;
       f1_spec_data_q <= '0; f1_cmt_data_q  <= '0;
       f1_pend_cand_q <= '0; f1_pend_cboz_q <= '0; f1_pend_data_q <= '0;
+      f1_pend2_cand_q <= '0; f1_pend2_data_q <= '0;
       f1_older_q     <= '0; f1_cmt_rd_ptr_q <= '0;
       f1_pa_q        <= '0; f1_tag_q       <= '0;
     end else if (flush_i) begin
@@ -272,6 +291,8 @@ module stb_fwd
         f1_pend_cand_q <= f1_pend_cand_c;
         f1_pend_cboz_q <= f1_pend_cboz_c;
         f1_pend_data_q <= cmt_pending_entry_i.data;
+        f1_pend2_cand_q <= f1_pend2_cand_c;
+        f1_pend2_data_q <= cmt_pend2_entry_i.data;
       end
     end
   end
@@ -295,6 +316,8 @@ module stb_fwd
   logic [NB-1:0]                   f2_pend_cand_q;
   logic                            f2_pend_cboz_q;
   logic [G6LCCfg.XLEN-1:0]         f2_pend_data_q;
+  logic [NB-1:0]                   f2_pend2_cand_q;
+  logic [G6LCCfg.XLEN-1:0]         f2_pend2_data_q;
   logic [NB-1:0]                   f2_cover_q;
   logic                            f2_v_q;
   logic [TAG_W-1:0]                f2_tag_q;
@@ -416,8 +439,8 @@ module stb_fwd
     assign ins_cboz_c[b] = (f1_ins_cand_q[0][b] && f1_ins_cboz_q[0]) ||
                            (!f1_ins_cand_q[0][b] && f1_ins_cand_q[1][b] &&
                             f1_ins_cboz_q[1]);
-    assign cover_c[b] = (|f1_sc_b[b]) || f1_pend_cand_q[b] || cmt_any_c[b] ||
-                        (|{f1_ins_cand_q[0][b], f1_ins_cand_q[1][b]});
+    assign cover_c[b] = (|f1_sc_b[b]) || f1_pend2_cand_q[b] || f1_pend_cand_q[b] ||
+                        cmt_any_c[b] || (|{f1_ins_cand_q[0][b], f1_ins_cand_q[1][b]});
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin : p_f2
@@ -427,6 +450,7 @@ module stb_fwd
       f2_ins_data_q <= '0;
       f2_spec_data_q <= '0; f2_cmt_data_q <= '0;
       f2_pend_cand_q <= '0; f2_pend_cboz_q <= '0; f2_pend_data_q <= '0;
+      f2_pend2_cand_q <= '0; f2_pend2_data_q <= '0;
       f2_tag_q <= '0;
     end else if (flush_i) begin
       f2_v_q <= 1'b0;
@@ -442,6 +466,8 @@ module stb_fwd
         f2_pend_cand_q <= f1_pend_cand_q;
         f2_pend_cboz_q <= f1_pend_cboz_q;
         f2_pend_data_q <= f1_pend_data_q;
+        f2_pend2_cand_q <= f1_pend2_cand_q;
+        f2_pend2_data_q <= f1_pend2_data_q;
       end
     end
   end
@@ -498,15 +524,16 @@ module stb_fwd
     // One mux. The four sources are arms, so their reads are not added.
     always_comb begin
       unique casez ({f2_ins_win_q[b] != 2'd3, |f2_spec_win_q[b],
-                     f2_pend_cand_q[b], f2_cmt_hit_q[b]})
-        4'b1???: f3_data[8*b +: 8] = f2_ins_cboz_q[b] ? 8'h00
+                     f2_pend2_cand_q[b], f2_pend_cand_q[b], f2_cmt_hit_q[b]})
+        5'b1????: f3_data[8*b +: 8] = f2_ins_cboz_q[b] ? 8'h00
                                     : f2_ins_data_q[f2_ins_win_q[b]][8*b +: 8];
-        4'b01??: f3_data[8*b +: 8] = sr[SLV][0];
-        4'b001?: f3_data[8*b +: 8] = f2_pend_cboz_q ? 8'h00
+        5'b01???: f3_data[8*b +: 8] = sr[SLV][0];
+        5'b001??: f3_data[8*b +: 8] = f2_pend2_data_q[8*b +: 8];
+        5'b0001?: f3_data[8*b +: 8] = f2_pend_cboz_q ? 8'h00
                                     : f2_pend_data_q[8*b +: 8];
-        4'b0001: f3_data[8*b +: 8] = f2_cmt_cboz_q[b] ? 8'h00
+        5'b00001: f3_data[8*b +: 8] = f2_cmt_cboz_q[b] ? 8'h00
                                     : f2_cmt_data_q[f2_cmt_win_q[b]][8*b +: 8];
-        default: f3_data[8*b +: 8] = '0;
+        default:  f3_data[8*b +: 8] = '0;
       endcase
     end
   end

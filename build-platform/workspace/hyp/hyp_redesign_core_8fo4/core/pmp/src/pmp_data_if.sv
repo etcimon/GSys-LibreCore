@@ -117,7 +117,11 @@ module pmp_data_if
     // fault, therefore do not change the exception type in case of double
     // exception
     if (if_req_q.fetch_valid && if_rsp_current) begin
+`ifdef G6LC_MUT_PMP_OVERWRITE_EX
       if (icache_areq_o.fetch_exception.cause != riscv::INSTR_PAGE_FAULT) begin
+`else
+      if (!icache_areq_o.fetch_exception.valid) begin
+`endif
         if (!match_any_execute_region_q || !pmp_if_allow) begin
           icache_areq_o.fetch_exception.cause = riscv::INSTR_ACCESS_FAULT;
           icache_areq_o.fetch_exception.valid = 1'b1;
@@ -182,8 +186,14 @@ module pmp_data_if
       lsu_exception_o = lsu_exception_i;
       pmp_access_type = lsu_is_store_i ? riscv::ACCESS_WRITE : riscv::ACCESS_READ;
 
-      // If translation is not enabled, check the paddr immediately against PMPs
+      // Per RISC-V privilege spec, address-misaligned and page-fault exceptions
+      // have higher priority than PMP access faults — never overwrite an
+      // already-valid MMU/LSU exception (whose paddr may be untranslated/stale).
+`ifdef G6LC_MUT_PMP_OVERWRITE_EX
       if (lsu_valid_i && !data_allow_o) begin
+`else
+      if (lsu_valid_i && !lsu_exception_i.valid && !data_allow_o) begin
+`endif
         lsu_exception_o.valid = 1'b1;
 
         if (G6LCCfg.TvalEn) begin
@@ -288,8 +298,12 @@ module pmp_data_if
       lsu_exception_o = lsu_req2_exception_q;
       pmp_access_type = lsu_req_is_store_q ? riscv::ACCESS_WRITE : riscv::ACCESS_READ;
 
-      // If translation is not enabled, check the paddr immediately against PMPs
+      // Per RISC-V privilege spec, never overwrite an already-valid MMU/LSU exception.
+`ifdef G6LC_MUT_PMP_OVERWRITE_EX
       if (lsu_req2_valid_q && !data_allow_o) begin
+`else
+      if (lsu_req2_valid_q && !lsu_req2_exception_q.valid && !data_allow_o) begin
+`endif
         lsu_exception_o.valid = 1'b1;
 
         if (G6LCCfg.TvalEn) begin

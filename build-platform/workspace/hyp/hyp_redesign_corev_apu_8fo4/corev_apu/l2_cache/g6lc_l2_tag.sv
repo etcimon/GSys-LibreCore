@@ -59,6 +59,9 @@ module g6lc_l2_tag #(
     input  logic                          write_valid_i,
     // T9h/M5: the installed line came from the prefetcher (PF_TAG only).
     input  logic                          write_pf_i,
+    // Consume (clear) the hit way's pf bit ONLY on a real demand hit (l2_hit_o),
+    // never on silent PF dedup probes or write-update tag probes.
+    input  logic                          pf_consume_i,
     // pf bit of the hit way — 1 on a demand hit to a PF-installed line.
     output logic                          hit_pf_o,
     // Invalidate way
@@ -234,7 +237,7 @@ always_comb begin
           end
         end
         // First demand hit on a PF-installed line consumes the bit.
-        if (|hit_way) pf_d[index_i] = pf_q[index_i] & ~hit_way;
+        if (pf_consume_i && (|hit_way)) pf_d[index_i] = pf_q[index_i] & ~hit_way;
         if (inval_set_i) pf_d[inval_set_index_i] = '0;
       end
       always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -244,7 +247,7 @@ always_comb begin
     end else begin : gen_no_pf
       assign hit_pf_o = 1'b0;
       logic _unused_pf;
-      assign _unused_pf = write_pf_i & (|pf_q);
+      assign _unused_pf = write_pf_i & pf_consume_i & (|pf_q);
       assign pf_q = '0;
     end
 
@@ -444,7 +447,7 @@ always_comb begin
         if (write_i) pf_d[write_index_i][write_way_i] = write_pf_i;
         if (inval_i) pf_d[inval_index_i][inval_way_i] = 1'b0;
         // First demand hit on a PF-installed line consumes the bit.
-        if (|hit_way) pf_d[index_i] = pf_q[index_i] & ~hit_way;
+        if (pf_consume_i && (|hit_way)) pf_d[index_i] = pf_q[index_i] & ~hit_way;
         if (inval_set_i) pf_d[inval_set_index_i] = '0;
       end
       always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -454,7 +457,7 @@ always_comb begin
     end else begin : gen_no_pf
       assign hit_pf_o = 1'b0;
       logic _unused_pf;
-      assign _unused_pf = write_pf_i;
+      assign _unused_pf = write_pf_i & pf_consume_i;
       assign pf_q = '0;
     end
 

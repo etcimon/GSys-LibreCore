@@ -251,6 +251,11 @@ module g6lc_zicclsm
               end else if (ld_match_idle) begin
                 if (ld_ex_fu_i.valid) begin
                   ld_valid_o   = 1'b1;
+`ifndef G6LC_MUT_ZICCLSM_B0_ALIGNED_TVAL
+                  // Beat 0 rounded vaddr down to 8B for the aligned LD read;
+                  // restore original effective VA in tval per RISC-V Priv §3.1.16.
+                  if (G6LCCfg.TvalEn) ld_ex_o.tval = G6LCCfg.XLEN'(ctrl_i.vaddr);
+`endif
                   pop_ld_byp_o = 1'b1;
                   state_d      = IDLE;
                 end else begin
@@ -288,6 +293,9 @@ module g6lc_zicclsm
           end else if (ld_match) begin
             if (ld_ex_fu_i.valid) begin
               ld_valid_o   = 1'b1;
+`ifndef G6LC_MUT_ZICCLSM_B0_ALIGNED_TVAL
+              if (G6LCCfg.TvalEn) ld_ex_o.tval = G6LCCfg.XLEN'(orig_q.vaddr);
+`endif
               pop_ld_byp_o = 1'b1;
               state_d      = IDLE;
             end else begin
@@ -319,6 +327,9 @@ module g6lc_zicclsm
           if (ld_match) begin
             if (ld_ex_fu_i.valid) begin
               ld_valid_o   = 1'b1;
+`ifndef G6LC_MUT_ZICCLSM_B0_ALIGNED_TVAL
+              if (G6LCCfg.TvalEn) ld_ex_o.tval = G6LCCfg.XLEN'(orig_q.vaddr);
+`endif
               pop_ld_byp_o = 1'b1;
               state_d      = IDLE;
             end else begin

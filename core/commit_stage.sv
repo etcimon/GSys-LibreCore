@@ -195,12 +195,14 @@ module commit_stage
   always_comb begin : dirty_fp_state
     dirty_fp_state_o = 1'b0;
     for (int i = 0; i < CVA6Cfg.NrCommitPorts; i++) begin
-      dirty_fp_state_o |= commit_ack_o[i] & ((commit_instr_i[i].fu inside {FPU, FPU_VEC} & CVA6Cfg.FpPresent & ariane_pkg::fd_changes_rd_state(
+      // Cancelled wrong-path FP instructions dropped on commit_drop_i must not
+      // architecturally dirty mstatus.FS.
+      dirty_fp_state_o |= (commit_ack_o[i] & !commit_drop_i[i]) & ((commit_instr_i[i].fu inside {FPU, FPU_VEC} & CVA6Cfg.FpPresent & ariane_pkg::fd_changes_rd_state(
           commit_instr_i[i].op
       )) || (CVA6Cfg.FpPresent && ariane_pkg::is_rd_fpr(
           commit_instr_i[i].op
           // Check if we issued a vector floating-point instruction to the accelerator
-      ))) | (commit_instr_i[i].fu == ACCEL && commit_instr_i[i].vfp);
+      )) || (commit_instr_i[i].fu == ACCEL && commit_instr_i[i].vfp));
     end
   end
 
@@ -478,18 +480,29 @@ module commit_stage
       // Soft-ladder iter-012 note: dual-commit serialize (dual-GPR and full) was
       // PEEL_FDT-negative on work-ver-smt2-fw64{b,c} — same mepc=0x12eb2 /
       // mtval=0x12b2a. Not a dual-commit residual; see ITERATION.md.
-      if (!p1_cross && commit_ack_o[0] && commit_instr_i[1].valid
+      if (!p1_cross && commit_ack_o[0]
                                 && !halt_i
                                 && !commit_replay_i[0] && !commit_replay_i[1]
-                                && !(commit_instr_i[0].fu inside {CSR})
+                                && !(commit_instr_i[0].fu inside {CSR} && !commit_drop_i[0] &&
+                                     (MixedSmt || (commit_instr_i[0].op != CSR_READ)))
                                 && !flush_dcache_i
-                                && !(CVA6Cfg.RVA && instr_0_is_amo)
+                                && !(CVA6Cfg.RVA && instr_0_is_amo && !commit_drop_i[0])
                                 && !single_step_i
                                 && (!MixedSmt ||
                                     (commit_instr_i[1].trans_id != commit_instr_i[0].trans_id))) begin
+        // Dual-port wrong-path squash: a cancelled, non-replay slot on port 1
+        // performs zero architectural side effects and can drop at 2/cycle.
+        if (commit_drop_i[1] &&
+            (!MixedSmt || (!commit_instr_i[1].ex.valid &&
+                           !(commit_instr_i[1].fu inside {CSR}) &&
+                           !(CVA6Cfg.RVA && ariane_pkg::is_amo(commit_instr_i[1].op))))) begin
+          commit_ack_o[1] = 1'b1;
         // only if the first instruction didn't throw an exception and this instruction won't throw an exception
         // and the functional unit is of type ALU, LOAD, CTRL_FLOW, MULT, FPU or FPU_VEC
-        if (!commit_instr_i[1].ex.valid && (commit_instr_i[1].fu inside {ALU, LOAD, CTRL_FLOW, MULT, FPU, FPU_VEC})) begin
+        end else if (commit_instr_i[1].valid && !commit_instr_i[1].ex.valid &&
+                     (commit_instr_i[1].fu inside {ALU, LOAD, CTRL_FLOW, MULT, FPU, FPU_VEC}) &&
+                     !((commit_instr_i[0].fu inside {CSR}) && !commit_drop_i[0] &&
+                       (commit_instr_i[1].fu inside {FPU, FPU_VEC}))) begin
 
           if (CVA6Cfg.RVZCMP && commit_instr_i[1].is_macro_instr && commit_instr_i[1].is_last_macro_instr)
             commit_macro_ack[1] = 1'b1;

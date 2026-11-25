@@ -554,6 +554,9 @@ module g6lc_ptw
                   (|pte.reserved && G6LCCfg.IS_XLEN64) ||
                   (!G6LCCfg.SvpbmtEn && |pte.pbmt && G6LCCfg.IS_XLEN64) ||
                   (G6LCCfg.SvpbmtEn && (pte.pbmt == 2'b11) && G6LCCfg.IS_XLEN64) ||
+`ifndef G6LC_MUT_PTW_PBMT_NONLEAF
+                  (G6LCCfg.SvpbmtEn && !(pte.r || pte.x) && |pte.pbmt && G6LCCfg.IS_XLEN64) ||
+`endif
                   (!G6LCCfg.SvnapotEn && pte.n) ||
                   (G6LCCfg.SvnapotEn && !(pte.r || pte.x) && pte.n);
               dec_d.napot_n   = pte.n;
@@ -1015,10 +1018,16 @@ module g6lc_ptw
             if (dec_q.dtlb_upd_ok) shared_tlb_update_valid = 1'b1;
           end
           if (dec_q.misaligned) shared_tlb_update_valid = 1'b0;
+`ifndef G6LC_MUT_PTW_NAPOT_POISON
+          if (G6LCCfg.SvnapotEn && dec_q.napot_fault) shared_tlb_update_valid = 1'b0;
+`endif
         end
         if (!allow_access) shared_tlb_update_valid = 1'b0;
       end
     end
+`ifndef G6LC_MUT_PTW_FLUSH_FILL
+    if (flush_i) shared_tlb_update_valid = 1'b0;
+`endif
   end
 
   // Big Endian Capability Additions
@@ -1043,6 +1052,9 @@ module g6lc_ptw
           (|dec_q.pte.reserved && G6LCCfg.IS_XLEN64) ||
           (!G6LCCfg.SvpbmtEn && |dec_q.pte.pbmt && G6LCCfg.IS_XLEN64) ||
           (G6LCCfg.SvpbmtEn && (dec_q.pte.pbmt == 2'b11) && G6LCCfg.IS_XLEN64) ||
+`ifndef G6LC_MUT_PTW_PBMT_NONLEAF
+          (G6LCCfg.SvpbmtEn && !(dec_q.pte.r || dec_q.pte.x) && |dec_q.pte.pbmt && G6LCCfg.IS_XLEN64) ||
+`endif
           (!G6LCCfg.SvnapotEn && dec_q.pte.n) ||
           (G6LCCfg.SvnapotEn && !(dec_q.pte.r || dec_q.pte.x) && dec_q.pte.n);
       ref_napot_fault = G6LCCfg.SvnapotEn && dec_q.pte.n && ref_leaf &&
@@ -1103,7 +1115,7 @@ module g6lc_ptw
   always_ff @(posedge clk_i) begin
     if (rst_ni && state_q != PROPAGATE_ERROR && state_d == PROPAGATE_ERROR) begin
       $display("[ptw-err] t=%0t vaddr=%h lvl=%0d pptr=%h pte=%h (v=%b r=%b w=%b x=%b a=%b d=%b g=%b u=%b) instr=%b hart=%0d req_hart=%0d satp_ppn=%h state=%0d rdata=%h at=%m",
-               $time, vaddr_q, ptw_lvl_q[0], ptw_pptr_q, data_rdata_q,
+               $time, vaddr_q, ptw_lvl_q[0], ptw_pptr_q, pte,
                pte.v, pte.r, pte.w, pte.x, pte.a, pte.d, pte.g, pte.u,
                is_instr_ptw_q, tlb_update_hart_q, req_hart_i, satp_ppn_i,
                state_q, endian_data);
@@ -1168,7 +1180,7 @@ module g6lc_ptw
       // decode+verdict window (data_rdata_q free-runs); the flush clears
       // the bundle so a killed walk can never leak a stale verdict.
       if (PDEC) begin
-        if (req_port_i.data_rvalid) pte_q <= endian_data;
+        if (req_port_i.data_rvalid && (state_q == PTE_LOOKUP)) pte_q <= endian_data;
         if (flush_i) dec_q <= '0;
         else         dec_q <= dec_d;
       end

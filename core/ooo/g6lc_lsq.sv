@@ -160,6 +160,18 @@ module g6lc_lsq #(
     else
       lane_be = m << a[1:0];
   endfunction
+  function automatic logic [LANES-1:0] lane_be_hi(
+      input logic [CVA6Cfg.PLEN-1:0] a,
+      input logic [1:0]              size
+  );
+    automatic logic [2*LANES-1:0] m;
+    m = '0;
+    for (int unsigned b = 0; b < LANES; b++)
+      if (b < (1 << size)) m[b] = 1'b1;
+    if (CVA6Cfg.XLEN == 64) m = m << a[2:0];
+    else                    m = m << a[1:0];
+    return CVA6Cfg.RVZicclsm ? m[2*LANES-1:LANES] : '0;
+  endfunction
   // Same aligned word? PLEN < 4 degenerates to the full address.
   function automatic logic same_word(
       input logic [CVA6Cfg.PLEN-1:0] a,
@@ -169,6 +181,33 @@ module g6lc_lsq #(
       same_word = (a[CVA6Cfg.PLEN-1:3] == b[CVA6Cfg.PLEN-1:3]);
     else
       same_word = (a == b);
+  endfunction
+  // Exact 2-word byte-range overlap (covers RVZicclsm cross-word accesses).
+  function automatic logic bytes_overlap(
+      input logic [CVA6Cfg.PLEN-1:0] a,
+      input logic [1:0]              sz_a,
+      input logic [CVA6Cfg.PLEN-1:0] b,
+      input logic [1:0]              sz_b
+  );
+    logic [LANES-1:0] alo, ahi, blo, bhi;
+    logic sw, ab, ba;
+    alo = lane_be(a, sz_a);
+    ahi = lane_be_hi(a, sz_a);
+    blo = lane_be(b, sz_b);
+    bhi = lane_be_hi(b, sz_b);
+    sw  = same_word(a, b) && ((alo & blo) != '0);
+`ifdef G6LC_MUT_LSQ_NO_ZICCLSM_CROSSWORD
+    ab = 1'b0;
+    ba = 1'b0;
+`else
+    ab = CVA6Cfg.RVZicclsm && (CVA6Cfg.PLEN > 6) &&
+         ((a[CVA6Cfg.PLEN-1:3] + (CVA6Cfg.PLEN-3)'(1)) == b[CVA6Cfg.PLEN-1:3]) &&
+         ((ahi & blo) != '0);
+    ba = CVA6Cfg.RVZicclsm && (CVA6Cfg.PLEN > 6) &&
+         ((b[CVA6Cfg.PLEN-1:3] + (CVA6Cfg.PLEN-3)'(1)) == a[CVA6Cfg.PLEN-1:3]) &&
+         ((alo & bhi) != '0);
+`endif
+    return sw || ab || ba;
   endfunction
 
   // Occupancy flags depend only on registered state. They are kept out of the
@@ -472,16 +511,27 @@ module g6lc_lsq #(
             stl_need_stall = 1'b1;
           end else begin
             sbe = lane_be(st_q[i].addr, st_q[i].size);
-            if ((PHYS_VALIDATE ?
-                 ((st_q[i].addr & CVA6Cfg.PLEN'(4096-LANES)) ==
-                  (ld_query_addr_i & CVA6Cfg.PLEN'(4096-LANES))) :
-                 same_word(st_q[i].addr, ld_query_addr_i)) && (sbe & ld_be) != '0) begin
-              // Byte overlap with an older store. Data still in flight means
-              // the load must wait for the store to land in the LSU buffer.
+            if (PHYS_VALIDATE ?
+                ((((st_q[i].addr & CVA6Cfg.PLEN'(4096-LANES)) ==
+                   (ld_query_addr_i & CVA6Cfg.PLEN'(4096-LANES))) && (sbe & ld_be) != '0) ||
+                 (CVA6Cfg.RVZicclsm && (|lane_be_hi(st_q[i].addr, st_q[i].size) || |lane_be_hi(ld_query_addr_i, ld_query_size_i)) &&
+                  bytes_overlap(st_q[i].addr, st_q[i].size, ld_query_addr_i, ld_query_size_i))) :
+                bytes_overlap(st_q[i].addr, st_q[i].size, ld_query_addr_i, ld_query_size_i)) begin
+              // Byte overlap with an older store. Data still in flight OR
+              // cross-word partial coverage means the load must stall.
               if (!st_q[i].data_v) stl_need_stall = 1'b1;
-              // Youngest older store whose lanes fully cover the load's bytes
-              // is the one the store_buffer will forward from.
+`ifdef G6LC_MUT_LSQ_CROSS_FALSE_FWD
               if ((sbe & ld_be) == ld_be) stl_match[i] = 1'b1;
+`else
+              if (same_word(st_q[i].addr, ld_query_addr_i) &&
+                  (lane_be_hi(ld_query_addr_i, ld_query_size_i) == '0) &&
+                  ((sbe & ld_be) == ld_be))
+                stl_match[i] = 1'b1;
+              else if (CVA6Cfg.RVZicclsm &&
+                       (|lane_be_hi(ld_query_addr_i, ld_query_size_i) ||
+                        |lane_be_hi(st_q[i].addr, st_q[i].size)))
+                stl_need_stall = 1'b1;
+`endif
             end
           end
         end
@@ -563,7 +613,7 @@ module g6lc_lsq #(
           lbe_v = lane_be(ld_addr_now, ld_size_now);
           if (ld_q[j].valid && ld_addr_v_now && (!LSQ_HART_OWN || ld_q[j].hart == st_hart_now) &&
               g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(addr_id_i[u]), 32'(ld_q[j].id), 32'(commit_ptr_i)) &&
-              same_word(ld_addr_now, addr_i[u]) && ((sbe_v & lbe_v) != '0))
+              bytes_overlap(ld_addr_now, ld_size_now, addr_i[u], addr_size_i[u]))
             viol_cand[j] = 1'b1;
         end
       end
@@ -609,12 +659,20 @@ module g6lc_lsq #(
             if (load_update_live && phys_hart_i[0] == ld_q[l].hart &&
                 g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(phys_id_i[0]),
                                             32'(ld_q[l].id), 32'(commit_ptr_i)) &&
-                same_word(phys_addr_i[0], load_addr) &&
-                ((lane_be(phys_addr_i[0], phys_size_i[0]) & lane_be(load_addr, load_size)) != '0))
+                bytes_overlap(phys_addr_i[0], phys_size_i[0], load_addr, load_size))
               phys_replay_o[ld_q[l].id] = 1'b1;
             for (int unsigned m = 0; m < 2; m++)
+`ifdef G6LC_MUT_LSQ_NO_CROSSLINE_MOD
               if (mod_valid_i[m] && ((load_addr >> LINE_OFF) == (mod_addr_i[m] >> LINE_OFF)))
                 phys_replay_o[ld_q[l].id] = 1'b1;
+`else
+              if (mod_valid_i[m] && (
+                  ((load_addr >> LINE_OFF) == (mod_addr_i[m] >> LINE_OFF)) ||
+                  (CVA6Cfg.RVZicclsm &&
+                   (((load_addr + CVA6Cfg.PLEN'((4'd1 << load_size) - 4'd1)) >> LINE_OFF) ==
+                    (mod_addr_i[m] >> LINE_OFF)))))
+                phys_replay_o[ld_q[l].id] = 1'b1;
+`endif
             for (int unsigned s = 0; s < ST_ENTRIES; s++) begin
               store_event = phys_valid_i[1] && phys_id_i[1] == st_q[s].id &&
                             phys_hart_i[1] == st_q[s].hart;
@@ -625,8 +683,7 @@ module g6lc_lsq #(
                   st_q[s].hart == ld_q[l].hart && store_known && (load_event || store_event) &&
                   g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(st_q[s].id),
                                               32'(ld_q[l].id), 32'(commit_ptr_i)) &&
-                  same_word(store_addr, load_addr) &&
-                  ((lane_be(store_addr, store_size) & lane_be(load_addr, load_size)) != '0)) begin
+                  bytes_overlap(store_addr, store_size, load_addr, load_size)) begin
                 phys_replay_o[ld_q[l].id] = 1'b1;
                 phys_alias_cand[l] = 1'b1;
               end

@@ -71,7 +71,12 @@ module stb_drain
     automatic logic [$clog2(DEPTH_COMMIT):0] commit_status_cnt;
     commit_status_cnt      = cmt_cnt_i;
 
-    commit_ready_o         = (cmt_cnt_i < $bits(cmt_cnt_i)'(DEPTH_COMMIT)) &&
+    // Reserve 1 slot when push_valid_i (stb_commit's pend_q) is pushing this
+    // cycle so a back-to-back single-beat commit_i can pipeline into pend_q
+    // without overflowing commit_queue on the following edge.
+    commit_ready_o         = (cmt_cnt_i < (push_valid_i
+                                ? $bits(cmt_cnt_i)'(DEPTH_COMMIT - 1)
+                                : $bits(cmt_cnt_i)'(DEPTH_COMMIT))) &&
                              !head_mismatch_i;
     no_st_pending_o        = (cmt_cnt_i == 0);
 

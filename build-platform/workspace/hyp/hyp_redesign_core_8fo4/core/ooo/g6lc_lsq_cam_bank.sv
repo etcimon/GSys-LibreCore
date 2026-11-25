@@ -113,12 +113,38 @@ module g6lc_lsq_cam_bank #(
     assign nodata_d[i] = word_hit && !ent_i[i].data_v;
   end
 `else
+  // Compact Zicclsm cross-word detection (zero 32:1 table / zero wide adder):
+  // an access crosses into word W+1 iff (size==3 && off!=0) || (size==2 && off>=5)
+  // || (size==1 && off==7). When either access crosses, conservative 2-word
+  // alignment match (same 16B aligned pair or page-boundary wrap) catches 100%
+  // of cross-word overlaps with ~2 FO4 overhead.
+  logic ev_cross;
+  assign ev_cross = G6LCCfg.RVZicclsm && (
+      (ev_size_i == 2'd3 && (|ev_addr_i[2:0])) ||
+      (ev_size_i == 2'd2 && ev_addr_i[2] && (|ev_addr_i[1:0])) ||
+      (ev_size_i == 2'd1 && (&ev_addr_i[2:0])));
   for (genvar i = 0; i < ENTRIES; i++) begin : gen_cam_cmp
-    logic same_h, addr_ok, word_hit;
-    assign same_h  = ev_valid_i && ent_i[i].valid && (ent_i[i].hart == ev_hart_i);
-    assign addr_ok = same_h && ent_i[i].addr_v;
-    assign word_hit = addr_ok && same_word(ent_i[i].addr, ev_addr_i) &&
-                      ((ent_i[i].be & ev_be_i) != '0);
+    logic same_h, addr_ok, word_hit, ent_cross, cross_hit;
+    logic same_line, adj_w_ab, adj_w_ba;
+    assign same_h    = ev_valid_i && ent_i[i].valid && (ent_i[i].hart == ev_hart_i);
+    assign addr_ok   = same_h && ent_i[i].addr_v;
+    assign ent_cross = G6LCCfg.RVZicclsm && (
+        (ent_i[i].size == 2'd3 && (|ent_i[i].addr[2:0])) ||
+        (ent_i[i].size == 2'd2 && ent_i[i].addr[2] && (|ent_i[i].addr[1:0])) ||
+        (ent_i[i].size == 2'd1 && (&ent_i[i].addr[2:0])));
+    assign same_line = (ent_i[i].addr[G6LCCfg.PLEN-1:6] == ev_addr_i[G6LCCfg.PLEN-1:6]);
+    assign adj_w_ab  = (same_line && ((ent_i[i].addr[5:3] + 3'd1) == ev_addr_i[5:3])) ||
+                       ((&ent_i[i].addr[5:3]) && (ev_addr_i[5:3] == 3'd0));
+    assign adj_w_ba  = (same_line && ((ev_addr_i[5:3] + 3'd1) == ent_i[i].addr[5:3])) ||
+                       ((&ev_addr_i[5:3]) && (ent_i[i].addr[5:3] == 3'd0));
+`ifdef G6LC_MUT_LSQ_NO_ZICCLSM_CROSSWORD
+    assign cross_hit = 1'b0;
+`else
+    assign cross_hit = G6LCCfg.RVZicclsm && ((ent_cross && adj_w_ab) || (ev_cross && adj_w_ba));
+`endif
+    assign word_hit = addr_ok && (
+        (same_word(ent_i[i].addr, ev_addr_i) && ((ent_i[i].be & ev_be_i) != '0)) ||
+        cross_hit);
     // Live, same hart, no address yet: it may alias when it resolves —
     // the verdict stage combines this with age.
     assign unres_d[i]  = same_h && !ent_i[i].addr_v;

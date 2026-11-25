@@ -257,20 +257,27 @@ module g6lc_l2_pf #(
   logic signed [DLT_W-1:0] tr_str_s [NR_STREAMS];
   logic [PAGE_LBITS-1:0]   tr_arm_off_s [NR_STREAMS];
   logic [NR_STREAMS-1:0]   tr_arm_ip_s;
+  logic [PAGE_LBITS-1:0]   tr_front_off_s [NR_STREAMS];
+  logic [NR_STREAMS-1:0]   tr_front_ip_s;
   logic [NR_STREAMS-1:0]   tr_confirm_s;
   logic [1:0]              tr_conf_inc_s [NR_STREAMS];
   always_comb begin : p_train_prep
     for (int unsigned s = 0; s < NR_STREAMS; s++) begin
       logic signed [DLT_W-1:0] d_s, str_s;
       logic signed [DLT_W:0]   axs;
+      logic signed [EM_W-1:0]  fxs;
       d_s             = delta_of(train_line, st_q[s].last);
       str_s           = STRIDE_EN ? d_s : DLT_W'(1);
       axs             = $signed({{(DLT_W+1-PAGE_LBITS){1'b0}}, train_line[PAGE_LBITS-1:0]}) +
                         $signed(str_s);
+      fxs             = $signed({{(EM_W-PAGE_LBITS){1'b0}}, train_line[PAGE_LBITS-1:0]}) +
+                        ($signed({{(EM_W-DLT_W){str_s[DLT_W-1]}}, str_s}) * $signed(EM_W'(PEND_CAP)));
       tr_d_s[s]       = d_s;
       tr_str_s[s]     = str_s;
       tr_arm_off_s[s] = axs[PAGE_LBITS-1:0];
       tr_arm_ip_s[s]  = !(|axs[DLT_W:PAGE_LBITS]);
+      tr_front_off_s[s]= fxs[PAGE_LBITS-1:0];
+      tr_front_ip_s[s] = !(|fxs[EM_W-1:PAGE_LBITS]);
       tr_confirm_s[s] = st_q[s].seen && (d_s == st_q[s].stride);
       tr_conf_inc_s[s]= (st_q[s].conf == 2'd3) ? 2'd3 : (st_q[s].conf + 2'd1);
     end
@@ -313,10 +320,27 @@ module g6lc_l2_pf #(
           if (tr_confirm_s[s]) begin
             st_d[s].conf = tr_conf_inc_s[s];
             if (st_q[s].conf >= 2'd1) begin
+`ifdef G6LC_MUT_PF_REDUNDANT_REARM
               st_d[s].pend         = PW'(PEND_CAP);
               st_d[s].ahead        = PW'(1);
               st_d[s].cand_off     = tr_arm_off_s[s];
               st_d[s].cand_in_page = tr_arm_ip_s[s];
+`else
+              // On steady-state advance (already conf>=2 and prior burst drained),
+              // arm only the single new frontier line at +PEND_CAP*stride so we do
+              // not re-emit already-issued candidates +1..+(PEND_CAP-1).
+              if ((st_q[s].conf >= 2'd2) && (st_q[s].pend == '0) && (PEND_CAP > 1)) begin
+                st_d[s].pend         = PW'(1);
+                st_d[s].ahead        = PW'(PEND_CAP);
+                st_d[s].cand_off     = tr_front_off_s[s];
+                st_d[s].cand_in_page = tr_front_ip_s[s];
+              end else begin
+                st_d[s].pend         = PW'(PEND_CAP);
+                st_d[s].ahead        = PW'(1);
+                st_d[s].cand_off     = tr_arm_off_s[s];
+                st_d[s].cand_in_page = tr_arm_ip_s[s];
+              end
+`endif
             end
           end else begin
             st_d[s].seen         = 1'b1;

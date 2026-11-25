@@ -23,9 +23,12 @@
 
 module g6lc_memdep #(
     parameter config_pkg::g6lc_cfg_t G6LCCfg = config_pkg::g6lc_cfg_empty,
-    parameter int unsigned NR_SETS  = 64,
-    parameter int unsigned NR_TRAIN = 2,
-    parameter int unsigned NR_QUERY = 1
+    parameter int unsigned NR_SETS    = 64,
+    parameter int unsigned NR_TRAIN   = 2,
+    parameter int unsigned NR_QUERY   = 1,
+    // Periodic Store-Set epoch clear (2^CLEAR_BITS cycles) to prevent long-term
+    // saturation without wiping learned ld_wait entries on replay/branch flushes.
+    parameter int unsigned CLEAR_BITS = 16
 ) (
     input  logic clk_i,
     input  logic rst_ni,
@@ -54,6 +57,9 @@ module g6lc_memdep #(
   logic [NR_SETS-1:0][7:0] set_ssid_q, set_ssid_d;
   // Load PCs that previously collided with older stores
   logic [NR_SETS-1:0] ld_wait_q, ld_wait_d;
+  logic [CLEAR_BITS-1:0] clear_cnt_q;
+  logic                  clear_pulse;
+  assign clear_pulse = &clear_cnt_q;
 
   // hyp8: registered query + registered violation report
   logic [NR_QUERY-1:0]                    ld_query_q;
@@ -94,10 +100,21 @@ module g6lc_memdep #(
       end
     end
 
+`ifdef G6LC_MUT_MEMDEP_FLUSH_WIPE
     if (flush_i) begin
       set_valid_d = '0;
       ld_wait_d   = '0;
     end
+`else
+    // Predictor tables survive replay/mispredict flushes (every mem_viol itself
+    // triggers a commit-time replay flush, so wiping on flush_i erased every
+    // newly learned ld_wait entry before the violating load re-dispatched).
+    // Periodic epoch clear prevents long-term saturation of the 64-entry table.
+    if (clear_pulse) begin
+      set_valid_d = '0;
+      ld_wait_d   = '0;
+    end
+`endif
   end
 
   // Registered query lookup: the verdict is captured so the consumer reads a
@@ -121,6 +138,7 @@ module g6lc_memdep #(
       set_valid_q    <= '0;
       set_ssid_q     <= '0;
       ld_wait_q      <= '0;
+      clear_cnt_q    <= '0;
       ld_query_q     <= '0;
       ld_pc_q        <= '0;
       store_pending_q <= 1'b0;
@@ -132,10 +150,15 @@ module g6lc_memdep #(
       set_valid_q     <= set_valid_d;
       set_ssid_q      <= set_ssid_d;
       ld_wait_q       <= ld_wait_d;
+      clear_cnt_q     <= clear_cnt_q + CLEAR_BITS'(1);
       ld_query_q      <= ld_query_i & {NR_QUERY{~flush_i}};
       ld_pc_q         <= ld_pc_i;
       store_pending_q <= store_pending_i;
+`ifdef G6LC_MUT_MEMDEP_FLUSH_WIPE
       train_valid_q   <= train_valid_i && !flush_i;
+`else
+      train_valid_q   <= train_valid_i;
+`endif
       train_pc_q      <= train_pc_i;
       predict_q       <= predict_d & {NR_QUERY{~flush_i}};
       stall_q         <= stall_d & {NR_QUERY{~flush_i}};

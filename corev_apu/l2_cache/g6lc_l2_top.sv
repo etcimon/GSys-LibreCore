@@ -76,6 +76,7 @@ module g6lc_l2_top
     // window (burst throttling).
     parameter int unsigned PF_MAX_OUT     = 1,
     parameter int unsigned PF_QUIET       = 8,
+    parameter bit          PF_EVICT_OK    = 1'b0,
     parameter int unsigned AXI_ADDR_WIDTH = 64,
     parameter int unsigned AXI_DATA_WIDTH = 64,
     parameter int unsigned AXI_ID_WIDTH   = 4,
@@ -350,6 +351,7 @@ module g6lc_l2_top
       .write_tag_i  (tag_wtag),
       .write_valid_i(tag_wvalid),
       .write_pf_i   (tag_wpf),
+      .pf_consume_i (l2_hit_o),
       .hit_pf_o     (tag_hit_pf),
       .inval_i      (tag_inval),
       .inval_index_i(tag_iindex),
@@ -644,7 +646,12 @@ module g6lc_l2_top
                                          : line_align(addr_q);
   // Demand misses commit in S_TAG; a commit is the prefetcher's only
   // training edge (mshr_alloc in S_IDLE is a pf commit — excluded).
+`ifdef G6LC_MUT_L3_PF_NO_HIT_RETRAIN
   assign pf_train        = PF_EN && mshr_alloc && (state_q == S_TAG);
+`else
+  assign pf_train        = PF_EN && ((mshr_alloc && (state_q == S_TAG)) ||
+                                     (PF_EVICT_OK && l2_pf_useful_o));
+`endif
 
   // --------------------
   // Fill engine: per-MSHR-entry fill state, line buffers and issue order.
@@ -965,10 +972,14 @@ module g6lc_l2_top
   end
   assign tag_probe_way = victim_way;
 
-  // PF way pick: an invalid way in the candidate's set not already claimed
-  // by an in-flight fill — a prefetch never evicts, so an all-valid or all-
-  // pending set drops the candidate instead. tag_way_valid reflects
-  // index_i, which the probe fire muxes to the candidate's set.
+  // PF way pick: invalid non-pending way first; under PF_EVICT_OK=1
+  // (non-inclusive eWT L3), fall back to a rotating non-pending cold way on
+  // warm all-valid sets (parity with hyp8).
+  logic [WAY_W-1:0] pf_rr_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) pf_rr_q <= '0;
+    else if (pf_alloc) pf_rr_q <= (pf_rr_q == WAY_W'(SET_ASSOC - 1)) ? '0 : pf_rr_q + 1'b1;
+  end
   always_comb begin
     pf_pend_way = '0;
     for (int unsigned e = 0; e < MSHR_DEPTH; e++) begin
@@ -984,6 +995,21 @@ module g6lc_l2_top
         pf_way_ok = 1'b1;
       end
     end
+`ifndef G6LC_MUT_L3_PF_NO_WARM_EVICT
+    if (PF_EVICT_OK && !pf_way_ok) begin
+      if (!pf_pend_way[pf_rr_q]) begin
+        pf_way    = pf_rr_q;
+        pf_way_ok = 1'b1;
+      end else begin
+        for (int w = 0; w < int'(SET_ASSOC); w++) begin
+          if (!pf_pend_way[w] && !pf_way_ok) begin
+            pf_way    = WAY_W'(w);
+            pf_way_ok = 1'b1;
+          end
+        end
+      end
+    end
+`endif
   end
 
   if (PF_EN) begin : gen_pf
@@ -2123,31 +2149,39 @@ module g6lc_l2_top
   // RR_EN=0 elaborates no metadata RAM; off-path equivalence is a separate gate.
   if (RR_EN) begin : gen_rr
     logic read_req, do_write;
-    logic [IDX_BITS-1:0] ram_addr;
-    logic [WAY_W-1:0] next_way, wr_way;
-    // One port serves both the lookup read and the install update. The read
-    // belongs to the request that is being accepted this cycle and cannot be
-    // repeated, so it takes the port; a colliding update is held and retired on
-    // the first free cycle. A later install overwrites a held one because the
-    // pointer means "past the way installed most recently".
+    logic [IDX_BITS-1:0] ram_addr, upd_idx;
+    logic [WAY_W-1:0] next_way, hit_next_way, upd_way, wr_way, sram_rdata;
+    logic rr_hit_bump, rr_upd_v;
+    // Hit-protected RR (Clock/second-chance) + same-set bypass (parity with hyp8).
     logic rr_pend_q, rr_pend_d;
     logic [IDX_BITS-1:0] rr_pend_idx_q, rr_pend_idx_d;
     logic [WAY_W-1:0] rr_pend_way_q, rr_pend_way_d;
-    assign read_req = slv_req_i.ar_valid && slv_resp_o.ar_ready &&
-                      l2_is_cacheable(slv_req_i.ar.cache) && !slv_req_i.ar.lock;
-    assign next_way = (tag_wway == WAY_W'(SET_ASSOC - 1)) ? '0 : tag_wway + 1'b1;
-    assign do_write = (rr_adv || rr_pend_q) && !read_req;
-    assign ram_addr = read_req ? idx_of(slv_req_i.ar.addr)
-                               : (rr_adv ? tag_windex : rr_pend_idx_q);
-    assign wr_way   = rr_adv ? next_way : rr_pend_way_q;
+    logic rr_byp_q;
+    logic [WAY_W-1:0] rr_byp_way_q;
+    assign read_req     = slv_req_i.ar_valid && slv_resp_o.ar_ready &&
+                          l2_is_cacheable(slv_req_i.ar.cache) && !slv_req_i.ar.lock;
+    assign next_way     = (tag_wway == WAY_W'(SET_ASSOC - 1)) ? '0 : tag_wway + 1'b1;
+    assign hit_next_way = (tag_way  == WAY_W'(SET_ASSOC - 1)) ? '0 : tag_way  + 1'b1;
+`ifdef G6LC_MUT_L2_RR_NO_HIT_PROTECT
+    assign rr_hit_bump  = 1'b0;
+`else
+    assign rr_hit_bump  = l2_hit_o && (tag_way == rr_victim_way);
+`endif
+    assign rr_upd_v     = rr_adv || rr_hit_bump;
+    assign upd_idx      = rr_adv ? tag_windex : idx_of(addr_q);
+    assign upd_way      = rr_adv ? next_way   : hit_next_way;
+    assign do_write     = (rr_upd_v || rr_pend_q) && !read_req;
+    assign ram_addr     = read_req ? idx_of(slv_req_i.ar.addr)
+                                   : (rr_upd_v ? upd_idx : rr_pend_idx_q);
+    assign wr_way       = rr_upd_v ? upd_way : rr_pend_way_q;
     always_comb begin
       rr_pend_d     = rr_pend_q;
       rr_pend_idx_d = rr_pend_idx_q;
       rr_pend_way_d = rr_pend_way_q;
-      if (rr_adv && read_req) begin
+      if (rr_upd_v && read_req) begin
         rr_pend_d     = 1'b1;
-        rr_pend_idx_d = tag_windex;
-        rr_pend_way_d = next_way;
+        rr_pend_idx_d = upd_idx;
+        rr_pend_way_d = upd_way;
       end else if (rr_pend_q && !read_req) begin
         rr_pend_d = 1'b0;
       end
@@ -2157,10 +2191,27 @@ module g6lc_l2_top
         rr_pend_q     <= 1'b0;
         rr_pend_idx_q <= '0;
         rr_pend_way_q <= '0;
+        rr_byp_q      <= 1'b0;
+        rr_byp_way_q  <= '0;
       end else begin
         rr_pend_q     <= rr_pend_d;
         rr_pend_idx_q <= rr_pend_idx_d;
         rr_pend_way_q <= rr_pend_way_d;
+        if (read_req) begin
+`ifdef G6LC_MUT_L2_RR_NO_HIT_PROTECT
+          rr_byp_q     <= 1'b0;
+`else
+          if (rr_upd_v && (upd_idx == idx_of(slv_req_i.ar.addr))) begin
+            rr_byp_q     <= 1'b1;
+            rr_byp_way_q <= upd_way;
+          end else if (rr_pend_q && (rr_pend_idx_q == idx_of(slv_req_i.ar.addr))) begin
+            rr_byp_q     <= 1'b1;
+            rr_byp_way_q <= rr_pend_way_q;
+          end else begin
+            rr_byp_q     <= 1'b0;
+          end
+`endif
+        end
       end
     end
     tc_sram #(
@@ -2169,8 +2220,9 @@ module g6lc_l2_top
     ) i_metadata (
         .clk_i, .rst_ni,
         .req_i(rst_ni && (read_req || do_write)), .we_i(do_write),
-        .addr_i(ram_addr), .wdata_i(wr_way), .be_i(1'b1), .rdata_o(rr_victim_way)
+        .addr_i(ram_addr), .wdata_i(wr_way), .be_i(1'b1), .rdata_o(sram_rdata)
     );
+    assign rr_victim_way = rr_byp_q ? rr_byp_way_q : sram_rdata;
   end else begin : gen_no_rr
     assign rr_victim_way = '0;
   end
@@ -2217,7 +2269,7 @@ module g6lc_l2_top
       end else if (ls_en) begin
         bit ls_fire;
         ls_cyc <= ls_cyc + 1;
-        if (state_q != state_d) ls_state_since <= ls_cyc;
+        if (state_q == S_IDLE || state_q != state_d) ls_state_since <= ls_cyc;
         ls_fire = 0;
         for (int e = 0; e < MSHR_DEPTH; e++) begin
           if (fill_act_q[e] && ls_fill_birth[e] < 0) ls_fill_birth[e] <= ls_cyc;
@@ -2227,7 +2279,7 @@ module g6lc_l2_top
             ls_fill_birth[e] <= ls_cyc;
           end
         end
-        if (ls_cyc - ls_state_since >= 65536) begin
+        if (state_q != S_IDLE && (ls_cyc - ls_state_since >= 65536)) begin
           ls_fire = 1;
           ls_state_since <= ls_cyc;
         end

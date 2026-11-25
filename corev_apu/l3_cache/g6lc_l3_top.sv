@@ -33,6 +33,7 @@ module g6lc_l3_top
     // PF_QUIET); the shared L2Pf* fields feed both instances.
     parameter int unsigned PF_MAX_OUT     = 1,
     parameter int unsigned PF_QUIET       = 8,
+    parameter bit          PF_EVICT_OK    = 1'b0,
     parameter int unsigned BYTE_SIZE   = L3_DEFAULT_BYTE_SIZE,
     parameter int unsigned SET_ASSOC   = L3_DEFAULT_SET_ASSOC,
     parameter int unsigned LINE_WIDTH  = L3_DEFAULT_LINE_WIDTH,
@@ -113,6 +114,7 @@ module g6lc_l3_top
       .PF_MSHR_RESERVE(PF_MSHR_RESERVE),
       .PF_MAX_OUT     (PF_MAX_OUT),
       .PF_QUIET       (PF_QUIET),
+      .PF_EVICT_OK    (PF_EVICT_OK),
       // This engine sits below an L2 that re-tags its posted writes onto
       // the reserved WR_ID — id-14 arrivals are the designed flow here, so
       // the slave-side WR_ID integration assert stays off (T9d/M1d).

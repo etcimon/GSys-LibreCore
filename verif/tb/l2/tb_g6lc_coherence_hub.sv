@@ -1509,6 +1509,61 @@ module tb_g6lc_coherence_hub;
     $display("HUB_ACK_TIMING scenario=27 k=%0d", k);
   endtask
 
+  // Back-to-back single-beat cacheable stores under COH_OOO: overlapping the
+  // next AW's 1-cycle snoop-filter lookup (sig_start) with the previous AW's
+  // W-beat (w_busy_q) cuts streaming store cadence from 3 cyc/store to
+  // 2 cyc/store while keeping every W-beat, B-response and invalidation exact.
+  // Review mutation -DG6LC_MUT_HUB_SIG_WAIT_WBUSY stalls sig_start on w_busy_q
+  // and must fail HUB_B2B_OVERLAP_CYCLES.
+  task automatic back_to_back_sig_overlap;
+    localparam int NWR = 16;
+    int aw_sent = 0, w_sent = 0, b_got = 0, cyc = 0;
+    int pending_b_n = 0;
+    id_t pending_b_q[NWR];
+    reset();
+    memory_rsp.aw_ready = 1;
+    memory_rsp.w_ready  = 1;
+    for (cyc = 0; cyc < 120 && b_got < NWR; cyc++) begin
+      core_req[0].aw_valid = (aw_sent < NWR);
+      core_req[0].aw       = aw(64'h8000_0000 + addr_t'(aw_sent * 64), id_t'(aw_sent & 4'hf), 4'hf);
+      core_req[0].w_valid  = (w_sent < aw_sent);
+      core_req[0].w        = '{data: 64'hA000 + data_t'(w_sent), strb: 8'hff, last: 1'b1, user: '0};
+      memory_rsp.b_valid   = (pending_b_n > 0);
+      memory_rsp.b         = '{id: (pending_b_n > 0) ? pending_b_q[0] : '0, resp: '0, user: '0};
+      #2;
+      begin
+        bit do_aw = core_req[0].aw_valid && core_rsp[0].aw_ready;
+        bit do_w  = core_req[0].w_valid  && core_rsp[0].w_ready;
+        bit do_mb = memory_rsp.b_valid   && memory_req.b_ready;
+        bit do_cb = core_rsp[0].b_valid  && core_req[0].b_ready;
+        id_t new_id = memory_req.aw.id;
+        tick();
+        if (do_mb) begin
+          for (int i = 0; i + 1 < pending_b_n; i++) pending_b_q[i] = pending_b_q[i+1];
+          pending_b_n--;
+        end
+        if (do_aw) begin
+          aw_sent++;
+          pending_b_q[pending_b_n] = new_id;
+          pending_b_n++;
+        end
+        if (do_w)  w_sent++;
+        if (do_cb) b_got++;
+      end
+    end
+    core_req[0].aw_valid = 0;
+    core_req[0].w_valid  = 0;
+    memory_rsp.aw_ready  = 0;
+    memory_rsp.w_ready   = 0;
+    memory_rsp.b_valid   = 0;
+    $display("HUB_B2B_OVERLAP ooo=%0d nwr=%0d aw=%0d w=%0d b=%0d cyc=%0d",
+             OOO, NWR, aw_sent, w_sent, b_got, cyc);
+    if (aw_sent != NWR || w_sent != NWR || b_got != NWR)
+      $fatal(1, "HUB_B2B_INCOMPLETE aw=%0d w=%0d b=%0d", aw_sent, w_sent, b_got);
+    if (OOO && cyc > (2 * NWR + 8))
+      $fatal(1, "HUB_B2B_OVERLAP_CYCLES cyc=%0d expected <= %0d", cyc, 2 * NWR + 8);
+  endtask
+
   initial begin
     scenario = 0;
     negative = $test$plusargs("oracle_negative");
@@ -1542,6 +1597,7 @@ module tb_g6lc_coherence_hub;
       25: same_id_r_order();
       26: writer_acquisition();
       27: atop_parked_r();
+      28: back_to_back_sig_overlap();
       default: $fatal(1, "HUB_SCENARIO");
     endcase
     $display("HUB_PASS scenario=%0d", scenario);

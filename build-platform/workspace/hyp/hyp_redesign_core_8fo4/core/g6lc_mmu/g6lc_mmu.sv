@@ -58,6 +58,7 @@ module g6lc_mmu
     input logic [G6LCCfg.VLEN-1:0] lsu_vaddr_i,  // virtual address in
     input logic [31:0] lsu_tinst_i,  // transformed instruction in
     input logic lsu_is_store_i,  // the translation is requested by a store
+    input logic lsu_no_walk_i,  // speculative DTLB probe only: hit allowed, suppress PTW walk on miss
     output logic csr_hs_ld_st_inst_o,  // hyp load store instruction
     // if we need to walk the page table we can't grant in the same cycle
     // Cycle 0
@@ -320,8 +321,33 @@ module g6lc_mmu
 // end
 // ----------------------------------------------------------------
   // END sv-timing auto-correct (balance_mux rewrite)
-assign itlb_lu_access = icache_areq_i.fetch_req;
+  // Sv39/Sv39x4 canonical/range check at the lookup boundary so non-canonical
+  // virtual addresses raise an immediate page fault and never start a PTW walk
+  // or install aliased low-VA TLB entries (RISC-V Priv §4.4.1; tracedb r127m
+  // observed [ptw-err] vaddr=6a09e667bb67ae80 walking memory twice).
+  logic fetch_noncanon_i, lsu_va_noncanon_i, lsu_noncanon_i, lsu_va_noncanon_q;
+  assign fetch_noncanon_i =
+      (enable_translation_i &&
+       !((&icache_areq_i.fetch_vaddr[G6LCCfg.VLEN-1:G6LCCfg.SV-1]) == 1'b1 ||
+         (|icache_areq_i.fetch_vaddr[G6LCCfg.VLEN-1:G6LCCfg.SV-1]) == 1'b0)) ||
+      (enable_g_translation_i && !enable_translation_i && G6LCCfg.IS_XLEN64 &&
+       (|icache_areq_i.fetch_vaddr[G6LCCfg.VLEN-1:G6LCCfg.GPLEN] != 1'b0));
+  assign lsu_va_noncanon_i =
+      !((&lsu_vaddr_i[G6LCCfg.VLEN-1:G6LCCfg.SV-1]) == 1'b1 ||
+        (|lsu_vaddr_i[G6LCCfg.VLEN-1:G6LCCfg.SV-1]) == 1'b0);
+  assign lsu_noncanon_i = en_ld_st_translation_i && lsu_va_noncanon_i;
+
+`ifdef G6LC_MUT_MMU_NONCANON_WALK
+  assign itlb_lu_access = icache_areq_i.fetch_req;
   assign dtlb_lu_access = lsu_req_i & !misaligned_ex_i.valid;
+`else
+  assign itlb_lu_access = icache_areq_i.fetch_req &
+                          (enable_translation_i || enable_g_translation_i) &
+                          ~fetch_noncanon_i;
+  assign dtlb_lu_access = lsu_req_i & !misaligned_ex_i.valid &
+                          (en_ld_st_translation_i || en_ld_st_g_translation_i) &
+                          !lsu_noncanon_i;
+`endif
   // T6b-2b: instruction-side lookups use the fetch hart's context, data-side
   // lookups the LSU request hart's.
   assign itlb_lu_asid   = v_i ? fet_vs_asid_i : fet_asid_i;
@@ -421,6 +447,7 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
   logic [STLB_DLY:0][G6LCCfg.VMID_WIDTH-1:0] itlb_vmid_dly, dtlb_vmid_dly;
   logic [STLB_DLY:0][$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0]
       itlb_hart_dly, dtlb_hart_dly;
+  riscv::priv_lvl_t [STLB_DLY:0] itlb_priv_dly, dtlb_priv_dly;
 
   logic mmu_req_flush;
   assign mmu_req_flush = flush_i | flush_tlb_i | flush_tlb_vvma_i | flush_tlb_gvma_i;
@@ -430,13 +457,11 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
   // with the request presented NOW (current page offset, registered beside
   // the current vaddr), so it may only count as a hit when it belongs to
   // that request: an access was looked up STLB_DLY cycles ago for the same
-  // page and context. Without this a new request saw the previous
-  // request's hit and PTE for STLB_DLY cycles (wrong frame across a page
-  // change), and a one-cycle hole in a held request turned the hit of the
-  // cycle before the hole into a miss two cycles later. The miss router
-  // keeps the unqualified verdict with its own delayed request record.
+  // page and context (including privilege level, so U<->S traps/srets without
+  // an ASID change never deliver stale-privilege hits or spurious faults).
   // STLB_DLY == 0: both terms are the constant 1 (the unstaged netlist).
   logic itlb_ans_cur, dtlb_ans_cur, itlb_lu_hit_fe, dtlb_lu_hit_lsu;
+`ifdef G6LC_MUT_MMU_STLB_NO_PRIV_CUR
   assign itlb_ans_cur = (STLB_DLY == 0) ? 1'b1 :
       (itlb_acc_dly[STLB_DLY] &&
        (itlb_va_dly[STLB_DLY][G6LCCfg.VLEN-1:12] == icache_areq_i.fetch_vaddr[G6LCCfg.VLEN-1:12]) &&
@@ -447,8 +472,38 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
        (dtlb_va_dly[STLB_DLY][G6LCCfg.VLEN-1:12] == lsu_vaddr_i[G6LCCfg.VLEN-1:12]) &&
        (dtlb_asid_dly[STLB_DLY] == dtlb_lu_asid) && (dtlb_vmid_dly[STLB_DLY] == vmid_i) &&
        (dtlb_hart_dly[STLB_DLY] == lsu_hart_i));
+`else
+  assign itlb_ans_cur = (STLB_DLY == 0) ? 1'b1 :
+      (itlb_acc_dly[STLB_DLY] &&
+       (itlb_va_dly[STLB_DLY][G6LCCfg.VLEN-1:12] == icache_areq_i.fetch_vaddr[G6LCCfg.VLEN-1:12]) &&
+       (itlb_asid_dly[STLB_DLY] == itlb_lu_asid) && (itlb_vmid_dly[STLB_DLY] == fet_vmid_i) &&
+       (itlb_hart_dly[STLB_DLY] == fetch_hart_i) && (itlb_priv_dly[STLB_DLY] == priv_lvl_i));
+  assign dtlb_ans_cur = (STLB_DLY == 0) ? 1'b1 :
+      (dtlb_acc_dly[STLB_DLY] &&
+       (dtlb_va_dly[STLB_DLY][G6LCCfg.VLEN-1:12] == lsu_vaddr_i[G6LCCfg.VLEN-1:12]) &&
+       (dtlb_asid_dly[STLB_DLY] == dtlb_lu_asid) && (dtlb_vmid_dly[STLB_DLY] == vmid_i) &&
+       (dtlb_hart_dly[STLB_DLY] == lsu_hart_i) && (dtlb_priv_dly[STLB_DLY] == ld_st_priv_lvl_i));
+`endif
   assign itlb_lu_hit_fe  = itlb_lu_hit & itlb_ans_cur;
   assign dtlb_lu_hit_lsu = dtlb_lu_hit & dtlb_ans_cur;
+
+  // Stale-miss suppression for staged TLBs (STLB_DLY >= 1): only forward a
+  // delayed TLB miss to the shared TLB / miss router -> PTW if the requester
+  // is still presenting that same page and context. Prevents 1-cycle transient
+  // windows (e.g. M-mode 0x800004f0 on mret before the registered redirect
+  // lands, or cancelled speculative loads) from launching ~25-cycle dead PTW
+  // walks (~16.5k fetch + ~4.6k data phys-alias walks observed in r127m).
+  logic itlb_miss_access, dtlb_miss_access;
+`ifdef G6LC_MUT_MMU_STALE_MISS_WALK
+  assign itlb_miss_access = itlb_acc_dly[STLB_DLY];
+  assign dtlb_miss_access = dtlb_acc_dly[STLB_DLY];
+`elsif G6LC_MUT_MMU_SPEC_WALK
+  assign itlb_miss_access = itlb_acc_dly[STLB_DLY] & itlb_ans_cur & icache_areq_i.fetch_req;
+  assign dtlb_miss_access = dtlb_acc_dly[STLB_DLY] & dtlb_ans_cur & lsu_req_i;
+`else
+  assign itlb_miss_access = itlb_acc_dly[STLB_DLY] & itlb_ans_cur & icache_areq_i.fetch_req;
+  assign dtlb_miss_access = dtlb_acc_dly[STLB_DLY] & dtlb_ans_cur & lsu_req_i & ~lsu_no_walk_i;
+`endif
 
   // stage 0 is the live request (killed on flush); stages 1..STLB_DLY are
   // the delay registers. STLB_DLY==0 (TlbStages==1) means the shared TLB
@@ -463,6 +518,8 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
   assign dtlb_vmid_dly[0] = vmid_i;
   assign itlb_hart_dly[0] = fetch_hart_i;
   assign dtlb_hart_dly[0] = lsu_hart_i;
+  assign itlb_priv_dly[0] = priv_lvl_i;
+  assign dtlb_priv_dly[0] = ld_st_priv_lvl_i;
 
   if (STLB_DLY > 0) begin : gen_stlb_dly
     always_ff @(posedge clk_i or negedge rst_ni) begin : p_stlb_req_dly
@@ -478,6 +535,8 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
           dtlb_vmid_dly[s] <= '0;
           itlb_hart_dly[s] <= '0;
           dtlb_hart_dly[s] <= '0;
+          itlb_priv_dly[s] <= riscv::PRIV_LVL_M;
+          dtlb_priv_dly[s] <= riscv::PRIV_LVL_M;
         end
       end else begin
         for (int unsigned s = 1; s <= STLB_DLY; s++) begin
@@ -491,6 +550,8 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
           dtlb_vmid_dly[s] <= dtlb_vmid_dly[s-1];
           itlb_hart_dly[s] <= itlb_hart_dly[s-1];
           dtlb_hart_dly[s] <= dtlb_hart_dly[s-1];
+          itlb_priv_dly[s] <= itlb_priv_dly[s-1];
+          dtlb_priv_dly[s] <= dtlb_priv_dly[s-1];
         end
       end
     end
@@ -525,11 +586,11 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
         .dtlb_hart_i  (dtlb_hart_dly[STLB_DLY]),
         // from TLBs
         // did we miss?
-        .itlb_access_i(itlb_acc_dly[STLB_DLY]),
+        .itlb_access_i(itlb_miss_access),
         .itlb_hit_i   (itlb_lu_hit),
         .itlb_vaddr_i (itlb_va_dly[STLB_DLY]),
 
-        .dtlb_access_i(dtlb_acc_dly[STLB_DLY]),
+        .dtlb_access_i(dtlb_miss_access),
         .dtlb_hit_i   (dtlb_lu_hit),
         .dtlb_vaddr_i (dtlb_va_dly[STLB_DLY]),
 
@@ -576,11 +637,11 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
         .ld_st_v_i     (ld_st_v_i),
 
         // from TLBs — same delayed verdict-aligned bundle as the table arm
-        .itlb_access_i(itlb_acc_dly[STLB_DLY]),
+        .itlb_access_i(itlb_miss_access),
         .itlb_hit_i   (itlb_lu_hit),
         .itlb_vaddr_i (itlb_va_dly[STLB_DLY]),
 
-        .dtlb_access_i(dtlb_acc_dly[STLB_DLY]),
+        .dtlb_access_i(dtlb_miss_access),
         .dtlb_hit_i   (dtlb_lu_hit),
         .dtlb_vaddr_i (dtlb_va_dly[STLB_DLY]),
 
@@ -712,23 +773,6 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
     // AXI decode error), or when PTW performs walk due to ITLB miss and raises
     // an error.
     if ((enable_translation_i || enable_g_translation_i)) begin
-      // If second-level address translation is enabled:
-      // - in VS stage, check that all bits [G6LCCfg.VLEN-1:G6LCCfg.SV-1] are equal
-      // - in pure G stage (SV39x4 mode), [G6LCCfg.VLEN-1:G6LCCfg.GPLEN] must be zero.
-      // - in pure G stage (SV32x4 mode), no check is needed.
-      if ((enable_translation_i && (icache_areq_i.fetch_req && !((&icache_areq_i.fetch_vaddr[G6LCCfg.VLEN-1:G6LCCfg.SV-1]) == 1'b1 || (|icache_areq_i.fetch_vaddr[G6LCCfg.VLEN-1:G6LCCfg.SV-1]) == 1'b0)))
-          || (enable_g_translation_i && !enable_translation_i && G6LCCfg.IS_XLEN64 && (|icache_areq_i.fetch_vaddr[G6LCCfg.VLEN-1:G6LCCfg.GPLEN] != 1'b0))) begin
-        icache_areq_o.fetch_exception.cause = riscv::INSTR_PAGE_FAULT;
-        icache_areq_o.fetch_exception.valid = 1'b1;
-        if (G6LCCfg.TvalEn)
-          icache_areq_o.fetch_exception.tval = G6LCCfg.XLEN'(icache_areq_i.fetch_vaddr);
-        if (G6LCCfg.RVH) begin
-          icache_areq_o.fetch_exception.tval2 = '0;
-          icache_areq_o.fetch_exception.tinst = '0;
-          icache_areq_o.fetch_exception.gva   = v_i;
-        end
-      end
-
       icache_areq_o.fetch_valid = 1'b0;
 
       final_fetch_ppn = (enable_g_translation_i && G6LCCfg.RVH)? itlb_g_content.ppn : itlb_content.ppn;
@@ -747,11 +791,41 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
         icache_areq_o.fetch_paddr[PPNWMin:12] = icache_areq_i.fetch_vaddr[PPNWMin:12];
 
       end
+      // If second-level address translation is enabled:
+      // - in S/VS stage, check that all bits [G6LCCfg.VLEN-1:G6LCCfg.SV-1] are equal
+      // - in pure G stage (SV39x4 mode), [G6LCCfg.VLEN-1:G6LCCfg.GPLEN] must be zero.
+      // - in pure G stage (SV32x4 mode), no check is needed.
+`ifdef G6LC_MUT_MMU_NONCANON_WALK
+      if (icache_areq_i.fetch_req && fetch_noncanon_i) begin
+        icache_areq_o.fetch_exception.cause = riscv::INSTR_PAGE_FAULT;
+        icache_areq_o.fetch_exception.valid = 1'b1;
+        if (G6LCCfg.TvalEn)
+          icache_areq_o.fetch_exception.tval = G6LCCfg.XLEN'(icache_areq_i.fetch_vaddr);
+        if (G6LCCfg.RVH) begin
+          icache_areq_o.fetch_exception.tval2 = '0;
+          icache_areq_o.fetch_exception.tinst = '0;
+          icache_areq_o.fetch_exception.gva   = v_i;
+        end
+      end
+      if (itlb_lu_hit_fe) begin
+`else
+      if (icache_areq_i.fetch_req && fetch_noncanon_i) begin
+        icache_areq_o.fetch_valid           = 1'b1;
+        icache_areq_o.fetch_exception.cause = riscv::INSTR_PAGE_FAULT;
+        icache_areq_o.fetch_exception.valid = 1'b1;
+        if (G6LCCfg.TvalEn)
+          icache_areq_o.fetch_exception.tval = G6LCCfg.XLEN'(icache_areq_i.fetch_vaddr);
+        if (G6LCCfg.RVH) begin
+          icache_areq_o.fetch_exception.tval2 = '0;
+          icache_areq_o.fetch_exception.tinst = '0;
+          icache_areq_o.fetch_exception.gva   = v_i;
+        end
       // ---------//
       // ITLB Hit
       // --------//
       // if we hit the ITLB output the request signal immediately
-      if (itlb_lu_hit_fe) begin
+      end else if (itlb_lu_hit_fe) begin
+`endif
         icache_areq_o.fetch_valid = icache_areq_i.fetch_req;
         if (G6LCCfg.RVH && i_g_st_access_err) begin
           icache_areq_o.fetch_exception.cause = riscv::INSTR_GUEST_PAGE_FAULT;
@@ -817,7 +891,11 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
               icache_areq_o.fetch_exception.gva   = v_i;
             end
           end
+`ifdef G6LC_MUT_MMU_WALK_SPURIOUS_EX
         end else begin
+`else
+        end else if (ptw_access_exception) begin
+`endif
           icache_areq_o.fetch_exception.cause = riscv::INSTR_ACCESS_FAULT;
           icache_areq_o.fetch_exception.valid = 1'b1;
           if (G6LCCfg.TvalEn)  // To confirm this is the right TVAL
@@ -940,8 +1018,10 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
     // store into a STORE_PAGE_FAULT on a valid, writable page (Linux
     // jent_memaccess: sd to the VMAP stack, PTE VRW-GAD, no PTW error;
     // ooo_mem_min stage 52).
-    canonical_addr_check = (lsu_req_q && chk_en_ld_st_translation &&
-           !((&lsu_vaddr_q[G6LCCfg.VLEN-1:G6LCCfg.SV-1]) == 1'b1 || (|lsu_vaddr_q[G6LCCfg.VLEN-1:G6LCCfg.SV-1]) == 1'b0));
+    // Pre-computed on lsu_vaddr_i and registered as lsu_va_noncanon_q so
+    // data_interface reads a 1-bit flop instead of a 26-bit reduction ahead
+    // of the DTLB/PTW response select (preserves T36 request-stage alignment).
+    canonical_addr_check = lsu_req_q && chk_en_ld_st_translation && lsu_va_noncanon_q;
 
     // Check if the User flag is set, then we may only access it in supervisor mode
     // if SUM is enabled
@@ -988,9 +1068,13 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
 
 
       // ---------
-      // DTLB Hit
+      // DTLB Hit (or non-canonical VA fault, which suppresses DTLB/PTW)
       // --------
+`ifdef G6LC_MUT_MMU_NONCANON_WALK
       if (dtlb_hit_q && lsu_req_q) begin
+`else
+      if ((dtlb_hit_q || canonical_addr_check) && lsu_req_q) begin
+`endif
         lsu_valid_o = 1'b1;
         // exception priority:
         // PAGE_FAULTS have higher priority than ACCESS_FAULTS
@@ -1001,7 +1085,7 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
         if (lsu_is_store_q) begin
           // check if the page is write-able and we are not violating privileges
           // also check if the dirty flag is set
-          if(G6LCCfg.RVH && chk_en_ld_st_g_translation && (!dtlb_gpte_q.w || d_g_st_access_err || !dtlb_gpte_q.d)) begin
+          if(G6LCCfg.RVH && chk_en_ld_st_g_translation && !canonical_addr_check && (!dtlb_gpte_q.w || d_g_st_access_err || !dtlb_gpte_q.d)) begin
             lsu_exception_o.cause = riscv::STORE_GUEST_PAGE_FAULT;
             lsu_exception_o.valid = 1'b1;
             if (G6LCCfg.TvalEn)
@@ -1028,7 +1112,7 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
           end
           // this is a load
         end else begin
-          if (G6LCCfg.RVH && d_g_st_access_err) begin
+          if (G6LCCfg.RVH && d_g_st_access_err && !canonical_addr_check) begin
             lsu_exception_o.cause = riscv::LOAD_GUEST_PAGE_FAULT;
             lsu_exception_o.valid = 1'b1;
             if (G6LCCfg.TvalEn)
@@ -1177,6 +1261,7 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (~rst_ni) begin
       lsu_vaddr_q     <= '0;
+      lsu_va_noncanon_q <= 1'b0;
       lsu_gpaddr_q    <= '0;
       lsu_req_q       <= '0;
       dtlb_pte_q      <= '0;
@@ -1199,6 +1284,7 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
       end
     end else begin
       lsu_vaddr_q     <= lsu_vaddr_n;
+      lsu_va_noncanon_q <= lsu_va_noncanon_i;
       lsu_req_q       <= lsu_req_n;
       dtlb_pte_q      <= dtlb_pte_n;
       dtlb_hit_q      <= dtlb_hit_n;

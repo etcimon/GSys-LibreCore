@@ -342,6 +342,69 @@ module cva6_tlb
   // ------------------
   // Update and Flush
   // ------------------
+  // Fill-overlap eviction (parity with g6lc_tlb.sv r129 multi-hit fix):
+  // whenever a fill overlaps one or more live entries (same translation or
+  // superpage/NAPOT/global overlap), overwrite the lowest overlapped slot and
+  // evict any remaining overlapped slots so multi-hit cannot occur.
+  localparam int unsigned LVW = CVA6Cfg.VpnLen / CVA6Cfg.PtLevels;
+  localparam int unsigned NLV = CVA6Cfg.PtLevels + HYP_EXT;
+
+  function automatic logic [CVA6Cfg.PtLevels-1:0] wild_levels(
+      input logic [CVA6Cfg.PtLevels-2:0][HYP_EXT:0] is_page);
+    logic [CVA6Cfg.PtLevels-1:0] w;
+    w = '0;
+    for (int unsigned l = 0; l + 1 < CVA6Cfg.PtLevels; l++)
+      for (int unsigned x = l + 1; x < CVA6Cfg.PtLevels; x++)
+        w[l] = w[l] | (|is_page[CVA6Cfg.PtLevels-1-x]);
+    return w;
+  endfunction
+
+  logic [NLV-1:0][LVW-1:0]     fill_vpn;
+  logic [CVA6Cfg.PtLevels-1:0] fill_wild;
+  logic                        fill_s_en, fill_g_en, fill_fire;
+  logic [TLB_ENTRIES-1:0]      fill_ovl, fill_ovl_first, fill_we;
+
+  assign fill_vpn  = (NLV * LVW)'(update_i.vpn);
+  assign fill_wild = wild_levels(update_i.is_page);
+  assign fill_s_en = update_i.v_st_enbl[0];
+  assign fill_g_en = (HYP_EXT != 0) && update_i.v_st_enbl[HYP_EXT];
+  assign fill_fire = update_i.valid && !lu_hit_o;
+
+  for (genvar e = 0; e < TLB_ENTRIES; e++) begin : gen_fill_ovl
+    logic [CVA6Cfg.PtLevels-1:0] wild;
+    logic [NLV-1:0]              lv_meet;
+    logic                        napot, ctx_same;
+    assign wild  = wild_levels(tags_q[e].is_page) | fill_wild;
+    assign napot = CVA6Cfg.SvnapotEn && (tags_q[e].is_napot_64k || update_i.is_napot_64k);
+    for (genvar l = 0; l < NLV; l++) begin : gen_lv
+      if (l == 0) begin : gen_l0
+        assign lv_meet[l] = wild[l] ||
+            ((tags_q[e].vpn[l][LVW-1:4] == fill_vpn[l][LVW-1:4]) &&
+             (napot || (tags_q[e].vpn[l][3:0] == fill_vpn[l][3:0])));
+      end else if (l < CVA6Cfg.PtLevels) begin : gen_ln
+        assign lv_meet[l] = wild[l] || (tags_q[e].vpn[l] == fill_vpn[l]);
+      end else begin : gen_lgpa
+        assign lv_meet[l] = fill_s_en || (tags_q[e].vpn[l] == fill_vpn[l]);
+      end
+    end
+    assign ctx_same =
+        (tags_q[e].v_st_enbl == update_i.v_st_enbl) &&
+        (!HART_TAG  || (tags_q[e].hart == update_i.hart)) &&
+        (!fill_g_en || (tags_q[e].vmid == update_i.vmid)) &&
+        (!fill_s_en || (tags_q[e].asid == update_i.asid) ||
+         content_q[e].pte.g || update_i.content.g);
+    assign fill_ovl[e] = tags_q[e].valid && ctx_same && (&lv_meet);
+  end
+
+  for (genvar e = 0; e < TLB_ENTRIES; e++) begin : gen_fill_ovl_first
+    if (e == 0) begin : gen_e0
+      assign fill_ovl_first[0] = fill_ovl[0];
+    end else begin : gen_en
+      assign fill_ovl_first[e] = fill_ovl[e] & ~(|fill_ovl[e-1:0]);
+    end
+  end
+  assign fill_we = (|fill_ovl) ? fill_ovl_first : replace_en;
+
   always_comb begin : update_flush
     tags_n                 = tags_q;
     content_n              = content_q;
@@ -428,8 +491,10 @@ module cva6_tlb
           else if ((gpaddr_to_be_flushed_is0) && (vmid_to_be_flushed_i == tags_q[i].vmid) && (!vmid_to_be_flushed_is0))
             tags_n[i].valid = 1'b0;
         end
-        // normal replacement
-      end else if (update_i.valid & replace_en[i] & !lu_hit_o) begin
+        // normal replacement (overlap-safe)
+      end else if (fill_fire && fill_ovl[i] && !fill_we[i]) begin
+        tags_n[i].valid = 1'b0;
+      end else if (fill_fire && fill_we[i]) begin
         vpn_to_store = update_i.vpn;
         if (update_i.is_napot_64k && CVA6Cfg.SvnapotEn) begin
           // Svnapot: For a NAPOT entry, normalize the VPN by clearing the lower bits before storage

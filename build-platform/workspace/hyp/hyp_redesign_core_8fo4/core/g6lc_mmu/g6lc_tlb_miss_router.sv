@@ -89,8 +89,14 @@ module g6lc_tlb_miss_router #(
   assign stage_en = {{v_i, g_st_enbl_i, s_st_enbl_i}, {ld_st_v_i, g_ld_st_enbl_i, s_ld_st_enbl_i}};
 
   assign allow_req = (walk_q == IDLE) && !flush_i && !flush_vvma_i && !flush_gvma_i;
+`ifdef G6LC_MUT_MMU_ITLB_BLOCK_DHIT
   assign pick_i = allow_req && (|stage_en[1][HYP_EXT:0]) &&
                   itlb_access_i && !itlb_hit_i && !dtlb_access_i;
+`else
+  // Yield to DTLB only on an actual DTLB miss, not a DTLB hit.
+  assign pick_i = allow_req && (|stage_en[1][HYP_EXT:0]) &&
+                  itlb_access_i && !itlb_hit_i && !(dtlb_access_i && !dtlb_hit_i);
+`endif
   assign pick_d = allow_req && (|stage_en[0][HYP_EXT:0]) &&
                   dtlb_access_i && !dtlb_hit_i;
 

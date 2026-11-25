@@ -233,23 +233,23 @@ module g6lc_fe_override
   // L2 live[]: drop slots with pc < present_exp. Same-window sequential HIT
   // of a forward jump target must not re-issue the +offset/ret prefix; direct
   // jal/call are kept (slot_keep_link). Carried verbatim from the reference.
+  // Parallel per-slot prefix filter with split 32-bit hi/lo >= compare
+  // (replaces procedural NrInstr loop calling nested 3-deep package functions).
   logic [NrInstr-1:0] instruction_valid;
-  always_comb begin
-    for (int unsigned i = 0; i < NrInstr; i++) begin
-      instruction_valid[i] = g6lc_fetch_pkg::slot_live(
-          l_vld_q[i],
-          1'b1,
-          g6lc_fetch_pkg::slot_keep_link(
-              g6lc_fetch_pkg::slot_ge_expected(
+  for (genvar i = 0; i < NrInstr; i++) begin : gen_slot_live
+    logic [63:0] addr64;
+    logic        hi_gt, hi_eq, lo_ge, ge_exp, keep_link;
+    assign addr64    = 64'(l_addr_q[i]);
+    assign hi_gt     = (addr64[63:32] >  l_present_exp_q[63:32]);
+    assign hi_eq     = (addr64[63:32] == l_present_exp_q[63:32]);
+    assign lo_ge     = (addr64[31:0]  >= l_present_exp_q[31:0]);
 `ifdef G6LC_NO_PREFIX_FILTER
-                  1'b1,
+    assign ge_exp    = 1'b1;
 `else
-                  (i == 0) && l_unaligned_q,
+    assign ge_exp    = ((i == 0) && l_unaligned_q) || hi_gt || (hi_eq && lo_ge);
 `endif
-                  64'(l_addr_q[i]),
-                  l_present_exp_q),
-              rvi_jump_i[i] | rvc_jump_i[i] | rvi_call_i[i] | rvc_call_i[i]));
-    end
+    assign keep_link = ge_exp || rvi_jump_i[i] || rvc_jump_i[i] || rvi_call_i[i] || rvc_call_i[i];
+    assign instruction_valid[i] = l_vld_q[i] && keep_link;
   end
 
   // direct targets as one three-operand sum each (base + off + imm)

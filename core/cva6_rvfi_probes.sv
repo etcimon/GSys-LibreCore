@@ -99,7 +99,7 @@ module cva6_rvfi_probes
     instr.lsu_ctrl_vaddr = lsu_ctrl_i.vaddr;
     instr.lsu_ctrl_fu = lsu_ctrl_i.fu;
     instr.lsu_ctrl_op = lsu_ctrl_i.operation;
-    instr.lsu_ctrl_be = lsu_ctrl_i.be;
+    instr.lsu_ctrl_be = lsu_ctrl_i.valid ? lsu_ctrl_i.be : '0;
     instr.lsu_ctrl_trans_id = lsu_ctrl_i.trans_id;
 
     instr.wbdata = wbdata_i;

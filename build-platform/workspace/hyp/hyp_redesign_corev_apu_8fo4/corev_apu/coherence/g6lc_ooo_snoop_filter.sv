@@ -71,6 +71,19 @@ assign ready_o = initialized_q;
     assign present_o[c] = result_valid_o ? read_data[8*c] : 1'b1;
   end
 
+  // XOR-fold the 4 KiB page index into the signature index (still a 100%
+  // conservative superset) so per-core private stacks / sbi_scratch pages at
+  // identical 4 KiB offsets do not 100% alias and cause broadcast invalidations.
+  function automatic logic [IDX_W-1:0] sf_idx(input logic [ADDR_WIDTH-1:0] a);
+    if (NR_ENTRIES <= 1) return '0;
+`ifndef G6LC_MUT_SF_NO_PAGE_XOR
+    else if (OFF + 2 * IDX_W <= ADDR_WIDTH)
+      return a[OFF +: IDX_W] ^ a[OFF + IDX_W +: IDX_W];
+`endif
+    else
+      return a[OFF +: IDX_W];
+  endfunction
+
   always_comb begin
     request = 1'b0;
     write_enable = 1'b0;
@@ -85,11 +98,11 @@ assign ready_o = initialized_q;
       byte_enable = '1;
     end else if (lookup_valid_i) begin
       request = 1'b1;
-      address = NR_ENTRIES <= 1 ? '0 : lookup_addr_i[OFF +: IDX_W];
+      address = sf_idx(lookup_addr_i);
     end else if (alloc_valid_i) begin
       request = 1'b1;
       write_enable = 1'b1;
-      address = NR_ENTRIES <= 1 ? '0 : alloc_addr_i[OFF +: IDX_W];
+      address = sf_idx(alloc_addr_i);
       byte_enable[alloc_core_i] = 1'b1;
     end
   end

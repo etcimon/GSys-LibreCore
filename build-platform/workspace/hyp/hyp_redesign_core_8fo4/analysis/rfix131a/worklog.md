@@ -8799,3 +8799,1021 @@ Local WSL is usable for host-side analysis and artifact work: `rsync`, `python3`
 ### Open timing/configurability review item for RC5b
 
 The RC5b guard adds a same-cycle `valid_i && trans_id_i == commit_trans_id_i` term into `commit_tid_in_s1` / `commit_ready_o`. Functionally this closes the `NrStorePipeRegs==0` beat1-arrival race, and the isolated leaf scenario passes. However, it is also a candidate combinational path from store completion/arrival into commit readiness. Before declaring the fix timing-final, quantify the path in the hyp8 8-FO4 timing flow or re-express it through existing staged state if the cone is material. Do not weaken the functional guard merely for timing; if the cone is too long, pipeline or restructure the commit arbitration while preserving the atomic two-beat Zicclsm commit semantics.
+
+## 2026-11-25T11:05Z — t4 harvest correction, witness frontier status, and tracedb state
+
+### Directed harvest / exact grading terminology
+
+`hyp8-zicclsm-all-t4` completed the three directed runs. The exact log text matters:
+
+- `mc_zicclsm_ooo_overlap`: outer harness banner `*** FAILED *** (tohost = 125)` after 45,770 cycles, but `mc_verdict` reports `HELD ... held_mask=1110 retired_mask=0001` and `program exit code 0`.
+- `hyp8_zicclsm`: same benign held-125 overlay after 3,052 cycles, `program exit code 0`.
+- `mc_store_load_new_line`: `*** SUCCESS *** (tohost = 0)` after 500,494 cycles, `program exit code 0`.
+
+Per `run_hyp8_mc_directed.py` lines 273-300, the authoritative ELF result is `program exit code` (`tracer_exit[31:1]`). The 125 overlay only means secondary cores were still clock-held when the primary finished; it is explicitly graded benign when `progExit=0`. Thus the zicclsm directed suite is a functional PASS, but it is **not** a literal `tohost=1` banner pass. Saying "tohost=1" is shorthand for the ELF's successful tohost write/exit-zero encoding, not the outer overlaid harness code.
+
+### phys78 is not the current pending fix
+
+Re-read of the rfix131a evidence disproves the earlier handoff summary's statement that a phys78 rename-recover fix is still pending. The worklog section "RC4 RESOLVED" records that the phys78 theory was overturned by `+disp_trace`/LSQ evidence: `tid=17` did write back phys78 and wake consumers. The deterministic 14.5M printc freeze was instead RC4, the `g6lc_zicclsm` OoO TID-swallow of `tid=48`, already fixed and leaf/directed verified. Do not implement the old rename-recover phys78 candidates unless a new post-RC4 witness produces fresh evidence for them.
+
+### Live witness status at 11:04Z
+
+All three witness processes remain alive at ~199% CPU each. Correct process matching must use `Variane_testharness .* localmc-stage`; the integration model paths do not contain the witness tag strings.
+
+Flushed evidence only (not actual internal cycle):
+
+- `hyp8-witness-zicclsmfix` / RC4-only / 20M budget: latest flushed stall census cycle 12M; boot hart retired 3,972,533 and IPC is still rising (0.331 at 12M). No UART, no Linux banner, no tohost. It has not yet positively crossed the 14.5M printc frontier in flushed evidence.
+- `hyp8-witness-zicclsm-all3` / RC4+RC5+RC6 / 50M budget: latest flushed cycle 8M; boot hart retired 2,261,802 in stall census and 2,270,327 in cycprog at `pc=0x800129ce` (`fdt_next_tag`). No UART/Linux/tohost.
+- `hyp8-witness-zicclsm-all4` / full RC4+RC5+RC5b+RC6 / 50M budget: latest flushed cycle 6M; boot hart retired 1,392,336 in stall census and 1,397,786 in cycprog at `pc=0x800049da` (`sbi_strlen`). No UART/Linux/tohost.
+
+Boot-hart retirement is not flat in any witness. The identical early trajectories across models are the deterministic cold-boot path. Secondary harts parked at `wfi` in OpenSBI HSM remain benign.
+
+`tracedb` was re-ingested manually at ~11:01Z. Rows match the flushed state: zicclsmfix last_cycle 12M, all3 8M, all4 6M, zero UART rows. The remote `autoingest.sh 300` daemon is alive and will continue ingesting touched active runs every 5 minutes.
+
+Observability note: `run_hyp8_witness.py` now contains a `stdbuf -oL` launch path and records argv/pid in `witness.json`, but these three witnesses predate that launcher version. Their logs therefore flush in large blocks. Do not interpret missing post-12M/8M/6M rows as a freeze while process CPU remains high.
+
+### RC5b timing shape (initial structural audit, not yet a measurement)
+
+The RC5b same-cycle guard consumes `store_buffer.valid_i`. In hyp8 `store_unit.sv`, `trans_id_q`, `st_data_q`, `st_be_q`, etc. are registered stage-1 state, but `st_valid` is combinational store-unit FSM output. Therefore the guard is not a pure registered-valid path even though the TID/data are registered. It still needs explicit measurement in the 8-FO4 flow before being called timing-final. No functional change is justified from timing speculation alone; measure first, and if needed restructure without weakening the atomic two-beat Zicclsm commit contract.
+
+### Testharness performance finding at 11:06Z — current witnesses lack sink clock-skip
+
+The active `hyp8-zicclsm-all-t4` model was built with `/opt/testharness/toolchains/verilator-v5.008-g6lc-350e57f2-wtd36acfe7-pgo`. Its build log explicitly reports:
+
+- `warn: selected verilator_bin does not support policy flag -fclock-skip-sink; skipping`
+- `warn: selected verilator_bin does not support policy flag -fdfg-peephole-pack-bitwise-mux; skipping`
+- `clock-skip: off`
+- Lua `hyp8_mc_fast.lua` still applied the checked source-overlay transforms and `--no-assert`, but not the two runtime/compiler-feature flags.
+
+A remote toolchain that *does* support sink clock-skip exists: `/opt/testharness/toolchains/verilator-v5.008-g6lc-clkskip`. The performance guide records `-fclock-skip-sink` as MT-safe and measured ~2.8x on a sleeping-core microbenchmark at `--threads 1`, ~15% at `--threads 2`, with parity in the all-awake worst case. The current toolchain preference order in `hyp8-build-harness.sh` selects newest `*-pgo` prefixes first, so the non-PGO `clkskip` prefix is not picked automatically.
+
+This is a witness-throughput issue, not an RTL correctness issue. Do not disturb the running witnesses solely for this. For the *next* model build, either explicitly select `VLT_HOME=/opt/testharness/toolchains/verilator-v5.008-g6lc-clkskip` or produce a fresh compiler-PGO build of the clkskip-capable fork, then requalify exactness with the isolated/directed battery before using it as evidence. Current flushed frontier status remains: zicclsmfix 12M, all3 8M, all4 6M; no crossing of 14.5M and no UART yet.
+
+## 2026-11-25T11:12Z — tracedb boot taxonomy and live all3 progress
+
+### Historical pre-RC4 witness taxonomy (`model_sha=14296127f6f3…`)
+
+`hyp8-witness-fast-openwrt` (`run_id=642`) is the cleanest long pre-fix reference:
+
+- boot hart reaches OpenSBI console output: UART starts with ESC around cycle 13M and prints `OpenSBI v1.5` plus most of the ASCII banner at cycle 14M;
+- boot-hart retirement then stops exactly at 5,041,373 with `last_pc=0x8000a012`;
+- hang classifier fires at `pc=0x8000a014` / `hang.fu1.op37` at cycles 14,508,433 and 14,509,433;
+- retirement remains frozen through cycle 49.5M;
+- secondary harts are independently parked in the benign HSM/WFI `0x800085fe/0x8000f726` state from ~4.85M onward.
+
+Runs 653/654/655 have the same model sha and same 8-line partial OpenSBI banner; 654/655 confirm the same `hang.fu1.op37` terminal class. In 655 the denser tracing produces many transient hang dumps at other OpenSBI PCs, but those are observer noise; the stable terminal classification remains the 14.5M `0x8000a014` load freeze. This is the RC4 fingerprint already fixed in `g6lc_zicclsm`.
+
+### Live post-fix comparison
+
+Manual ingest added `hyp8-witness-zicclsm-all3` as new run row `id=677` at cycle 9M. Its boot-hart trajectory exactly matches the pre-fix reference at every common sample:
+
+- 7M: retired 1,835,029 @ `0x8001289e`
+- 8M: retired 2,270,327 @ `0x800129ce`
+- 9M: retired 2,712,395 @ `0x80012898`
+
+Thus RC4/RC5/RC6 did not perturb the deterministic early OpenSBI path, as expected. The first meaningful divergence gate remains the 13M UART start / 14M banner / 14.5M RC4 freeze window. `hyp8-witness-zicclsmfix` is still only flushed through 12M; all4 through 6M. No post-fix UART yet.
+
+### Categorization rule going forward
+
+Classify boot evidence by milestone, not by raw cycle count alone:
+
+1. deterministic FDT/string cold-boot progress (`0x800128xx/0x800049xx`) — currently healthy;
+2. benign secondary-hart HSM parking (`wfi`/`atomic_read`) — ignore as failure evidence;
+3. UART start (~13M) and OpenSBI banner (~14M) — first true console milestone;
+4. old RC4 terminal freeze (`ret=5,041,373`, `last_pc=0x8000a012`, `hang.fu1.op37 @0x8000a014`) — regression signature;
+5. post-RC4 forward progress beyond 14.5M — required proof before investigating later Linux boot failures.
+
+If a post-fix run freezes elsewhere, decode that new stable terminal PC/class and reduce it through the isolated-test flow; do not reuse the RC4/phys78 diagnosis without fresh evidence.
+
+=== 2026-11-25 tracedb consecutive-SQL deep taxonomy (wide+targeted reports) ===
+
+Artifacts: `tracedb_wide_sql_research_20261125.txt` (672 lines) and
+`tracedb_deep_sql_research_20261125.txt` (645 lines), generated by consecutive
+SQLite queries over `/opt/testharness/tracedb/hyp8-trace.sqlite` while the three
+zicclsm witnesses continued. No RTL was changed.
+
+**A. Healthy-boot baseline, not error candidates.** Scalar r127m reached the
+Linux shell with zero assertions. Therefore its recurring `axi.r.untagged`
+(18,131), `ptw.fetch.phys-alias` (16,558), `ptw.data.null` (5,389),
+`ptw.data.phys-alias` (4,635), `ife.*.cause12`, `seqgap`, kernel/user PTW
+classes, `hang.fu2.op62`, and post-shell `idle.wfi` are the authoritative
+benign boot-noise baseline. The duplicate early Linux console lines are the
+kernel command line's simultaneous earlycon/normal-console configuration, not
+a reset or double boot. These classes may cost cycles and observability, but
+must not by themselves motivate RTL changes.
+
+**B. Harness/ingest observer artifacts.** `wbuf.drop` is not currently an error
+class: the per-entry `L1 obligation dropped` print occurs for normal plain
+write-buffer drops, and the authoritative equivalence counters remain
+`dropped=plain`, `tx_single:viol=0`. Budget-end `coh-stall`/`l2-stall` rows
+with `aux=final` are terminal state dumps, not active wedges. Most physdbg
+`hang.fu*` rows in the 12M-14.5M FDT region are transient labels with
+`since_ack` in single digits/low tens; only same-core/same-PC monotonic
+`since_ack` escalation is wedge evidence. The true RC4 terminal signature is
+the persistent `pc=0x8000a014` sequence reaching `since_ack=1,294,567` in
+run655. Future ingest/query work should parse `since_ack` into a column and
+classify persistent/transient/final/idle explicitly rather than treating all
+`hang` rows alike.
+
+**C. Historical or superseded candidates.** `lu_pop_is_presented` at
+r129-deep @375,989,307 is already fixed/narrowed. The MC `store_buffer
+ooo_no_younger_forward` @170,756 was a StoreFwdCycles==3 witness false
+positive, not a younger-store leak; the synthesized F1 age filter remains the
+authoritative check. `mc_smode_shootdown` initially looked like a multi-level
+PTW/D-cache corruption, but was proven to be a test register-clobber bug and
+now passes NPART=1 and NPART=4; that directed test validates 3-level Sv39
+walks, sfence.vma shootdown, cross-core PTE visibility, and SMT parking.
+`axi.r.hole` occurred only in early r131 and is not an active pattern.
+
+**D. Residual architectural candidate.** `g6lc_tlb_hit_onehot0` remains the
+only rare assertion class that is neither conclusively closed nor explained as
+an observer artifact. RFIX-131a-07 already closed the overlap/PLRU class in
+the leaf (`TLB_OVL_*`, six cases x three instances plus mutants), and the
+shootdown test now closes the basic SMP invalidate path. The residual risk is
+narrower: a same-core SFENCE/fill race, especially with two SMT harts sharing
+entries under `HART_TAG=0`, or a race involving differing page sizes/global
+ASID overlap. This is a predicted kernel-phase risk (~300M+ cycles), not a
+current OpenSBI-phase blocker; do not change RTL speculatively. The correct
+next isolated increment is a TLB leaf scenario that concurrently (1) leaves a
+PTW fill in flight, (2) applies sfence/context invalidation, (3) looks up or
+refills overlapping 4K/2M/NAPOT/global translations, and (4) checks one-hot
+plus PLRU/fill victim behavior. Include a mutation that disables overlap
+eviction or lets a stale fill bypass invalidation; it must fail.
+
+**E. Observability improvements worth doing before the next long witness.**
+(1) line-buffered `stdbuf` launches for all new witnesses; (2) carry AXI id/address
+into every `R Response Errored` print so the r127m `axi.r.untagged` class can be
+mapped rather than guessed; (3) tag PTW errors with enough speculation/retire
+context to distinguish wrong-path noise from architecturally consumed faults;
+(4) classify plain write-buffer drops as counters, not events; (5) use the
+monotonic-`since_ack` persistence rule above for hang prioritization.
+
+**F. Live frontier while mining.** The three original witnesses were still at
+~199% CPU but their pre-stdbuf logs remained block-buffered at flushed evidence
+12M (`zicclsmfix`), 9M (`all3`), and 6M (`all4`). No UART/Linux marker has
+appeared in post-fix MC evidence. Thus there is still no new post-RC4 terminal
+failure to reduce. The immediate binary gate remains whether flushed evidence
+crosses UART ~13M/OpenSBI banner ~14M/old freeze ~14.5M or reproduces
+`retired=5,041,373`, `last_pc=0x8000a012`, persistent `hang.fu1.op37` at
+`pc=0x8000a014`.
+
+## 2026-11-25 — tracedb-driven TLB SFENCE/fill residual coverage closed at the leaf
+
+### Implemented updates
+
+1. `verif/regress/remote/hyp8/tracedb/ingest.py` is now deployed remotely and reingested `/opt/testharness/tracedb/hyp8-trace.sqlite` successfully. The new `event_analysis`/`v_event_ex` taxonomy separates primary persistent hangs from observer artifacts, boot baseline noise, benign idle states, progress and verdicts. Reingest produced 669,123 analysis rows in a 340,959,232-byte DB. RC4 terminal rows at 15.75M-15.8M cycles classify as `primary-candidate / hang-persistent`; all three ambiguous `wbuf.drop` lines classify as `observer-artifact / diagnostic-truncated`.
+2. Residual TLB coverage was narrowed to the same-core SFENCE/fill ordering gap not exercised by `mc_smode_shootdown` (whose participating harts are thread0 of separate cores, with SMT siblings parked). The active hyp8 configuration is `UseSharedTlb=0`, per-core `g6lc_tlb`; under `NrHarts=2` + `SmtDrainedHandoff=1`, sibling entries deliberately share the same `HART_TAG=0` behavior.
+3. Added directed coincident SFENCE/fill cases to the existing MMU leaf (`verif/tb/core/tb_g6lc_hyp8_control.sv`):
+   - selective vaddr+ASID flush of an old translation coincident with a non-overlapping PTW fill;
+   - broad x0/x0 flush coincident with an overlapping same-VA replacement fill;
+   - selective flush of a global translation coincident with another fill.
+   The checks intentionally allow either legal microarchitectural order for the coincident new fill (drop or serialize after flush) but require the pre-SFENCE translation never to survive. This avoids over-constraining a future ordered-fill optimization while closing the correctness invariant.
+4. Added review-only mutation `G6LC_MUT_TLB_FILL_BEATS_FLUSH` in `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_mmu/g6lc_tlb.sv`. It is compile-time test scaffolding only; default RTL logic is unchanged. The mutation suppresses SFENCE eviction whenever a coincident fill fires.
+
+### Validation evidence
+
+Closure: `.devin-tmp/hyp8-closure-mmu` (1,017 files) rebuilt after the edits. Remote runs used `/opt/testharness/src/verilator-g6lc-clkskip` as both compiler and runtime (`verilated_funcs.h` sha256 `1248bcd5fbaec2640ef0ef0422a54d948618bb154c0f16a881b78b09b47786a4`).
+
+- Positive leaf, tag `hyp8-mmu-ffrace-t2`: `HYP8_MMU_PASS checked=848 miter=1099`, `rc=0`, no suppressed warning classes. Local evidence: `remote-runs/hyp8-mmu-ffrace-t2/output/sim.log` and `results.json`.
+- Negative control, tag `hyp8-mmu-ffrace-mut`: fails exactly at `FAIL TLB_FF_OLD_GONE_HIT_T0`, `rc=-6`, proving the new race check discriminates the stale-entry ordering defect. Local evidence: `remote-runs/hyp8-mmu-ffrace-mut/output/sim.log` and `results.json`.
+- Both models report identical compiler identities (`verilatorBinSha256 8b390b26e29a5617c9105c3c82abd9ecb4ed2a90d9dbb73a133b38aa7f8e4346`, driver `1da6decbd57bb1e87799bcb22c5d013f9e4d31eb15f2c33c786994f6a421b7b0`); positive/negative model hashes differ as expected.
+
+### Interpretation and frontier
+
+No functional RTL defect was found in the default SFENCE/fill ordering: the existing conservative flush-before-fill behavior already satisfies the architectural invariant. The implemented change is therefore coverage/negative-control completion, not a functional RTL fix. It removes the highest-priority residual same-core TLB ordering unknown identified by the deep tracedb analysis. Remaining kernel-phase TLB risk is now limited to interactions not representable at this leaf boundary (PTW response provenance/epoch ordering and system-level timing), not to the TLB array's coincident flush/fill write rule.
+
+Timing impact: none in the default build; the only RTL delta is inside a review-mutation `ifdef`. Bench/logic impact: none outside verification. `.dts`/spec/config alignment: unchanged.
+
+Witness frontier remains unchanged in flushed evidence: zicclsmfix 12M, all3 9M, all4 6M. The next witness gate remains UART near 13M, OpenSBI banner near 14M, then the old RC4 freeze point near 14.5M. Absence of newer rows is not architectural evidence while the pre-`stdbuf` logs remain block-buffered and the simulators retain high CPU.
+
+## 2026-11-25 — Complete tracedb primary-candidate audit, RC5b 8-FO4 measurement & `store_buffer` parallelization
+
+### 1. Quoting-free remote SQL workflow and `tracedb/query.py` triage reports
+
+- Upgraded `verif/regress/remote/hyp8/tracedb/query.py` and deployed to `/opt/testharness/tracedb/query.py`:
+  - added `buckets` (event counts by `event_analysis.bucket, evidence`), `primary` (grouped `primary-candidate` triage), `event_analysis`-joined `hangs`, and `sql -f <file>` so queries run from uploaded `.sql` files via `testharness_proxy.Remote.push` with zero shell-quoting issues and no remote `sqlite3` CLI dependency.
+  - scoped `sym(pc, rid)` so OpenSBI's `symbol` table (`0x80000000..0x80200000`) is applied only to `kind='witness'` runs, eliminating false OpenSBI symbol labels on baremetal directed tests (`smoke`).
+- Refined `verif/regress/remote/hyp8/tracedb/ingest.py` (`analyze_run_events`) and re-ran `analyze_events` remotely in-place (`REANALYZE_OK`):
+  - checks periodic `census` rows (`kind='periodic'`, `MAX(ret)` per `(hart, cycle)`) to classify non-idle commit-gap series as `context-noise / hang-resolved` when retirement strictly grows across aligned periodic census windows after the gap.
+  - moves `hyp8-osbi-scalar-r128b`'s resolved 4,000-cycle `hang.fu2.op62 @ ffffffff8065b78e` SC-backoff episodes (followed by >640M cycles of active retirement) to `hang-resolved` (now 12 rows across 2 runs: `r127m` and `r128b`), while keeping flat-retirement terminal wedges (`witness-physdbg`, `witness-fast-openwrt`, `witness-iqdump` at `printc+0x40`) in `primary-candidate`.
+
+### 2. Exhaustive audit of every remaining `primary-candidate` and recent non-passing run
+
+Every non-RC4 row in `query.py primary` and every recent non-passing run (`id >= 610`) was audited against logs and RTL:
+
+- `hyp8-osbi-scalar-r127m` / `r128b` `hang.fu2.op62 @ ffffffff8065b78e`: `AMO_LRD` held in `wt_dcache_missunit` state `2 (AMO)` by `g6lc_hyp_exp_backoff` (`sc_backoff_over`); unpaired-SC saturation was already fixed in `r127m`, and both runs resumed retiring millions of instructions afterward.
+- `mc-sleepgate-wake-t1` (`mc_sleep_gate_wake`, run 635, Nov 23 20:36Z): `core0` entered sleep after setting `mtimecmp[0]` and never woke because `p_irq_sync` in `g6lc_hart.sv` was on gated `clk_i`. Already fixed in commit `787af1c6` (Nov 23 22:33Z), which moved `p_irq_sync` onto always-on `clk_uncore_i`.
+- `mc-csrfix-reg-t1` (`mc_shared_line_quiet`, run 641): reached its 600k cycle budget cleanly (`program exit code 0`, no core stopped; prior 800k runs passed at ~663k cycles).
+- Remaining `hang-unresolved` rows in `primary` are all historical pre-fix `mc_cas_lock_handoff`/`zacas_amocas_d`/`mc_l3_stride_scan`/`mini_l2_hot_scan`/`hyp8_spec_bus_clean`/early `rfix131a` diagnostic runs. No new open functional RTL defect was surfaced in tracedb.
+
+### 3. RC5b 8-FO4 measurement and `store_buffer.sv` `commit_tid_present` parallelization
+
+Measured `store_buffer`, `store_unit`, and `commit_stage` locally with `sv-timing/target/release/sv-timing.exe` (`delay-v50`, `--target-mhz 5000 --fo4-ps 20 --budget-margin 0.2`, budget = `8.0 FO4`, `params-hyp8-default.json`):
+
+- Confirmed `store_unit.sv` drives `store_buffer.valid_i` (`store_buffer_valid`) from registered `state_q == VALID_STORE` + `!flush_i && !amo_dup_q && (amo_op_q == AMO_NONE)`, not from combinational `st_cancelled` or `dtlb_hit_i`.
+- RC5b (`commit_tid_in_s1`, `store_buffer.sv:591`) measured **4.00 FO4** (`intoout`, `under_budget`), and `commit_ready_o` (`intoout`, `:594`) measured **4.00 FO4** (`under_budget`). The RC5b functional guard therefore meets the 8-FO4 budget without requiring pipeline weakening.
+- The audit identified that pre-existing `commit_tid_present` (`store_buffer.sv:588`) was **11.75 FO4 (`regtoout`) / 7.40 FO4 (`intoout`)** because of a serial `for`-loop `|=` reduction inside `always_comb`.
+- Replaced the serial `|=` loop in `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/store_buffer.sv` with parallel per-entry `gen_commit_tid_match` wires (`commit_tid_match[DEPTH_SPEC-1:0]`) and a packed reduction `assign commit_tid_present = |commit_tid_match;` (zero latency change, bit-identical boolean logic).
+- Re-measured in `sv-timing` (`delay-v50`):
+  - `regtoout` on `commit_tid_present` -> `commit_ready_o` dropped **11.75 -> 8.75 FO4 (-3.00 FO4)**;
+  - `intoout` dropped **7.40 -> 3.40 FO4 (-4.00 FO4, under half the 8.0 FO4 budget)**;
+  - RC5b `commit_tid_in_s1` remains **4.00 FO4**.
+- Remotely verified on `ovh_calltorch` (tag `hyp8-stq-fo4-t1`, `verilator-g6lc-clkskip`, `tb_g6lc_stq_zicclsm_hyp8`):
+  - positive: `PASS tb_g6lc_stq_zicclsm_hyp8 wr_n=7` (`rc=0`);
+  - `+oracle_negative`: failed `STQ_ZICCLSM_COMMIT_DEADLOCK oracle_negative wr_n=7`;
+  - `-DG6LC_MUT_STQ_ZICCLSM_SINGLE_BEAT`: failed `STQ_ZICCLSM_COMMIT_LOST S1 expected 3 writes, got 2`.
+- Configurability/SoC check: no new parameters or ports; synthesizable `genvar` + `assign`; `.dts`/ISA/DFT unchanged.
+
+### 4. Updated live witness frontier (2026-11-25 12:00Z)
+
+- `hyp8-witness-zicclsmfix`: 12M cycles flushed (no new flush yet; process active at ~199% CPU).
+- `hyp8-witness-zicclsm-all3`: advanced to **10,000,000 cycles** (`retired=3,149,265`, `pc=0x800049e0`, run id 679).
+- `hyp8-witness-zicclsm-all4`: advanced to **7,000,000 cycles** (`retired=1,835,029`, `pc=0x8001289e`, matching `all3` instruction-for-instruction, run id 678).
+- All 9 hang rows across each live witness remain benign `idle.halted @ 0x800085fe` (secondary-hart OpenSBI HSM parking). Decisive gates remain 13M UART / 14M OpenSBI banner / 14.5M pre-RC4 freeze point.
+
+## 2026-11-25 — Deep SQL fault survey: non-canonical VA PTW walk & PMP exception-priority overwrite fixed (both trees)
+
+### 1. Faults surfaced by full-DB SQL pattern survey
+
+Running full-table SQL sweeps over all `event`, `event_analysis`, `census`, `uart`, and `run` rows exposed a genuine RISC-V Sv39 specification violation in `r127m`:
+
+- `ptw.fetch.noncanonical`: `[ptw-err] t=1505156325 vaddr=6a09e667bb67ae80 lvl=0 pptr=0000008212acf0 pte=0000000000000000 instr=1` (twice, at `1505156325` and `1505156333`).
+- `0x6a09e667bb67ae80` is a non-canonical Sv39 VA (`bits[63:39]` != sign-extension of bit 38). Per RISC-V Privileged Spec §4.4.1, a non-canonical VA must raise an immediate page fault and must never initiate address translation / a page-table walk.
+
+Tracing this fault into the RTL exposed **two real architectural defects** in both `hyp_redesign_core_8fo4` and the main `core/` tree:
+
+1. **MMU non-canonical VA walk & missing fault validity (`g6lc_mmu.sv` + `core/cva6_mmu/cva6_mmu.sv`)**:
+   - `itlb_lu_access` and `dtlb_lu_access` were ungated for non-canonical VAs, so non-canonical fetch/load/store requests looked up the TLBs on `vaddr[38:0]` and launched hardware PTW memory walks on a miss (risking spurious aliased TLB fills if the low 39 bits are mapped, or `*_ACCESS_FAULT` overwriting `*_PAGE_FAULT` if the walk hits a PMP/PMA error).
+   - On fetch, lines 719-732 set `fetch_exception = INSTR_PAGE_FAULT` and then immediately cleared `fetch_valid = 1'b0`, stalling the I$ until the illegal PTW walk completed.
+   - On LSU, `canonical_addr_check` was only tested inside `if (dtlb_hit_q && lsu_req_q)` (and after RVH G-stage checks), never on a DTLB miss.
+2. **PMP data-side exception-priority overwrite (`pmp_data_if.sv` + `core/pmp/src/pmp_data_if.sv`)**:
+   - Unlike the fetch path (`pmp_data_if.sv:120`), the data path (`DATA_VERDICT_STAGES=0` and `=2`) ran `if (lsu_valid_i && !data_allow_o)` without checking `!lsu_exception_i.valid`.
+   - Any higher-priority MMU/LSU exception (page fault from non-canonical VA or PTW error, or address-misaligned) whose untranslated/stale `lsu_paddr_i` fell outside an S/U-mode PMP region was silently overwritten with `LD_ACCESS_FAULT` / `ST_ACCESS_FAULT`, violating RISC-V Priv §3.1.15.
+   - Fetch side was also tightened from `cause != INSTR_PAGE_FAULT` to `!fetch_exception.valid` so `INSTR_GUEST_PAGE_FAULT` and PTW faults are equally protected.
+
+### 2. Implemented fixes & 8-FO4 `sv-timing` verification
+
+- `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_mmu/g6lc_mmu.sv` (and mirrored in `core/cva6_mmu/cva6_mmu.sv`):
+  - Compute `fetch_noncanon_i` and `lsu_va_noncanon_i` / `lsu_noncanon_i` at the lookup boundary; gate `itlb_lu_access` and `dtlb_lu_access` off on non-canonical addresses so no TLB lookup or PTW walk occurs.
+  - Answer non-canonical fetch immediately with `icache_areq_o.fetch_valid = 1'b1` and `INSTR_PAGE_FAULT` (`tval = fetch_vaddr`).
+  - Register `lsu_va_noncanon_q <= lsu_va_noncanon_i` (1 flop) so `canonical_addr_check = lsu_req_q && chk_en_ld_st_translation && lsu_va_noncanon_q` (removing the 26-bit reduction from `data_interface`) and route `(dtlb_hit_q || canonical_addr_check) && lsu_req_q` cleanly with `!canonical_addr_check` gating RVH G-stage fault arms.
+  - Added review-only mutation `G6LC_MUT_MMU_NONCANON_WALK`.
+- `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/pmp/src/pmp_data_if.sv` (and mirrored in `core/pmp/src/pmp_data_if.sv`):
+  - Gate PMP access-fault injection on `!lsu_exception_i.valid` (`DATA_VERDICT_STAGES==0`), `!lsu_req2_exception_q.valid` (`DATA_VERDICT_STAGES==2`), and `!icache_areq_o.fetch_exception.valid` (fetch).
+  - Added review-only mutation `G6LC_MUT_PMP_OVERWRITE_EX`.
+- `sv-timing` (`delay-v50`, `--target-mhz 5000 --fo4-ps 20 --budget-margin 0.2`, `params-hyp8-default.json`):
+  - `pmp_data_if`: **17.00 -> 17.00 FO4** (zero regression; data path stays `5.50 FO4`).
+  - `g6lc_mmu`: **24.60 -> 24.15 FO4** (**-0.45 FO4** faster than baseline after registering `lsu_va_noncanon_q` and collapsing into `(dtlb_hit_q || canonical_addr_check)`).
+
+### 3. Remote isolated leaf verification (`ovh_calltorch`, `verilator-g6lc-clkskip`)
+
+- New standalone leaf `verif/tb/core/tb_g6lc_mmu_noncanon_hyp8.sv` (real `g6lc_mmu` + `pmp_data_if`, `Hyp8`, `TlbStages=3`, S-mode PMP denying PA 0):
+  - `hyp8-mmu-noncanon-t3` positive: `PASS tb_g6lc_mmu_noncanon_hyp8 checked=33 ptw_reqs=3` (`rc=0`; zero PTW requests for non-canonical fetch `0x6a09e667bb67ae80`, aliased-mapped non-canonical fetch `0x1234560080002000`, non-canonical load `0x6a09e667bb67ae80`, and non-canonical store `0x0000004000001000`; canonical Sv39 fetch & load still walk and translate).
+  - Mutant `-DG6LC_MUT_MMU_NONCANON_WALK`: failed immediately at `FAIL NC_FET1_IMMED_VALID`.
+  - Mutant `-DG6LC_MUT_PMP_OVERWRITE_EX`: failed at `FAIL NC_LD_PMP_NOT_OVERWRITTEN`.
+- Extended `tb_g6lc_hyp8_pmp` (`verif/tb/core/tb_g6lc_hyp8_control.sv`, case `B5`):
+  - `hyp8-pmp-prio-pos`: `HYP8_PMP_PASS checked=29` (`rc=0`).
+  - `hyp8-pmp-prio-mut` (`-DG6LC_MUT_PMP_OVERWRITE_EX`): failed at `FAIL B5_LD_PF_PRESERVED`.
+- Regression on full MMU leaf (`HYP8_LEAF=mmu`, tag `hyp8-mmu-reg-t1`):
+  - `HYP8_MMU_PASS checked=848 miter=1099` (`rc=0`).
+
+### 4. Live OpenWrt witness milestone (2026-11-25 12:26Z)
+
+- `hyp8-witness-zicclsmfix` (run 681): **crossed Gate 1 (UART start) and reached 14,000,000 cycles** (`ret=4,843,283`, `ipc=0.346`, `n_uart=1`, `[uart-axi-ar] addr=10000014`, `[uart-rd] off=5 data=60`), still running at 199% CPU approaching the old 14.5M RC4 freeze point.
+- `hyp8-witness-zicclsm-all3` (run 679): **10,000,000 cycles** (`ret=3,149,265`, active at 199% CPU).
+- `hyp8-witness-zicclsm-all4` (run 682): advanced to **8,000,000 cycles** (active at 199% CPU).
+
+## 2026-11-25 — Opportunistic SQL pattern fix: stale staged-TLB miss suppression & M-mode TLB gating (`g6lc_mmu.sv`)
+
+### 1. SQL behavioral-deviation evidence (`r127m`)
+
+- `ptw.fetch.phys-alias`: **16,553** wasted S-mode PTW walks on M-mode address `0x00000000800004f0` across a single Linux boot (~every 3,170 cycles on every OpenSBI `ecall`/`mret`), blocking the real `mret` target fetch behind ~25-cycle dead PTW walks.
+- `ptw.data.phys-alias`: **4,635** wasted S-mode PTW walks on OpenSBI scratch addresses `0x80045df0/e00/d80` during the 352.5M-368.1M cycle window (correlated via `uart` line 124 to Linux's `check_unaligned_access()` trap-emulation loop before Zicclsm).
+- Root cause in `g6lc_mmu.sv` (`TlbStages=3`, `STLB_DLY=2`):
+  1. `itlb_lu_access` and `dtlb_lu_access` were active even when translation was disabled (`enable_translation_i == 0 && enable_g_translation_i == 0`), feeding M-mode/Bare physical addresses into the TLB CAMs and delay pipe (`*_acc_dly`).
+  2. `i_miss_router` and `i_shared_tlb` consumed unqualified `itlb_acc_dly[STLB_DLY]` / `dtlb_acc_dly[STLB_DLY]` instead of qualifying with `itlb_ans_cur & icache_areq_i.fetch_req` / `dtlb_ans_cur & lsu_req_i`. Any 1-cycle transient window (like M-mode `0x800004f0` surviving 1 cycle past `mret` before the registered redirect lands, or a cancelled speculative load) popped out 2 cycles later and launched a ~25-cycle dead PTW walk (and stale `dtlb_acc_dly` also suppressed `pick_i`).
+
+### 2. Implemented fix & `sv-timing` check
+
+- `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_mmu/g6lc_mmu.sv` (translation-enable gating mirrored in `core/cva6_mmu/cva6_mmu.sv`):
+  - Gated `itlb_lu_access` on `(enable_translation_i || enable_g_translation_i)` and `dtlb_lu_access` on `(en_ld_st_translation_i || en_ld_st_g_translation_i)` (architecturally transparent in Bare/M-mode; saves TLB CAM activity and prevents M-mode addresses entering `*_acc_dly`).
+  - Added `itlb_miss_access = itlb_acc_dly[STLB_DLY] & itlb_ans_cur & icache_areq_i.fetch_req` and `dtlb_miss_access = dtlb_acc_dly[STLB_DLY] & dtlb_ans_cur & lsu_req_i` feeding both `i_shared_tlb` and `i_miss_router` (bit-identical when `STLB_DLY == 0`, zero added latency on live misses).
+  - Added review-only mutation `G6LC_MUT_MMU_STALE_MISS_WALK`.
+- `sv-timing` (`delay-v50`, `--target-mhz 5000 --fo4-ps 20 --budget-margin 0.2`):
+  - `g6lc_mmu`: **24.15 FO4** (unchanged from post-noncanon improvement; **-0.45 FO4** better than original 24.60 FO4 baseline).
+  - `pmp_data_if`: **17.00 FO4** (unchanged).
+
+### 3. Remote isolated leaf verification (`ovh_calltorch`, tag `hyp8-mmu-stalemiss-t1`)
+
+Extended `verif/tb/core/tb_g6lc_mmu_noncanon_hyp8.sv` with S5 (1-cycle stale fetch redirect `0x4000_04f0 -> 0x8000_2000`) and S6 (1-cycle cancelled load `0x4004_5df0 -> idle`):
+
+- Positive: `PASS tb_g6lc_mmu_noncanon_hyp8 checked=37 ptw_reqs=4` (`rc=0`; zero PTW walks on non-canonical fetch/load/store AND zero PTW walks on 1-cycle stale redirected fetch / cancelled load).
+- `-DG6LC_MUT_MMU_NONCANON_WALK`: failed `FAIL NC_FET1_IMMED_VALID`.
+- `-DG6LC_MUT_PMP_OVERWRITE_EX`: failed `FAIL NC_LD_PMP_NOT_OVERWRITTEN`.
+- `-DG6LC_MUT_MMU_STALE_MISS_WALK`: failed `FAIL STALE_FET_NO_PTW`.
+
+## 2026-11-25 — SQL `kv`/`mc_hub` pattern mining: coherence-hub W-beat/snoop-filter overlap + critical A118 `inv_owed` bug fixed
+
+### 1. SQL evidence (`kv` `mc_cache` / `mc_hub`)
+
+Querying `kv` across all multicore runs surfaced a systemic store-path hold pattern:
+
+- `hyp8-witness-fast-openwrt` / `physdbg`: `aw_fire=269,271`, `hub_aw_hold_other=380,802`, `wbusy=95,630`, `mem_nready=13,669`, `rr_loss=98`.
+- `mc_smode_parallel`: `aw_fire=4,028`, `hub_aw_hold_other=17,712`, `wbusy=4,708`.
+- `mc_l3_stride_scan` / `mc_chase` / `mc_csr_prologue`: `aw_hold / aw_fire = 1.000` (1-cycle `sig_start` snoop-filter lookup per AW), plus a second wasted cycle whenever `w_busy_q == 1` blocked `sig_start` on back-to-back single-beat stores (giving 3 cyc/store instead of 2 cyc/store).
+
+### 2. Two RTL fixes implemented in `g6lc_coherence_hub.sv`
+
+1. **Opportunistic store-throughput improvement (both trees: `hyp_redesign_corev_apu_8fo4/corev_apu/coherence/g6lc_coherence_hub.sv` + `corev_apu/coherence/g6lc_coherence_hub.sv`)**:
+   - Removed `!w_busy_q` from `sig_start` so the next AW's 1-cycle snoop-filter lookup overlaps with the prior AW's W-beat (`aw_grant` still gates on `!w_busy_q` to preserve AXI W-channel ownership).
+   - Simplified `coh_block_ar = OOO_SF && (sig_pending_q || sig_start)` (loop-free; blocks ARs on `sig_start` and while `sig_pending_q`, preserving the snoop-filter superset and single-port alloc/lookup invariants without needlessly blocking ARs when `inv_pend_valid_q` or `aw_ot_full`).
+   - Added review mutation `G6LC_MUT_HUB_SIG_WAIT_WBUSY`.
+2. **Critical pre-existing coherence bug caught and fixed in `hyp_redesign_corev_apu_8fo4/corev_apu/coherence/g6lc_coherence_hub.sv`**:
+   - Running `tb_g6lc_coherence_hub` remotely caught `HUB_B_BEFORE_INVAL` on both `scenario=14` (`OOO=0`) and `scenario=12` (`OOO=1`).
+   - Root cause: refactor A118 removed the `always_comb` driving `inv_wr_target` while leaving `logic [NC-1:0] inv_wr_target;` declared and read at line 1536 (`inv_ot_d[aw_free_slot].inv_owed = |inv_wr_target;`). Undriven `inv_wr_target` folded to `0`, tying `inv_owed = 1'b0` on every write and **completely disabling `ACK_AFTER_INVAL` across all hyp8 multicore writes** (writers could receive B / ATOP-R acks before peer L1 invalidations were delivered or applied).
+   - Fixed by removing the dead `inv_new` / `inv_new_target` / `inv_wr_target` declarations and driving `inv_ot_d[aw_free_slot].inv_owed = aw_may_invalidate && (|inv_wr_cand);` (matching `corev_apu/coherence/g6lc_coherence_hub.sv`). Added review mutation `G6LC_MUT_HUB_NO_INV_OWED`.
+
+### 3. Timing (`sv-timing`) & remote isolated leaf verification (`ovh_calltorch`, tag `hyp8-coh-overlap-t11`)
+
+- `sv-timing` (`delay-v50`, `g6lc_coherence_hub`): **51.50 -> 51.50 FO4** (zero timing regression).
+- Added scenario 28 (`back_to_back_sig_overlap`, 16 back-to-back single-beat cacheable stores under `COH_OOO`) to `verif/tb/l2/tb_g6lc_coherence_hub.sv`.
+- Remote run `hyp8-coh-overlap-t11` (`rc=0`, `verilator-g6lc-clkskip`, hyp8 `corev_apu/coherence` + `l2_cache` + `l3_cache`):
+  - `HUB_BC_PASS count=24` (`OOO=0`, scenarios 0..6, 8..11, 13..15, 17..19, 21..25, 27..28 — including all ACK-after-invalidation, atomic invalidation publication, refill-during-write, same-ID B/R order, and parked ATOP-R tests).
+  - `HUB_OOO_PASS` (`OOO=1, NC=3`, scenarios 0, 1, 3, 8, 12, 26, 28): scenario 12 (`signature_hub`) PASS; scenario 28 (`back_to_back_sig_overlap`) **34 cycles** (`2.12 cyc/store`, `aw=16 w=16 b=16`).
+  - Mutant `-DG6LC_MUT_HUB_SIG_WAIT_WBUSY` on scenario 28: **49 cycles** (`3.06 cyc/store`) -> failed `HUB_B2B_OVERLAP_CYCLES cyc=49 expected <= 40` (**-30.6% latency / +44% back-to-back store throughput** proven A/B).
+  - Mutant `-DG6LC_MUT_HUB_NO_INV_OWED` on scenario 12: failed `HUB_B_BEFORE_INVAL` (reproducing the pre-fix A118 bug).
+  - `COH_L2_0_7_PASS` (`tb_g6lc_coherence_l2`, `USE_L3=0`, scenarios 0..7).
+  - `COH_L3_0_7_PASS` (`tb_g6lc_coherence_l2`, `USE_L3=1`, scenarios 0..7).
+
+### 4. Live OpenWrt witness milestone (2026-11-25 12:46Z)
+
+- `hyp8-witness-zicclsmfix` (run 685): **crossed Gate 2 — printed the full `OpenSBI v1.5` ASCII banner (`n_uart=7` lines, `log_bytes=136,366`)** with zero `[hang]` dumps; next 4 KB flush will cross the old 14.5M RC4 freeze point.
+- `hyp8-witness-zicclsm-all3` (run 684): advanced to **11,000,000 cycles** (active at 199% CPU).
+- `hyp8-witness-zicclsm-all4` (run 682): **8,000,000 cycles** (active at 199% CPU).
+
+## 2026-11-25 — SQL `lu_replay` 182x anomaly & `hub_idle_o` synthesis bug fixed
+
+### 1. SQL evidence (`census` `r129b` vs `r129-deep` / `r127m`)
+
+Comparing `census` at 316M cycles across `TlbStages=1` (`r127m`/`r129-deep`) vs `TlbStages=3` (`r129b-mmustaged-diag2`, active Hyp8 profile):
+
+- `r127m` / `r129-deep` (`TlbStages=1`): `lu_replay=77`, `mem_viol=8,644`, `ret=89,498,766`.
+- `r129b` (`TlbStages=3`): `lu_replay=14,041` (**182x more**), `mem_viol=22,004` (**2.55x more**), `ret=88,298,138` (-1.20M retired insns).
+
+**Root cause in `load_unit.sv` (`LU_TLB_STAGED=1`) + `g6lc_mmu.sv`**:
+- `tr_idle_ok = !SpeculativeSb || dtlb_hit_i || !spec_ld` suppressed `translation_req_o` for every speculative OoO load (`spec_ld == 1`) until `dtlb_hit_i == 1`. Under a 2-cycle staged TLB (`TlbStages >= 2`), `dtlb_hit_i` cannot assert until `translation_req_o` is asserted — a circular catch-22 that prevented every speculative OoO load from probing the DTLB, forcing all non-head loads to ping-pong `IDLE <-> WAIT_SPEC_LOAD` until commit time or `wsl_replay_fire` (14,041 spurious flushes).
+
+### 2. Implemented fixes & `sv-timing` checks
+
+1. **Staged-TLB speculative DTLB probe with PTW suppression (`load_unit.sv`, `load_store_unit.sv`, `g6lc_mmu.sv`)**:
+   - Added `input logic lsu_no_walk_i` to `g6lc_mmu.sv` (wired in `load_store_unit.sv` to `G6LCCfg.OoOEn && G6LCCfg.SpeculativeSb && !st_translation_req && (lsu_ctrl.fu == LOAD) && lsu_ctrl.valid && (lsu_ctrl.trans_id != commit_tran_id_i)`).
+   - Gated `dtlb_miss_access` in `g6lc_mmu.sv` on `& ~lsu_no_walk_i` so speculative DTLB probes return hits after 2 cycles while misses never launch PTW walks (preserving `rfix131a-03`). Added review mutation `G6LC_MUT_MMU_SPEC_WALK`.
+   - In `load_unit.sv`: updated `tr_idle_ok` (`|| LU_TLB_STAGED`), added `tr_spec_hold = LU_TLB_STAGED & state_q[LU_B_WAIT_SPEC_LOAD] & accept_req_w`, updated `pa_capture_state` and the `load_control_dec` reference FSM to match (`rf_translation_req_o == translation_req_o` intact).
+   - `sv-timing` (`delay-v50`): `g6lc_mmu` stays **24.15 FO4** (-0.45 FO4 vs original baseline); `load_unit` stays **35.45 FO4** (in L5; zero regression on `translation_req_o`).
+2. **`hub_idle_o` synthesis/sim fix (`g6lc_coherence_hub.sv`, both trees)**:
+   - In `hyp_redesign_corev_apu_8fo4/corev_apu/coherence/g6lc_coherence_hub.sv`, `aw_ot_cnt_q` and `ar_ot_cnt_q` were updated only under `//pragma translate_off` (r127), leaving `hub_idle_o` blind to live AR/AW slots in synthesis; both trees also omitted `!sig_pending_q`.
+   - Updated `hub_idle_o` in both trees to `!(|slot_used) && !w_busy_q && !aw_hold_q && !ar_hold_q && !sig_pending_q && !inv_pend_valid_q && (inv_enq_seq == inv_deq_seq)`.
+
+### 3. Remote isolated leaf verification (`ovh_calltorch`)
+
+- `hyp8-coh-idle-t1` (`rc=0`): `HUB_BC_PASS count=24`, `HUB_OOO_PASS`, both hub mutations caught, `COH_L2_0_7_PASS`, `COH_L3_0_7_PASS`.
+- `hyp8-mmu-specprobe-t2` (`rc=0`, `tb_g6lc_mmu_noncanon_hyp8` with S7 speculative probe hit/miss/promote):
+  - Positive: `PASS tb_g6lc_mmu_noncanon_hyp8` (`checked=42`, zero PTW walks on non-canonical fetch/load/store, stale redirected fetch / cancelled load, and speculative DTLB-miss probe; hits in 2 cycles on cached speculative probe; walks immediately when promoted to commit head).
+  - All 4 mutations caught: `G6LC_MUT_MMU_NONCANON_WALK` (`FAIL NC_FET1_IMMED_VALID`), `G6LC_MUT_PMP_OVERWRITE_EX` (`FAIL NC_LD_PMP_NOT_OVERWRITTEN`), `G6LC_MUT_MMU_STALE_MISS_WALK` (`FAIL STALE_FET_NO_PTW`), `G6LC_MUT_MMU_SPEC_WALK` (`FAIL SPEC_PROBE_MISS_NO_PTW`).
+
+## 2026-11-25 — RC4 witness-confirmed past 15M cycles; SQL `held st_sb` (93.8M cycles) pipelined back-to-back store commit implemented
+
+### 1. Live OpenWrt witness breakthrough (`hyp8-witness-zicclsmfix`, run 687)
+
+- `hyp8-witness-zicclsmfix` printed the complete `OpenSBI v1.5` banner (`n_uart=10`) AND **positively crossed the historical 14.5M RC4 `printc` freeze point** (`5,041,373` retired):
+  - `[smt-drain] cyc=15000000 ... ret={5231949,377079,0,0} drop=0 kill=0 headv=1 hwfi=0 hplain=1` with **zero `[hang]` dumps**!
+  - RC4 (`g6lc_zicclsm` OoO TID-swallow) is now witness-confirmed closed on live 4-core 8-hart OpenWrt boot.
+- `hyp8-witness-zicclsm-all3` (run 684): `11,000,000` cycles (active at 199% CPU).
+- `hyp8-witness-zicclsm-all4` (run 686): advanced to `9,000,000` cycles (active at 199% CPU).
+
+### 2. SQL `stall-census` discovery: `held st_sb = 93.8M` cycles (6.25% of Linux boot)
+
+Querying `census` across `hyp8-osbi-scalar-r127m` through 1.5B cycles (shell prompt):
+
+- `retired st = 47,591,975`, **`held st_sb = 93,755,564`** (**1.97 commit-head stall cycles per retired store = 6.25% of total Linux boot time**).
+- Root cause in `store_buffer.sv:594` + `stb_drain.sv:74`:
+  - `commit_ready_o` gated on `!commit_pend_v` (`!(pend_v_q || pend2_v_q)`), forcing every back-to-back single-beat store commit to stall for 1 cycle while `pend_q` pushed into `commit_queue_q`, even though `stb_drain` unconditionally consumes `pend_q` every cycle and `address_checker`, `stb_fwd`, `no_st_pending_o`, and `store_buffer_empty_o` already inspect `commit_push_valid`/`commit_push_entry`.
+
+### 3. Implemented fix & `sv-timing` verification
+
+- `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/stb_drain.sv`: reserved 1 commit-queue slot when `push_valid_i` is pushing (`cmt_cnt_i < (push_valid_i ? (DEPTH_COMMIT - 1) : DEPTH_COMMIT)`) so pipelined back-to-back commits can never overflow `commit_queue`.
+- `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/store_buffer.sv`: changed `commit_ready_o` gate from `!commit_pend_v` to `!commit_pend2_v` (single-beat stores pipeline at 1 store/cycle through `pend_q`; two-beat Zicclsm stores still hold while `beat1` drains from `pend2_q`; `no_st_pending_o` and `store_buffer_empty_o` remain gated on `!commit_pend_v`). Added review mutation `G6LC_MUT_STQ_NO_B2B_COMMIT`.
+- `sv-timing` (`delay-v50`, `--target-mhz 5000 --fo4-ps 20 --budget-margin 0.2`):
+  - `stb_drain` max **12.55 FO4** (on line 107), `store_buffer` max **23.37 FO4** (on line 754), `stb_commit` max **24.50 FO4** — zero timing regression on `commit_ready_o`.
+
+### 4. Remote isolated leaf verification (`ovh_calltorch`, tag `hyp8-stq-b2b-t4`)
+
+Extended `verif/tb/core/tb_g6lc_stq_zicclsm_hyp8.sv` with S4 (4 back-to-back single-beat store commits in 4 consecutive cycles with `data_gnt=0` backpressure followed by exact ordered drain):
+
+- Positive: `PASS tb_g6lc_stq_zicclsm_hyp8 wr_n=11` (`rc=0`).
+- `+oracle_negative`: caught `STQ_ZICCLSM_COMMIT_DEADLOCK oracle_negative wr_n=11`.
+- `-DG6LC_MUT_STQ_ZICCLSM_SINGLE_BEAT`: caught `STQ_ZICCLSM_COMMIT_LOST S1 expected 3 writes, got 2`.
+- `-DG6LC_MUT_STQ_NO_B2B_COMMIT`: caught `STQ_B2B_COMMIT_STALL k=1 tid=11 commit_ready=0 during b2b burst`.
+
+## 2026-11-25 — Exhaustive SQL pattern-seeking closure & final remote regression sweep
+
+### Remaining SQL axes audited & closed (no further RTL edit warranted)
+
+- **`frontend seq_gap`** (`2,626` refusals over `2.67B` cycles in `r127m` = `0.000098%` / 1 refusal per ~1M cycles): intentional low-cost stream-continuity guard (`frontend.sv:1608-1670`) for the untagged 1-cycle line predictor; negligible overhead, zero livelock (`assert (seq_gap_rep < 64)` clean).
+- **`[smt-drain]` `wait_sb`** (`max=361` cycles, `aborts=0`, `force=0`): secondary cores execute OpenSBI `sbi_hsm_hart_wait` (`mul/div` spin loop) retiring instructions while draining cleanly well below `DF_ABS_MAX=1024`.
+- **`l2_pf_issue = 0`** across all runs: `L2PrefetchEn=0`, `L3PrefetchEn=0`, `HwPrefetchEn=0` intentionally disabled in `g6lc64_hyp8_mc_config_pkg.sv`.
+- **`kv` / `event` remaining classes**: `lsq-ev-miss=0`, `wbuf.drop` (`dropped=plain`, `tx_single:viol=0`), `axi.r.untagged` (observer artifact), `stall.coh.inv`/`stall.l2/l3.fsm` (`final`/age diagnostics), `idle.halted/wfi` (OpenSBI HSM / Linux idle), `hang.fu2.op62` (resolved SC-backoff), historical pre-fix asserts (`load_unit:2048`, `store_buffer:1270`, `mc_sleep_gate_wake`, `mc_smode_shootdown`) all previously closed.
+
+### Final remote regression sweep on unified final tree (`ovh_calltorch`, `verilator-g6lc-clkskip`)
+
+- `hyp8-final-mmu-reg` (`HYP8_LEAF=mmu`): `HYP8_MMU_PASS checked=848 miter=1099` (`rc=0`).
+- `hyp8-final-pmp-reg` (`HYP8_LEAF=pmp`): `HYP8_PMP_PASS checked=29` (`rc=0`).
+- `hyp8-mmu-specprobe-t2` (`tb_g6lc_mmu_noncanon_hyp8`): `PASS checked=42 ptw_reqs=6` + all 4 mutations caught (`rc=0`).
+- `hyp8-stq-b2b-t4` (`tb_g6lc_stq_zicclsm_hyp8`): `PASS wr_n=11` + all 3 negative/mutant controls caught (`rc=0`).
+- `hyp8-coh-idle-t1` (`tb_g6lc_coherence_hub` + `tb_g6lc_coherence_l2` `USE_L3=0,1`): `HUB_BC_PASS count=24`, `HUB_OOO_PASS`, both hub mutations caught, `COH_L2_0_7_PASS`, `COH_L3_0_7_PASS` (`rc=0`).
+
+### Live witness frontier
+
+- `hyp8-witness-zicclsmfix`: crossed 14.5M RC4 freeze -> **15,000,000 cycles** (`ret=5,231,949`, `n_uart=10`, complete OpenSBI v1.5 banner, zero `[hang]` dumps, active at 199% CPU).
+- `hyp8-witness-zicclsm-all3`: advanced to **12,000,000 cycles** (`ret=3,972,533`, active at 199% CPU).
+- `hyp8-witness-zicclsm-all4`: **9,000,000 cycles** (active at 199% CPU).
+
+## 2026-11-25 — Architectural-hypothesis SQL pass: dual-port wrong-path squash & FP `dirty_fp_state_o` speculation-leak fix (both trees)
+
+### 1. Architectural-hypothesis SQL evidence (`held oth` across branch-heavy & boot traces)
+
+Testing the presumed 2-wide commit architecture against `census` surfaced massive `held oth` (`sc_vw_oth`) cycles on pure-compute/branch workloads:
+
+- `mc_branchy` (`mc-pipefix-brfix-t1` / `cov-t1`): `ret=159,995`, `ipc=0.128`, **`held oth=47,288`** (~1 stall cycle per 3.4 instructions, zero stores/CSRs!).
+- `hyp8-witness-zicclsmfix` (14M cycles): **`held oth=250,425`** (1.8% of all cycles).
+- `hyp8-osbi-scalar-r127m` (1.5B cycles): **`held oth=4,794,882`**.
+
+Correlating `g6lc_core.sv:2717` (`sc_vw_oth`) with `commit_stage.sv:479-504` uncovered two issues:
+
+1. **Wrong-path squash bottleneck (1/cycle instead of 2/cycle)**: Port 1 required `commit_instr_i[1].valid`, `!ex.valid`, and `fu inside {ALU, LOAD, CTRL_FLOW, MULT, FPU, FPU_VEC}` (plus `!CSR`/`!AMO` on Port 0 even when Port 0 was a drop), forcing cancelled wrong-path bursts (incomplete/un-issued entries, cancelled STOREs/CSRs, faulting wrong-path loads) to drain at 1 slot/cycle on Port 0 only.
+2. **Pre-existing FP speculation leak (`dirty_fp_state_o`)**: `commit_stage.sv:582` (`core/commit_stage.sv:198`) asserted `dirty_fp_state_o` on `fire[i]` / `commit_ack_o[i]` without masking `!commit_drop_i[i]` (and ungated on `ACCEL && vfp`), so a cancelled wrong-path FP instruction dropped at commit could architecturally dirty `mstatus.FS`.
+
+### 2. Implemented fixes & `sv-timing` verification
+
+- `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/commit_stage.sv` & mirrored in `core/commit_stage.sv`:
+  - Added dual-port wrong-path drop arm on Port 1: when `commit_drop_i[1]` (non-replay, `commit_bundle_valid_i[1]`, `MixedSmt`-safe `SBC_P1_PRIV` guard), `commit_dec[1] = 1'b1` with zero GPR/FPR/LSU/CSR writes; also relaxed Port-0 CSR/AMO Port-1 block when `commit_drop_i[0]` is a drop. Added review mutation `G6LC_MUT_CMT_NO_P1_DROP`.
+  - Masked `dirty_fp_state_o` with `fire[i] & !commit_drop_i[i]` (including the `ACCEL && vfp` arm). Added review mutation `G6LC_MUT_CMT_DROP_DIRTY_FS`.
+- `sv-timing` (`delay-v50`, `--target-mhz 5000 --fo4-ps 20 --budget-margin 0.2`, `commit_stage`):
+  - **26.50 -> 26.50 FO4** (zero regression, identical top-4 paths).
+
+### 3. Remote isolated leaf verification (`ovh_calltorch`, tag `hyp8-cmt-p1drop-t3`)
+
+New standalone leaf `verif/tb/core/tb_g6lc_commit_p1drop_hyp8.sv` (real hyp8 `commit_stage`, `Hyp8`, `NrCommitPorts=2`):
+
+- Positive: `PASS tb_g6lc_commit_p1drop_hyp8 checked=15` (`rc=0`; dual-port drops of incomplete ALU+STORE, CSR+faulting-LOAD, same-cycle branch retire + Port-1 drop, Port-1 replay hold -> Port-0 replay fire, cancelled FP drop keeps `dirty_fp_state_o=0`, real FP retire asserts `dirty_fp_state_o=1`).
+- `-DG6LC_MUT_CMT_NO_P1_DROP`: caught `FAIL S1A_CMT_P1_DROP_BOTH`.
+- `-DG6LC_MUT_CMT_DROP_DIRTY_FS`: caught `FAIL S4_CMT_DROP_NO_DIRTY_FS`.
+
+## 2026-11-25 — Architectural-hypothesis SQL pass: `CSR_READ` post-commit `csr_hold_q` bypass (`commit_stage.sv`)
+
+### 1. Architectural-hypothesis SQL evidence (`q_arch_deep.sql`)
+
+Auditing `final.core0` `stall-census` across directed microbenchmarks (`mc_csr_prologue`, `mc_store_load_new_line`, `mc_shared_line_quiet`, `mc_branchy`, `mc_chase`, `mc_fp_alu2_stress`):
+
+- `mc_csr_prologue`: `retired csr=16,004`, **`held csr=16,006`** (exact `1.000` hold cycle per CSR from `CsrReadStages=2`), plus a second post-commit freeze cycle on the next instruction from `commit_stage.sv:204` (`csr_hold_q <= commit_csr_o`).
+- `mc_shared_line_quiet` / `mc_csr_prologue` `core[1]`: confirmed `5.000` cycles `notissued` + `4.000` cycles `inflight` on tight branch loops stems from intentional `Hyp8` 8-FO4 staging (`DecodeStages=3`, `RenameStages=3` single-group `can_go`, `IqArbStages=2`, `AluStages=3`, `IqSpecWakeup=0`).
+- Auditing `csr_regfile.sv` proved **every `flush_req` / `flush_o` source sits strictly inside `if (csr_we)`**: pure read-only `CSR_READ` (`csrr`, `rdcycle`, `rdtime`, `rdinstret`, `csrr sstatus/scause/stval/mhartid`) never asserts `csr_we` or `flush_o`, yet `commit_stage.sv:204` blindly armed `csr_hold_q` (suppressing both commit ports for 1 full cycle) after every `CSR_READ`.
+
+### 2. Implemented fix, `sv-timing` & remote isolated leaf verification (`ovh_calltorch`, tag `hyp8-cmt-p1drop-t4`)
+
+- `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/commit_stage.sv`: changed `csr_hold_q <= commit_csr_o && (commit_instr_i[0].op != CSR_READ);` (preserving `r59` `hyp8_csr_flush_skip` for all CSR writes / xret / fences while removing the 1-cycle freeze after pure `CSR_READ`). Added review mutation `G6LC_MUT_CMT_CSR_READ_HOLD`.
+- `sv-timing` (`delay-v50`, `commit_stage`): **26.50 -> 26.50 FO4** (zero regression).
+- Extended `verif/tb/core/tb_g6lc_commit_p1drop_hyp8.sv` with S5 (`CSR_READ` commits without arming `csr_hold_q`; `CSR_WRITE` still suppresses the next cycle and resumes cleanly on cycle +2):
+  - `hyp8-cmt-p1drop-t4` positive: `PASS tb_g6lc_commit_p1drop_hyp8 checked=20` (`rc=0`).
+  - `-DG6LC_MUT_CMT_NO_P1_DROP`: caught `FAIL S1A_CMT_P1_DROP_BOTH`.
+  - `-DG6LC_MUT_CMT_DROP_DIRTY_FS`: caught `FAIL S4_CMT_DROP_NO_DIRTY_FS`.
+  - `-DG6LC_MUT_CMT_CSR_READ_HOLD`: caught `FAIL S5_NO_HOLD_AFTER_CSR_READ`.
+
+## 2026-11-25 — Architectural-hypothesis SQL pass: `CSR_READ` Port-1 dual-commit (both trees)
+
+### 1. Architectural-hypothesis evidence
+
+- `mc_csr_prologue` (`q_arch_deep.sql`): `ret=36,023`, `ack_cyc=35,934`, `ack_full=89` (`0.25%` dual-commit rate) despite `16,004` CSR ops interleaved with `ALU`/`LOAD`/`CTRL_FLOW`.
+- `issue_read_operands.sv:640` confirmed Port-0 -> ALU0 / non-zero-port `LAT_ALU_LOW` -> ALU2 steering is an explicit contract between IQ arbiter and `issue_read_operands` (left untouched).
+- In `commit_stage.sv`, pure read-only `CSR_READ` (`csrr`/`rdcycle`/`rdtime`/`rdinstret`) writes no CSR, triggers no flush, and samples `csr_rdata_i` pre-retire — so Port 1 can safely dual-commit `ALU`/`LOAD`/`CTRL_FLOW`/`MULT` (and cancelled drops) on the same cycle (while excluding `FPU`/`FPU_VEC` so `csr_wdata_dec`/`fflags` stay untouched, and keeping `MixedSmt` conservative).
+
+### 2. Implemented fix, `sv-timing` & remote isolated leaf verification (`ovh_calltorch`, tag `hyp8-cmt-p1drop-t5`)
+
+- `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/commit_stage.sv` & mirrored in `core/commit_stage.sv`:
+  - Allowed Port 1 non-FP (`ALU`/`LOAD`/`CTRL_FLOW`/`MULT`) & drops to dual-commit alongside Port-0 `CSR_READ` (`!MixedSmt`), while keeping `CSR_WRITE`/`CSR_SET`/`CSR_CLEAR`/`xRET`/`FENCE`/`WFI` and `CSR_READ + FPU` serialized. Added review mutation `G6LC_MUT_CMT_NO_CSR_READ_P1`.
+- `sv-timing` (`delay-v50`, `commit_stage`): **26.50 -> 26.50 FO4** (zero regression).
+- Extended `verif/tb/core/tb_g6lc_commit_p1drop_hyp8.sv` with S6 (`CSR_READ + ALU` dual-commits `2'b11`, `CSR_READ + FPU` serializes `2'b01`, `CSR_WRITE + ALU` serializes `2'b01`):
+  - `hyp8-cmt-p1drop-t5` positive: `PASS tb_g6lc_commit_p1drop_hyp8 checked=23` (`rc=0`).
+  - All 4 mutations caught: `G6LC_MUT_CMT_NO_P1_DROP` (`FAIL S1A_CMT_P1_DROP_BOTH`), `G6LC_MUT_CMT_DROP_DIRTY_FS` (`FAIL S4_CMT_DROP_NO_DIRTY_FS`), `G6LC_MUT_CMT_CSR_READ_HOLD` (`FAIL S5_NO_HOLD_AFTER_CSR_READ`), `G6LC_MUT_CMT_NO_CSR_READ_P1` (`FAIL S6_CSR_READ_DUAL_ALU`).
+
+### 3. Live OpenWrt witness status
+
+- `hyp8-witness-zicclsmfix`: past **15,000,000** cycles (`ret=5,231,949`, full `OpenSBI v1.5` banner).
+- `hyp8-witness-zicclsm-all3`: **12,000,000** cycles (`ret=3,972,533`).
+- `hyp8-witness-zicclsm-all4`: advanced to **10,000,000** cycles (`ret=3,137,699`).
+
+## 2026-11-25 — 12 novel fault-driven SQL pattern queries: `load_unit` parallel tombstone drain & `g6lc_l2_top` idle `l2-age` alarm fix
+
+### 1. 12 novel fault-driven SQL queries (`hyp8-sql12-novel` & `hyp8-sql-faults2`)
+
+1. **Q1 (PTW non-alias fault VA storms)**: `ptw.data.null` (`0x0` 2,933x, `0x4` 525x, `0x220` 510x in `r127m`) — pre-`rfix131a-03` wrong-path speculative walks (already closed by `spec_ld` + `lsu_no_walk_i`).
+2. **Q2 (IFE faults by `etype`/VA)**: 516 `ife.priv1.cause12` + 227 `ife.priv0.cause12`; detail on `0x0000003f85023470` (`itlb_hit=1 iacc_err=1 priv=1` for 2 cycles `t`/`t+1`) proved harmless post-syscall `U->S` I$ redirect shadow squashed by `fe_epoch` (and stale-miss PTW walks already eliminated on hyp8).
+3. **Q3 (XBAR/AXI/L2/L3 non-final stalls)**: exposed 100+ bogus `[l2-stall] l2-age ... st=0` (`S_IDLE`) alarms across L2 and L3 in `mc-pipefix-coh-t1` and every witness run! Also isolated single `axi.r.hole` (`r131` `addr=0x100014`) and `mc-xbarprobe` diag rows.
+4. **Q4 (All DB assertions)**: confirmed exactly 3 historical assertions total (`store_buffer:1270`, `load_unit:2048`, `g6lc_tlb:922`), all closed.
+5. **Q5 (RVFI fault scan, 173,309 rows)**: **0** `x0` non-zero writes, **0** odd PCs, **0** zero PCs across the entire RVFI corpus.
+6. **Q6 (`r127m` lowest-IPC active 2M windows)**: lowest active boot windows (`0.141`–`0.159` IPC at 1428M–1494M) correlate with `/init` userspace launch & `dflush = 22k–33k`.
+7. **Q7 (`r127m` `ldbuf_full` burst windows)**: peaked at **5,987 cycles** (`1430M`, `Freeing unused kernel image`) and **4,478 cycles** (`574M`, `Freeing initrd memory`) during flush-heavy page-freeing bursts (`305,522` total `ldbuf_full` cycles in `r127m`, `211,383` in `r128b`).
+8. **Q8 (200-cycle temporal event storms)**: top storms are `r129b` `tlb.FLUSH` (122 in 200 cyc before `g6lc_tlb:922`) and `r127m` `ife.priv1.cause12` (12 in 200 cyc).
+9. **Q9 (Thread non-WFI `max_gap >= 10k`)**: single row (`r128b` `34,888`, resolved `sc_backoff`).
+10. **Q10 (L2/Hub backpressure outliers)**: confirmed `mem_nready` & `rr_loss` peak in `mc_smode_parallel` (`8,768` / `498`) with `aw_slot=0` everywhere.
+11. **Q11 (Faulty UART text scan across all runs)**: **0** `BUG`/`Oops`/`panic`/`lockup`/`corrupt` lines; only `unaligned accesses are slow` (pre-Zicclsm `r127m`).
+12. **Q12 (Non-RC4 elevated `since_ack >= 5000` hangs)**: all benign `idle.halted`/`idle.wfi` plus 2 historical pre-fix `mc-casack2` runs (`mini_l2_hot_scan`, `mc_l3_stride_scan`).
+
+### 2. Implemented fixes, `sv-timing` & remote isolated leaf verification
+
+1. **Parallel `ldbuf` tombstone drain (`load_unit.sv`, driven by Q7 `ldbuf_full = 305k` cycles)**:
+   - Changed `ldbuf_pop_oh[gi]` to OR `drn_ok[gi]` directly instead of gating a single `drn_oh` behind `!pub_fire && !ex_pub`: all ready flushed/killed tombstones now free immediately in parallel even while `a_data` or `a_expub` publishes (disjoint by construction; updated `rpend_q`/`rkill_q` clear loop and `g6lc_r127_lu_pop_eq`). Added review mutation `G6LC_MUT_LU_SERIAL_TOMB`.
+   - `sv-timing` (`delay-v50`, `load_unit`): **35.45 -> 35.45 FO4** (zero regression).
+   - New standalone leaf `verif/tb/core/tb_g6lc_lu_tomb_hyp8.sv` (`ovh_calltorch`, tag `hyp8-lu-tomb-t3`):
+     - Positive: `PASS tb_g6lc_lu_tomb_hyp8 checked=10` (`rc=0`; S1 concurrent slot-0 publish + slot-1 tombstone drain in 1 cycle; S2 dual simultaneous tombstone drain in 1 cycle; all internal `load_unit` equivalence asserts clean).
+     - Mutant `-DG6LC_MUT_LU_SERIAL_TOMB`: caught `FAIL S1_CONCURRENT_TOMB_DRAIN`.
+2. **Idle L2/L3 `l2-age` false-alarm fix (`g6lc_l2_top.sv`, both trees, driven by Q3)**:
+   - Gated `ls_stall_dump("l2-age")` state-age trigger on `state_q != S_IDLE` and reset `ls_state_since` while `state_q == S_IDLE`.
+   - Remotely verified (`hyp8-coh-l2age-t1`, `rc=0`): `COH_L2_0_7_PASS`, `COH_L3_0_7_PASS`, `HUB_BC_PASS count=24`, `HUB_OOO_PASS`, both hub mutations caught.
+
+## 2026-11-25 — 11 additional fault-driven SQL queries (`N1..N11`): `g6lc_ptw` `PDEC` `pte_q` guard & `[ptw-err]` fix + `zicclsmfix` past 16M cycles
+
+### 1. 11 brand-new fault-data SQL queries (`hyp8-sql11-v2`)
+
+- **N1 (RVFI single-step commit cycle gaps)**: top gaps (`487k`–`206k` cyc in `r127m`/`r128b`/`r129-deep`) are normal RVFI sampling-window transitions / WFI intervals.
+- **N2 (RVFI unusual `mem_addr`)**: all accesses in expected Sv39 kernel (`ffffffc8..`, `ffffffd8..`), user (`0000003f..`), or M-mode OpenSBI regions — zero corrupted addresses.
+- **N3 (Non-zero PTE PTW faults)**: **exposed a real `PtwDecodeStage==1` (`PDEC`) bug in `g6lc_ptw.sv`**:
+  - Over 3,400 rows in `r129b` (`PDEC=1`) printed contradictory `[ptw-err] ... pte=01d09d5810b8ca17 (v=0 r=0 w=0 x=0 a=0 d=0 g=0 u=0)` and `pte=00000000206164e7 (v=0..u=0)`.
+  - Root cause: under `PDEC=1`, `PROPAGATE_ERROR` fires in `state_q == PTE_DECODE` (1 cycle after `data_rvalid_q`), when `data_rdata_q` has already free-run to unrelated D$ traffic; `[ptw-err]` printed `data_rdata_q` instead of `pte` (`pte_q`), AND `pte_q <= endian_data` was gated only on `req_port_i.data_rvalid` without checking `state_q == PTE_LOOKUP`.
+  - Meanwhile, all non-zero PTE faults in `r127m` were legitimate Sv39 `x=0` (stack/vmalloc), `a=0` (Linux software accessed-bit), or `w=0` (COW) faults.
+- **N4 (`tlb.?` & non-LU TLB events)**: `16` `tlb.?` rows in `r129b` were `tlb_dump_multi` per-entry lines lacking a `c=<n> <WORD>` token in `tracedb/ingest.py`.
+- **N5 (`wbuf` anomalies)**: zero `viol!=0` across the entire DB (3 rows were mid-line stdout truncation at run termination).
+- **N6 (Hangs with `lsu_ready=0` / `flush_if=1` / `flush_ex=1`)**: all historical pre-fix `mc-casdiag`/`cycprog`/transient `physdbg` samples (`since_ack <= 15`).
+- **N7 (`flush_cyc / ret` worst outliers)**: only deliberate wrong-path/speculative stress tests (`hyp8_spec_bus_clean` 0.519, `mc_wrongpath_window` 0.255, `mc_smt2_boot_release` 0.229); boot runs <= 0.024.
+- **N8 (`wbuf_full` / `mshr_full` / `rtab_full` non-zero scan)**: **0 rows** across the entire DB (zero write-buffer/MSHR/rtab full stalls in any logged run!).
+- **N9 (`pc_sample` priv/region mismatches)**: **0 rows** across the entire DB (strict privilege/VA isolation verified across all sampled PCs).
+- **N10 (`kv` `equiv` audit)**: billions of runtime equivalence checks (`g6lc_iq_legal` 2.39B, `g6lc_iq` 347M, `grpgo` 229M, `pubmarks` 229M, `ras_upd` 7.5M) all 100% clean.
+- **N11 (Live witness progress)**: **`hyp8-witness-zicclsmfix` (run 690) reached 16,000,000 cycles** (`ret=5,672,107`, `ipc=0.355` rising, >630k instructions past the old 14.5M RC4 freeze, zero new hangs); `all3` at 12M; `all4` at 10M.
+
+### 2. Implemented fixes & verification
+
+- `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_mmu/g6lc_ptw.sv`:
+  - Guarded `pte_q` capture on `req_port_i.data_rvalid && (state_q == PTE_LOOKUP)` so a killed/stale `WAIT_RVALID` response cannot overwrite `pte_q`.
+  - Fixed `[ptw-err]` to print `pte` instead of free-running `data_rdata_q`.
+  - `sv-timing` (`delay-v50`, `g6lc_ptw`): **36.05 FO4** (zero regression).
+  - Remotely verified (`hyp8-ptw-pdec-t1`, `rc=0`): `PASS tb_g6lc_mmu_noncanon_hyp8 checked=42 ptw_reqs=6` + all 4 MMU/PMP mutations caught.
+- `verif/regress/remote/hyp8/tracedb/ingest.py`: classified `tlb_dump_multi` lines as `tlb.MULTI_ENTRY` (eliminating `tlb.?`) and deployed to `/opt/testharness/tracedb/ingest.py`.
+
+## 2026-11-25 — Fault-data follow-up fixes: AXI B-response address bug & untagged R/B warnings (both testharnesses) + MMU spurious `INSTR_ACCESS_FAULT` during instruction PTW walks (both trees)
+
+### 1. AXI R/B error tagging fixes (driven by 54,394 `axi.r.untagged` rows + `axi.r.hole`)
+
+- `build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/tb/g6lc_testharness.sv`: fixed bug where `B Response Errored` (AXI write response error) printed `ar_addr_by_id[b.id]` (stale read address!) instead of a write address — added `aw_addr_by_id` captured on AW handshakes and printed `aw_addr_by_id[b.id]`.
+- `corev_apu/tb/ariane_testharness.sv`: added `ar_addr_by_id` and `aw_addr_by_id` and tagged both `R Response Errored` and `B Response Errored` with `id=%0d addr=%h resp=%0d` (eliminating untagged `axi.r.untagged` rows in future runs).
+
+### 2. MMU spurious `INSTR_ACCESS_FAULT` during active instruction PTW walks (both trees)
+
+- `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_mmu/g6lc_mmu.sv` & mirrored in `core/cva6_mmu/cva6_mmu.sv`:
+  - In `instr_interface`, the ITLB-miss `ptw_active && walking_instr && ptw_walk_is_fetch` arm used a bare `else` behind `if (ptw_error)`, driving `icache_areq_o.fetch_exception.valid = 1'b1` (`INSTR_ACCESS_FAULT`) on every cycle of every normal instruction PTW walk (unlike `data_interface`, which already checked `else if (ptw_access_exception)`).
+  - Changed `end else begin` -> `end else if (ptw_access_exception) begin` (eliminating false exception bus toggling / spurious `INSTR_ACCESS_FAULT` during normal instruction walks). Added review mutation `G6LC_MUT_MMU_WALK_SPURIOUS_EX`.
+- `sv-timing` (`delay-v50`, `g6lc_mmu`): **24.15 FO4** (zero regression; **-0.45 FO4** vs original 24.60 FO4 baseline).
+- Extended `verif/tb/core/tb_g6lc_mmu_noncanon_hyp8.sv` (`ovh_calltorch`, tag `hyp8-mmu-walkex-t1`) to assert `mmu_areq.fetch_exception.valid === 1'b0` on every cycle of a normal instruction PTW walk:
+  - Positive: `PASS tb_g6lc_mmu_noncanon_hyp8 checked=51 ptw_reqs=6` (`rc=0`).
+  - All 5 mutations caught: `G6LC_MUT_MMU_NONCANON_WALK` (`FAIL NC_FET1_IMMED_VALID`), `G6LC_MUT_PMP_OVERWRITE_EX` (`FAIL NC_LD_PMP_NOT_OVERWRITTEN`), `G6LC_MUT_MMU_STALE_MISS_WALK` (`FAIL STALE_FET_NO_PTW`), `G6LC_MUT_MMU_SPEC_WALK` (`FAIL SPEC_PROBE_MISS_NO_PTW`), `G6LC_MUT_MMU_WALK_SPURIOUS_EX` (`FAIL CAN_FET_WALK_NO_SPURIOUS_EX`).
+
+## 2026-11-25 — Complete Q1–Q12 & N1–N11 fault-data closure: main-tree `cva6_tlb.sv` `fill_ovl` parity + final consolidated regression sweep
+
+### 1. Remaining Q1–Q12 & N1–N11 root-cause audit & fix
+
+- **Q4/Q8/N4 (`r129b-mmustaged-diag2` `assert.g6lc_tlb.sv:922` `tlb.MULTI` @ `317,424,730`)**:
+  - Pulled the exact 17-line `tlb_dump_multi` + `tlb.UPD` sequence (`q_tlb_multi.sql`): `i_dtlb` installed `vpn=7f81209 ispg=10` twice 14 cycles apart (`317,424,551` entry 6, `317,424,565` entry 8), causing a multi-hit.
+  - Confirmed `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_mmu/g6lc_tlb.sv` already resolved this via full superpage/NAPOT/global `fill_ovl` eviction, **whereas main-tree `core/cva6_mmu/cva6_tlb.sv` lacked `fill_ovl`**.
+  - Ported full `fill_ovl` overlap-eviction multi-hit protection into `core/cva6_mmu/cva6_tlb.sv`.
+  - Remotely verified (`ovh_calltorch`, tag `hyp8-main-tlb-ovl-t1`, `rc=0`): `PASS tb_main_tlb_ovl` (two 4K entries overlapped by a 2M superpage fill + duplicate 2M fill from a second 4K offset; `countSetBits(lu_hit) <= 1` assertion clean).
+- **Q10 (`mc_smode_parallel` `mem_nready=8,768`, `rr_loss=498`)**:
+  - Confirmed via `g6lc_testharness.sv:2576-2579` that `mem_nready` is downstream L2 `S_WUPD_RMW` posted write-update throughput (~2 cycles/write under 4-core hammering) and `rr_loss` is standard multi-core RR arbitration; closed as expected physical bandwidth/arbitration (already improved by hub `sig_start`/`w_busy_q` overlap).
+
+### 2. Consolidated final regression sweep (`ovh_calltorch`, `verilator-g6lc-clkskip`)
+
+- `hyp8-q1n11-mmu-reg3` (`HYP8_LEAF=mmu`): `HYP8_MMU_PASS checked=848 miter=1099` (`rc=0`).
+- `hyp8-q1n11-pmp-reg3` (`HYP8_LEAF=pmp`): `HYP8_PMP_PASS checked=29` (`rc=0`).
+- `hyp8-mmu-walkex-t1` (`tb_g6lc_mmu_noncanon_hyp8`): `PASS checked=51 ptw_reqs=6` + **5/5** mutations caught (`rc=0`).
+- `hyp8-cmt-p1drop-t5` (`tb_g6lc_commit_p1drop_hyp8`): `PASS checked=23` + **4/4** mutations caught (`rc=0`).
+- `hyp8-lu-tomb-t3` (`tb_g6lc_lu_tomb_hyp8`): `PASS checked=10` + **1/1** mutation caught (`rc=0`).
+- `hyp8-stq-b2b-t4` (`tb_g6lc_stq_zicclsm_hyp8`): `PASS wr_n=11` + **3/3** negative/mutant controls caught (`rc=0`).
+- `hyp8-coh-l2age-t1` (`tb_g6lc_coherence_hub` + L2/L3): `HUB_BC_PASS count=24`, `HUB_OOO_PASS`, **2/2** hub mutations caught, `COH_L2_0_7_PASS`, `COH_L3_0_7_PASS` (`rc=0`).
+- `hyp8-main-tlb-ovl-t1` (`core/cva6_mmu/cva6_tlb.sv`): `PASS tb_main_tlb_ovl` (`rc=0`).
+- Note: isolated remote leaf evidence verifies each unit/mutation in isolation and does not waive repo-level aggregate gates (`./build.sh verify`).
+
+### 3. Complete Q1–Q12 & N1–N11 closure status
+
+All 23 fault-data queries (Q1–Q12, N1–N11) are closed:
+- **Implemented & verified fixes**: Q3 (`g6lc_l2_top.sv` `state_q != S_IDLE` both trees, `g6lc_testharness.sv` `aw_addr_by_id`, `ariane_testharness.sv` R/B tagging), Q4/Q8/N4 (`core/cva6_mmu/cva6_tlb.sv` `fill_ovl` parity + `tracedb/ingest.py` `tlb.MULTI_ENTRY`), Q7 (`load_unit.sv` parallel `drn_ok` tombstone drain), N3 (`g6lc_ptw.sv` `PDEC` `pte_q` guard & `[ptw-err]` `pte`, `g6lc_mmu.sv` & `cva6_mmu.sv` spurious `INSTR_ACCESS_FAULT` during instruction walks), plus prior commit/store-buffer/coherence/MMU/PMP fixes (`commit_stage.sv`, `store_buffer.sv`, `stb_drain.sv`, `g6lc_coherence_hub.sv`, `pmp_data_if.sv`, `load_store_unit.sv`).
+- **Closed as expected/already-resolved/clean**: Q1 (`spec_ld` + `lsu_no_walk_i`), Q2 (2-cycle post-syscall `fe_epoch`-squashed shadow), Q5/N1/N2 (0 RVFI `x0`/odd-PC/zero-PC/address faults), Q6 (`/init` flush-heavy launch), Q9 (`r128b` resolved `sc_backoff`), Q10 (L2 RMW / RR arbitration), Q11 (0 kernel `BUG`/`Oops`/`panic`), Q12/N6 (benign WFI/halted & pre-fix diagnostic runs), N5 (0 `wbuf` `viol!=0`), N7 (`<= 0.024` boot flush/ret), N8 (0 `wbuf_full`/`mshr_full`/`rtab_full`), N9 (0 `pc_sample` priv/region violations), N10 (billions of clean `equiv` checks), N11 (`zicclsmfix` past 16M cycles, `ret=5,672,107`, `ipc=0.355`, 0 hangs past RC4).
+
+## 2026-11-25 — Remaining Q1–Q12 & N1–N11 mechanism closure: `g6lc_mmu.sv` `STLB_DLY` privilege-level currency (Q2) + Q3/Q4/Q12/N6 RTL confirmation
+
+### 1. Remaining Q2/Q3/Q4/Q12/N6 mechanism audit (`hyp8-sql-rem-q1n11`)
+
+- **Q2 (`ife.priv1.cause12`, 516 rows @ `0x3f85023470` across `U<->S` trap/`sret`)**:
+  - Found a real staged-TLB (`STLB_DLY == 2`) currency gap in `g6lc_mmu.sv:466-475`: `itlb_ans_cur` and `dtlb_ans_cur` checked `(va, asid, vmid, hart)` but **omitted `priv_lvl_i` / `ld_st_priv_lvl_i`**. Across a `U <-> S` trap or `sret` (or `MPRV` write) where `satp.ASID` stays unchanged, a 2-cycle delayed TLB lookup started under privilege $P_1$ was accepted as current under $P_2 \neq P_1$, emitting stale-privilege hits / spurious page faults.
+- **Q3 (`r131` `axi.r.hole` `addr=0000000010001468 resp=3` @ `5,570,552`)**:
+  - RVFI around `5,570,254..5,570,334` confirmed OpenSBI `sbi_domain_memregion_init` walking `[0x10000000..0x10001000)` with a single non-trapping wrong-path speculative read hitting `0x10001468` (`DECERR`).
+- **Q4 remaining assertions (`load_unit.sv:2048` & `store_buffer.sv:1270`)**:
+  - Confirmed `load_unit.sv:2048` (`lu_pop_is_presented` @ `r129-deep` 375,989,307) is already fixed at `load_unit.sv:2111-2125` (antecedent tightened to `a_data` since `a_drn` legitimately presents `pend_q[0].tid`).
+  - Confirmed `store_buffer.sv:1270` (`ooo_no_younger_forward` @ `rfix131a-iqfix-wt` 170,756) is already fixed at `store_buffer.sv:1297-1311` (gated on `StoreFwdCycles == 1`; main tree is always 1-cycle).
+- **Q12/N6 (`mc-casack2-l2hot-t1`, `mc-casack2-l3-t1`, `hyp8-witness-cycprog13` `0x800133da`)**:
+  - Confirmed pre-fix diagnostic runs; modern `mc-cycq2-l2hot-t1` and `hyp8-witness-zicclsmfix` pass cleanly past 17M cycles with zero hangs.
+
+### 2. Implemented Q2 `STLB_DLY` privilege-currency fix, `sv-timing` & remote 6-mutant verification
+
+- `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_mmu/g6lc_mmu.sv`:
+  - Added 2-bit `itlb_priv_dly` / `dtlb_priv_dly` shift registers alongside `itlb_hart_dly` / `dtlb_hart_dly`, gating `itlb_ans_cur` on `(itlb_priv_dly[STLB_DLY] == priv_lvl_i)` and `dtlb_ans_cur` on `(dtlb_priv_dly[STLB_DLY] == ld_st_priv_lvl_i)`. Added review mutation `G6LC_MUT_MMU_STLB_NO_PRIV_CUR`.
+- `sv-timing` (`delay-v50`, `g6lc_mmu`): **24.15 FO4** (zero regression; **-0.45 FO4** vs original 24.60 FO4 baseline).
+- Extended `verif/tb/core/tb_g6lc_mmu_noncanon_hyp8.sv` with S8 (`S->U` privilege switch mid-lookup with unchanged VA & ASID must not emit a spurious `INSTR_PAGE_FAULT`):
+  - `hyp8-mmu-privcur-t1`: `PASS tb_g6lc_mmu_noncanon_hyp8 checked=52 ptw_reqs=6` + **6/6** mutations caught (`G6LC_MUT_MMU_STLB_NO_PRIV_CUR` caught `FAIL STLB_PRIV_SWITCH_NO_SPURIOUS_EX`, `rc=0`).
+  - `hyp8-mmu-privcur-reg` (`HYP8_LEAF=mmu`): `HYP8_MMU_PASS checked=848 miter=1099` (`rc=0`).
+
+### 3. Latest live OpenWrt witness frontier
+
+- `hyp8-witness-zicclsmfix`: crossed **17,000,000 cycles** (`ret=6,106,688`, `+434,581` retired in the last 1M cycles = `0.435` IPC, zero hangs).
+- `hyp8-witness-zicclsm-all3`: **12,000,000 cycles**; `hyp8-witness-zicclsm-all4`: crossed **11,000,000 cycles**.
+
+## 2026-11-25 — Methodological cross-module seam audit (#1–#5) across all implemented Q1–Q12 & N1–N11 fixes
+
+### 1. Seam-audit verification matrix
+
+1. **Seam #1 (`g6lc_mmu.sv` `lsu_no_walk_i` <-> `load_store_unit.sv` <-> `load_unit.sv`)**:
+   - Confirmed `load_store_unit.sv:459-461` gates `lsu_no_walk_i` on `!st_translation_req && (lsu_ctrl.fu == LOAD) && lsu_ctrl.valid && (lsu_ctrl.trans_id != commit_tran_id_i)` — stores never have walks suppressed, and promoted commit-head loads immediately launch their PTW walk via `dtlb_acc_dly[2] & dtlb_ans_cur & lsu_req_i & ~lsu_no_walk_i`.
+2. **Seam #2 (`g6lc_mmu.sv` `STLB_DLY` `priv_lvl` currency <-> `data_interface`)**:
+   - Verified `itlb_priv_dly`/`dtlb_priv_dly` currency protects both fetch (`priv_lvl_i`) and data (`ld_st_priv_lvl_i`) across `U<->S` traps/`sret`/`MPRV` without ASID change; non-canonical speculative loads raise `LOAD_PAGE_FAULT` cleanly without launching PTW walks.
+3. **Seam #3 (`store_buffer.sv` + `stb_drain.sv` b2b single-beat commit <-> `stb_commit.sv` Zicclsm two-beat)**:
+   - Verified `stb_commit.sv:114-126` + `stb_drain.sv` 1-slot `push_valid_i` reservation across every capacity boundary (`DEPTH_COMMIT-2`, `DEPTH_COMMIT-1`, `DEPTH_COMMIT`) and single-beat -> Zicclsm two-beat transitions: overflow-free and strictly ordered.
+4. **Seam #4 (`commit_stage.sv` `CSR_READ` dual-commit & Port-1 drop <-> `g6lc_ooo_dispatch.sv` `PRF_MIRROR` / `tid_late_result_q`)**:
+   - Verified `g6lc_ooo_dispatch.sv:514-520` commits `CSR_READ` through `PRF_MIRROR` port 0 while Port-1 ops (`ALU`/`LOAD`/`CTRL_FLOW`/`MULT`) have `tid_late_result_q == 0` (already written to PRF at EX WB); `FPU`/`FPU_VEC` excluded behind `CSR_READ` to keep `csr_wdata_dec`/`fflags` clean; WAW `commit_wr = 2'b11` handled identically to ordinary dual-ALU commit.
+5. **Seam #5 (`load_unit.sv` parallel `drn_ok` tombstone drain <-> `ldbuf_r`/`ldbuf_rindex` consumers) — CAUGHT & FIXED SEAM BUG #1**:
+   - Found `load_unit.sv:1956, 1968, 1976` (`mis_trk_q`, `mis_done_q`, `misaligned_entry_excepts`) still cleared/checked on `ldbuf_r && ldbuf_rindex == i` instead of `ldbuf_pop_oh[i]`. When a tombstoned misaligned load drained concurrently with `a_data == 1` (`ldbuf_rindex != i`), `mis_trk_q[i]` remained stuck at `1` and would false-fire `misaligned_entry_excepts` when a subsequent aligned load reused slot `i`!
+
+### 2. Seam Bug #1 fix, `sv-timing` & remote verification (`ovh_calltorch`, tag `hyp8-lu-tomb-t4`)
+
+- `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/load_unit.sv:1953-1976`: switched `mis_trk_q`/`mis_done_q` clear and `misaligned_entry_excepts` trigger from `ldbuf_r && ldbuf_rindex == i` to `ldbuf_pop_oh[i]`.
+- `sv-timing` (`delay-v50`, `load_unit`): **35.45 -> 35.45 FO4** (zero regression).
+- Extended `verif/tb/core/tb_g6lc_lu_tomb_hyp8.sv` with S3 (misaligned load tombstoned in slot 1, drained concurrently with slot-0 aligned publish, then slot 1 reused by a live aligned load publishing data -> zero `misaligned_entry_excepts` assertion):
+  - `hyp8-lu-tomb-t4` positive: `PASS tb_g6lc_lu_tomb_hyp8 checked=16` (`rc=0`, `[equiv] load_unit L5 onehot: checked=26`).
+  - Mutant `-DG6LC_MUT_LU_SERIAL_TOMB`: caught `FAIL S1_CONCURRENT_TOMB_DRAIN`.
+
+## 2026-11-25 — `g6lc_memdep.sv` Store-Set predictor flush-wipe bug (706,483 `mem_viol` flushes in `r127m`, 483,694 in `r128b`, 5,377 in 16M `zicclsmfix`, both trees)
+
+### 1. Root cause
+
+- `r127m` suffered **706,483** `mem_viol` flushes (`r128b` **483,694**, `zicclsmfix` **5,377** in 16M cycles).
+- Auditing `g6lc_memdep.sv` (both hyp8 and main `core/ooo/g6lc_memdep.sv`) revealed a textbook Store-Set predictor defect:
+  1. `if (flush_i) begin set_valid_d = '0; ld_wait_d = '0; end` wiped the entire learned dependence table on every `flush_i | mispredict_i`.
+  2. `train_valid_q <= train_valid_i && !flush_i;` dropped violation training on any coincident flush.
+- Because **every real LSQ memory-order violation triggers a commit-time replay flush (`flush_i == 1`)** to re-execute the violating load `PC_L`, wiping `ld_wait_q` on `flush_i` erased the newly learned entry for `PC_L` **before `PC_L` even re-dispatched** — causing the exact same load to bypass, violate, replay-flush, and wipe the table repeatedly hundreds of thousands of times per boot.
+
+### 2. Implemented fix, `sv-timing` & remote isolated leaf verification (`ovh_calltorch`, tag `hyp8-memdep-t1`)
+
+- `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_memdep.sv` & mirrored in `core/ooo/g6lc_memdep.sv`:
+  - Kept `flush_i` strictly on transient query pipeline registers (`ld_query_q`, `predict_q`, `stall_q`); preserved `set_valid_q`, `ld_wait_q`, and `train_valid_q <= train_valid_i` across replay/mispredict flushes.
+  - Added parameterized periodic Store-Set epoch clear (`parameter int unsigned CLEAR_BITS = 16`, clearing `set_valid_d`/`ld_wait_d` every 65,536 cycles per Chrysos & Emer / Alpha 21264 to prevent long-term 64-entry saturation). Added review mutation `G6LC_MUT_MEMDEP_FLUSH_WIPE`.
+- `sv-timing` (`delay-v50`, `g6lc_memdep`): **16.80 -> 16.80 FO4** (zero regression).
+- New standalone leaf `verif/tb/core/tb_g6lc_memdep_hyp8.sv` (`ovh_calltorch`, tag `hyp8-memdep-t1`, `CLEAR_BITS=6`):
+  - Positive: `PASS tb_g6lc_memdep_hyp8 checked=6` (`rc=0`; S1 violation survives commit-time replay `flush_i` while unrelated PC still bypasses; S2 same-cycle violation + `flush_i` trains; S3 in-flight query still squashes on `flush_i`; S4 64-cycle periodic clear decays stale entries).
+  - Mutant `-DG6LC_MUT_MEMDEP_FLUSH_WIPE`: caught `FAIL S1_LEARNED_SURVIVES_REPLAY_FLUSH`.
+
+### 3. Latest live OpenWrt witness frontier
+
+- `hyp8-witness-zicclsmfix`: **17,000,000 cycles** (`ret=6,106,688`, `0.435` IPC on latest 1M window, 0 hangs).
+- `hyp8-witness-zicclsm-all3`: advanced to **14,000,000 cycles**; `hyp8-witness-zicclsm-all4`: **11,000,000 cycles**.
+
+## 2026-11-25 — Q11 Zicclsm audit: Beat-0 load exception `tval` restoration (`g6lc_zicclsm.sv`, both trees)
+
+### 1. Root cause (RISC-V Priv §3.1.16 & Zicclsm)
+
+- Auditing `g6lc_zicclsm.sv` (driven by Q11 unaligned access performance / Zicclsm correctness) exposed a real exception-reporting bug in both `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_zicclsm.sv` and `core/g6lc_zicclsm.sv`:
+  - For a cross-word misaligned load (e.g. `LD` at `0x8000_1005`), Beat 0 rounds `vaddr` down to 8-byte alignment (`0x8000_1000`) so `load_unit` fetches the full aligned word.
+  - When Beat 0 takes a page fault or access fault (`IDLE`, `B0_ACTIVE`, `B0_WAIT`), `load_unit` returns `ld_ex_fu_i.tval = 0x8000_1000` (the hardware-rounded beat address), and `g6lc_zicclsm.sv` forwarded it verbatim instead of the architectural faulting effective VA (`0x8000_1005`, violating RISC-V Priv §3.1.16). Beat 1 (`0x8000_2000` on page-crossing `0x8000_1FFD`) and stores already reported exact `tval`.
+
+### 2. Implemented fix & remote isolated leaf verification (`ovh_calltorch`, tag `hyp8-zicclsm-tval-t1`)
+
+- `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_zicclsm.sv` & mirrored in `core/g6lc_zicclsm.sv`:
+  - On Beat-0 load faults (`ld_ex_fu_i.valid`), restored `if (TvalEn) ld_ex_o.tval = XLEN'(ctrl_i.vaddr)` (in `IDLE`) and `XLEN'(orig_q.vaddr)` (in `B0_ACTIVE` and `B0_WAIT`), while leaving Beat-1 page-crossing `tval` untouched. Added review mutation `G6LC_MUT_ZICCLSM_B0_ALIGNED_TVAL`.
+- New standalone leaf `verif/tb/core/tb_g6lc_zicclsm_tval_hyp8.sv` (`ovh_calltorch`, tag `hyp8-zicclsm-tval-t1`):
+  - Positive: `PASS tb_g6lc_zicclsm_tval_hyp8 checked=9` (`rc=0`; S1a `B0_WAIT` restores `0x8000_1005`, S1b `IDLE` restores `0x8000_1006`, S2 Beat-1 page-crossing `0x8000_1FFD` preserves `0x8000_2000`, S3 normal cross-word `LD` assembles `0x8877_6655_4433_2211`).
+  - Mutant `-DG6LC_MUT_ZICCLSM_B0_ALIGNED_TVAL`: caught `FAIL S1_B0_WAIT_EXACT_TVAL`.
+
+## 2026-11-25 — Q6 frontend audit: `g6lc_fe_nextline.sv` `flush_bp_i` separation (preserve 256-entry next-line table across ordinary `flush_i`)
+
+### 1. Root cause
+
+- Auditing `fetch_B/frontend.sv` & `g6lc_fe_nextline.sv` (driven by Q6: `92.1M` non-flush empty-ROB cycles in `r127m`, `dflush=22k–33k` per 2M window during `/init` syscalls, `322k` in 16M `zicclsmfix`) exposed a predictor-wipe mismatch:
+  - `i_fe_btb_check`, `btb`, and `bht` clear their predictor tables only on `flush_bp_i` (`fence.i` / `sfence.vma` / debug), preserving trained predictions across ordinary pipeline `flush_i` (traps, syscalls, CSR writes, `mem_viol` replays, `mret`/`sret`, SMT switches).
+  - `i_fe_nextline` (`g6lc_fe_nextline.sv:151`) cleared its entire 256-entry `ltaken_q` table on `flush_i`, forcing cold sequential fetch + 2-cycle `ov1`/`ov2` override bubbles after every single trap/syscall/CSR/replay.
+
+### 2. Implemented fix, `sv-timing` & remote isolated leaf verification (`ovh_calltorch`)
+
+- `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_fe_nextline.sv` & `core/fetch_B/frontend.sv`:
+  - Added `input logic flush_bp_i` to `g6lc_fe_nextline` and wired `.flush_bp_i` in `fetch_B/frontend.sv` (parity with `i_fe_btb_check`).
+  - Kept `line_taken_q <= 1'b0` on `flush_i || red_valid_i` (kills in-flight guess immediately), and moved `ltaken_q <= '0` from `flush_i` to `flush_bp_i`. Added review mutation `G6LC_MUT_FE_NL_FLUSH_WIPE`.
+- `sv-timing` (`delay-v50`, `g6lc_fe_nextline`): **12.85 -> 12.85 FO4** (zero regression).
+- Extended `tb_g6lc_hyp8_linecheck` in `verif/tb/core/tb_g6lc_hyp8_control.sv` with Phase F3 (ordinary `flush_i` preserves trained `ltaken_q`, architectural `flush_bp_i` clears `ltaken_q`):
+  - `hyp8-linecheck-pos2` (`HYP8_LEAF=linecheck`): `HYP8_LINECHECK_PASS checked=78` (`rc=0`).
+  - `hyp8-linecheck-mut4` (`HYP8_EXTRA_DEFINES=G6LC_MUT_FE_NL_FLUSH_WIPE`): caught `CHKFAIL F3_FLUSH_PRESERVES_NL`.
+
+## 2026-11-25 — Q9 parity fix (`core/cache_subsystem/wt_dcache_missunit.sv` `lr_pending_q` unpaired-SC backoff) + Q6 frontend predictor audit
+
+### 1. Findings
+
+- **Q9 (`r128b` `max_gap = 34,888` cycles & `hang.fu2.op62` `sc_backoff_over`)**:
+  - Confirmed hyp8 `wt_dcache_missunit.sv:641` already gated `i_exp_backoff.set_i` on `sc_fail && lr_pending_q` (`r127m`), **whereas main-tree `core/cache_subsystem/wt_dcache_missunit.sv:493` still drove `.set_i(sc_fail)` ungated**, allowing Linux trap-entry unpaired `sc.d` reservation clears to saturate the 16-bit backoff mask and park the next `lr.d` for ~35k cycles.
+- **Q6 frontend predictor audit**: verified `g6lc_fe_btb_check`, `btb`, `bht`, `ras`, and `g6lc_bp_tage` all properly flush their trained predictor tables on `flush_bp_i` (not `flush_i`), matching our `g6lc_fe_nextline.sv` fix.
+
+### 2. Implemented fix & remote verification (`ovh_calltorch`, tag `hyp8-main-scbackoff-t7`)
+
+- `core/cache_subsystem/wt_dcache_missunit.sv`: added `lr_pending_q` (set on `amo_ack && amo_req_i.amo_op == AMO_LR`, cleared on `amo_ack && amo_req_i.amo_op == AMO_SC`) and gated `i_exp_backoff.set_i` on `sc_fail && lr_pending_q`.
+- Remotely verified (`ovh_calltorch`, tag `hyp8-main-scbackoff-t7`, `rc=0`): `PASS tb_main_scbackoff` (12 consecutive unpaired failing `AMO_SC` ops keep `sc_backoff_over == 1`; paired `AMO_LR` -> failing `AMO_SC` sets/consumes `lr_pending_q`; passing `AMO_SC` clears backoff).
+
+## 2026-11-25 — Q1/Q2/N3 parity fix (`core/cva6_mmu/cva6_mmu.sv` `r100` `ptw_walk_is_fetch`) + `zicclsm-all3` OpenSBI banner milestone
+
+### 1. Root cause
+
+- Auditing main-tree `core/cva6_mmu/cva6_mmu.sv` against hyp8 `g6lc_mmu.sv` exposed that while data-side `T42` (`update_vaddr == lsu_vaddr_q`) was present (`cva6_mmu.sv:823`), fetch-side `r100` (`ptw_walk_is_fetch`) was missing (`cva6_mmu.sv:545` checked only `ptw_active && walking_instr`).
+- Consequently, a stale `mret`-window PTW walk (`0x8000_04f0`) erroring ~25 cycles later could fault the real `mret`-target kernel fetch (`0xffffffff80006e88`), panicking Linux on its first SBI `ecall`.
+- Also verified main-tree `core/load_unit.sv` already retains `rfix131a-03` speculative-load PTW suppression.
+
+### 2. Implemented fix & remote verification (`ovh_calltorch`, tag `hyp8-main-mmu-r100-t2`)
+
+- `core/cva6_mmu/cva6_mmu.sv`: added `ptw_walk_is_fetch = icache_areq_i.fetch_req && (update_vaddr[CVA6Cfg.VLEN-1:12] == icache_areq_i.fetch_vaddr[CVA6Cfg.VLEN-1:12]);` (with review mutation `G6LC_MUT_MMU_PTW_FOREIGN`) gating the ITLB-miss PTW fault delivery arm.
+- Remote verification (`ovh_calltorch`, tag `hyp8-main-mmu-r100-t2`, `rc=0`):
+  - Positive: `PASS tb_main_mmu_r100` (stale `0x0000_0000_8000_04f0` walk fault dropped while fetching `0xffffffff80006e88`; own `0xffffffff80006e88` walk fault delivered cleanly).
+  - Mutant `-DG6LC_MUT_MMU_PTW_FOREIGN`: caught `FAIL MAIN_MMU_FOREIGN_WALK_DROPPED tval=00000000800004f0`.
+
+### 3. Live witness update
+
+- `hyp8-witness-zicclsmfix`: **17,000,000 cycles** (`ret=6,106,688`, `0.435` IPC on latest 1M window, 0 hangs).
+- **`hyp8-witness-zicclsm-all3`**: crossed Gate 2 at **14M+ cycles** — printed the **complete `OpenSBI v1.5` banner** (`160,942` log bytes, 0 hangs).
+- `hyp8-witness-zicclsm-all4`: **11,000,000 cycles**.
+
+## 2026-11-25 — Five additional unaddressed Q1–Q12 / N1–N11 RTL defects resolved across both trees
+
+### 1. Five resolved defects
+
+1. **Bug #1 (Q1/Q2/Q8 — ITLB miss starved by DTLB *hits*)**:
+   - `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_mmu/g6lc_tlb_miss_router.sv`, `g6lc_shared_tlb.sv`, and `core/cva6_mmu/cva6_shared_tlb.sv`:
+   - `pick_i` / ITLB-miss arbitration gated on `!dtlb_access_i` instead of `!(dtlb_access_i && !dtlb_hit_i)`, starving ITLB misses behind DTLB hits even when the PTW was idle. Fixed in all three files (mutant `G6LC_MUT_MMU_ITLB_BLOCK_DHIT`), and updated `tb_g6lc_hyp8_control.sv` M3 from `MMU0_DHIT_SUPPRESS` to `MMU0_I_OVER_DHIT`.
+2. **Bug #2 (Q4/Q7/Q11 — Zicclsm Beat-1 `commit_pend2` missing from store->load forwarding)**:
+   - `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/stb_fwd.sv`, `core/store_buffer.sv` (hyp8 & main):
+   - When a cross-word Zicclsm store committed, Beat 1 staged in `commit_pend2` was checked by `page_offset_matches` but omitted from store->load forwarding. A younger load hitting an older `commit_queue` store to Beat 1's word forwarded stale older bytes instead of Beat 1. Added `cmt_pend2_valid_i`/`cmt_pend2_entry_i` to `stb_fwd.sv` (ranked newest among committed entries: `ins > spec > pend2 > pend > cmt_queue`), added `commit_push` + `commit_pend2` to hyp8 `StoreFwdCycles==1`, and added `commit_pend2` to main `core/store_buffer.sv` (mutant `G6LC_MUT_STQ_NO_PEND2_FWD`).
+3. **Bug #3 (N3/Q1 — Svpbmt non-leaf PTE reserved `|pte.pbmt` not faulted)**:
+   - `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_mmu/g6lc_ptw.sv`, `g6lc_ptw_leg_decode.sv`, and `core/cva6_mmu/cva6_ptw.sv`:
+   - Added `(SvpbmtEn && !(pte.r || pte.x) && |pte.pbmt && IS_XLEN64)` to `pte_invalid` / `dec_d.invalid` / `ref_invalid` per RISC-V Svpbmt §12.1.11 (mutant `G6LC_MUT_PTW_PBMT_NONLEAF`).
+4. **Bug #4 (N3/Q1/Q8 — Svnapot illegal leaf encoding poisoned TLB despite `PROPAGATE_ERROR`)**:
+   - `g6lc_ptw.sv`, `g6lc_ptw_leg_decode.sv`, and `core/cva6_mmu/cva6_ptw.sv`:
+   - Cleared `shared_tlb_update_valid = 1'b0` on `SvnapotEn && (dec_q.napot_fault / (pte.n && !is_napot_64k))` so illegal NAPOT leaves never install into TLBs (mutant `G6LC_MUT_PTW_NAPOT_POISON`).
+5. **Bug #5 (Q1/Q2/N3/Q8 — `shared_tlb_update_valid` fired during `flush_i`)**:
+   - `g6lc_ptw.sv` and `core/cva6_mmu/cva6_ptw.sv`:
+   - Added `if (flush_i) shared_tlb_update_valid = 1'b0;` in `ptw_leaf_update` so a flushed walk's verdict never pulses a TLB fill (mutant `G6LC_MUT_PTW_FLUSH_FILL`).
+
+### 2. Timing (`sv-timing`, `delay-v50`) & remote verification (`ovh_calltorch`)
+
+- `sv-timing`: `store_buffer` **23.37 FO4** (unchanged), `stb_fwd` **25.65 FO4**, `g6lc_ptw` **35.70 FO4** (**-0.35 FO4** vs 36.05 baseline), `g6lc_tlb_miss_router` **10.70 FO4**.
+- `hyp8-stq-pend2fwd-t1` (`verif/tb/core/tb_g6lc_stq_zicclsm_hyp8.sv`, S1–S5):
+  - Positive: `PASS tb_g6lc_stq_zicclsm_hyp8 wr_n=14` (`rc=0`).
+  - All 4 controls/mutants caught: `+oracle_negative`, `G6LC_MUT_STQ_ZICCLSM_SINGLE_BEAT`, `G6LC_MUT_STQ_NO_B2B_COMMIT`, and `G6LC_MUT_STQ_NO_PEND2_FWD` (`STQ_PEND2_FWD_STALE got=1111111111111111 want=1111118877665544`).
+- `hyp8-ptw-router-4bug-t2` (`verif/tb/core/tb_g6lc_ptw_router_hyp8.sv`, B1/B3/B4/B5):
+  - Positive: `PASS tb_g6lc_ptw_router_hyp8 checked=7` (`rc=0`).
+  - All 4 mutants caught: `G6LC_MUT_MMU_ITLB_BLOCK_DHIT`, `G6LC_MUT_PTW_PBMT_NONLEAF`, `G6LC_MUT_PTW_NAPOT_POISON`, `G6LC_MUT_PTW_FLUSH_FILL`.
+- `hyp8-5bug-mmu-reg2` (`HYP8_LEAF=mmu`): `HYP8_MMU_PASS checked=847 miter=1098` (`rc=0`).
+
+## 2026-11-25 — Focused N1–N11 deep closure pass (N1 RVFI/ITI & stall-census, N4 shared-TLB SRAM R/W aliasing, N7 SMT boot-release, N8 WT telemetry)
+
+### 1. N1–N11 root-cause fixes & classifications
+
+1. **N4 (Real RTL bug — `UseSharedTlb==1` single-port SRAM read/write address aliasing in `g6lc_shared_tlb.sv` & `core/cva6_mmu/cva6_shared_tlb.sv`)**:
+   - Single-port `tag_sram`/`pte_sram` shared `tag_addr = tag_wr_en ? tag_wr_addr : tag_rd_addr` across all ways. On a simultaneous PTW fill to set `A` + ITLB/DTLB miss lookup of set `B`, the SRAM read aliased to set `A` while `shared_tag_valid` sampled set `B`, producing false shared-TLB hits returning set `A`'s PTE for set `B`. In addition, `shared_tlb_hit_d` was not gated on `shared_tlb_access_q`, and `vpn_d` still had `~dtlb_access_i` instead of `~(dtlb_access_i && ~dtlb_hit_i)`.
+   - **Fix (both trees)**: held `itlb_dtlb_miss` lookup quiet during `(UseSharedTlb && shared_tlb_update_i.valid)` (zero effect on `UseSharedTlb==0` router miter), gated `tag_comparison` hits on `shared_tlb_access_q`, and aligned `vpn_d` with `~(dtlb_access_i && ~dtlb_hit_i)`. Review mutant: `G6LC_MUT_STLB_RW_COLLIDE`.
+2. **N1 (RVFI/ITI & stall-census drop-accounting bugs)**:
+   - `core/cva6_rvfi.sv:343`: `valid_iti` (`assign valid_iti = instr.commit_ack`) missed `& ~instr.commit_drop`, emitting phantom dropped wrong-path instructions to ITI under Port-0/Port-1 wrong-path drops. Fixed to `instr.commit_ack & ~instr.commit_drop`.
+   - `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_core.sv:2686`: `gen_stall_census` counted `commit_ack[p]` without `!commit_drop_id_commit[p]` in `sc_ret`/`sc_rc`/`ack_full`. Fixed to keep `anyack=1` on drop cycles while counting only `!commit_drop_id_commit[p]` as retired.
+3. **N8 (`wbuf_full` / `mshr_full` / `dmiss` / `dc_req` / `dc_gnt` always `0` on WT runs)**:
+   - Proved all `0` rows in N8 were caused by `g6lc_core.sv:2984` wiring those counters only inside `if (DCacheType == HPDCACHE_*)`. Added `else if (G6LCCfg.DCacheType == config_pkg::WT) begin : gen_sc_wt` (`translate_off`) wiring `sc_mshr_hist`, `sc_mshr_full`, `sc_wbuf_full`, `sc_dmiss`, `sc_dc_req`, and `sc_dc_gnt` to `i_wt_dcache_missunit` / `i_wt_dcache_wbuffer`.
+4. **N7 (`mc_smt2_boot_release` `flush_cyc / ret = 0.229`) — closed**:
+   - Audited `verif/tests/custom/multicore/mc_smt2_boot_release.S`: a ~20-instruction test with 3 `fence rw, rw` + `csrw mtvec` flushes out of ~400 retired instructions; expected by construction.
+5. **N2/N3/N5/N6/N9/N10/N11**: N3 (PDEC `pte_q`/`[ptw-err]`, Svpbmt non-leaf `pbmt`, Svnapot TLB-poison, `flush_i` fill suppress) fixed & verified; N2/N5/N6/N9/N10 verified clean; N11 witnesses now at `zicclsmfix` **18M**, `all3` **14M+ (full OpenSBI v1.5 banner)**, `all4` **12M**.
+
+### 2. Timing (`sv-timing`) & remote verification (`ovh_calltorch`)
+
+- `sv-timing` (`delay-v50`, `g6lc_shared_tlb`): **36.30 -> 36.30 FO4** (zero regression).
+- `hyp8-stlb-rw-t7` (`verif/tb/core/tb_g6lc_stlb_rw_hyp8.sv`, `UseSharedTlb=1`):
+  - Positive: `PASS tb_g6lc_stlb_rw_hyp8 checked=2` (`rc=0`; simultaneous set-0 fill + set-1 2M-matching lookup produces zero false hit; normal set-0 lookup hits cleanly returning `PPN=0x81000`).
+  - Mutant `-DG6LC_MUT_STLB_RW_COLLIDE`: caught `FAIL S2_NO_RW_ALIAS_FALSE_HIT`.
+- `hyp8-n1n11-mmu-reg` (`HYP8_LEAF=mmu`): `HYP8_MMU_PASS checked=847 miter=1098` (`rc=0`).
+
+## 2026-11-25 — Multicore OoO coherence L2/L3 eWT (>80% cache hit rate) audit & Hit-Protected RR fix (`g6lc_l2_top.sv`, both trees)
+
+### 1. Alignment with `architecture/l2-l3-cache/ewt-caching.md` & tracedb L2/L3 hit-rate baseline
+
+- Audited `g6lc64_hyp8_mc_config_pkg.sv`, `g6lc_coherence_hub.sv`, `wt_axi_adapter.sv`, and `g6lc_l2_top.sv` against `architecture/l2-l3-cache/ewt-caching.md` (hub-owned invalidation-only coherence, `WtAxiAllocEn=1`, `L2WriteUpdateEn=1`, `L2PostedWriteEn=1`, `L2TagSramEn=1`, `L2RoundRobinEn=1`, `L2CmoEn=1`, `L2PrefetchEn=0` per T9h/T10b/T10e policy).
+- Tracedb `kv` L2/L3 hit-rate survey across multicore runs:
+  - `hyp8-witness-fast-openwrt/boot`: `l2_hit=48,471`, `l2_miss=968` (**98.0%** L2 hit rate), `l2_wupd=247,950`, `l2_selfinv=23` (AMOs only).
+  - `mc-coverage-t1/mc_multi_writer_line`: **99.6%** L2 hit (`l2_wupd=6,002`).
+  - `mc-pipefix-coh-t1/mc_l2_write_read`: **74.7%** L2 hit (`6,047 / 8,098` — 2,048 cold pass-0 misses + 6,047 hits across passes 1..3, `l2_wupd=6,144`, `l2_selfinv=0`).
+  - `mc-cycq2-l2hot-t1/mini_l2_hot_scan`: **30.9%** L2 hit (`5,953 / 19,277`), `7.7%` L3 hit — exposed that blind `L2RoundRobinEn=1` (`g6lc_l2_top.sv` `gen_rr`) ignores demand hits and evicts hot working-set lines every `SET_ASSOC` streaming rounds, and lacked same-set forwarding from `rr_adv`/`rr_pend_q` into `rr_victim_way` on `read_req`.
+- Also verified `g6lc_coherence_hub.sv:434` properly locks `aw_winner` to `sig_owner_q` while `sig_pending_q` is active under our `sig_start`/`w_busy_q` overlap fix.
+
+### 2. Implemented fix (`g6lc_l2_top.sv`, both trees) & remote verification (`ovh_calltorch`)
+
+- `build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/l2_cache/g6lc_l2_top.sv` & mirrored in `corev_apu/l2_cache/g6lc_l2_top.sv`:
+  - Added **Hit-Protected RR (Clock/second-chance)** inside `gen_rr` (`RR_EN=1`, 0 extra SRAM bits, 0 added ports, `RR_EN=0` netlist unchanged): when `l2_hit_o && (tag_way == rr_victim_way)` in `S_TAG`, advance the per-set pointer past `tag_way` so streaming scans skip hot lines.
+  - Added same-set bypass (`rr_byp_q`/`rr_byp_way_q`) on `read_req` when colliding with `rr_upd_v` or `rr_pend_q` for the same set, eliminating stale victim pointers on back-to-back same-set misses/hits.
+  - Added review mutation `G6LC_MUT_L2_RR_NO_HIT_PROTECT`.
+- New standalone 8-way eWT L2 leaf `verif/tb/l2/tb_g6lc_l2_hitprot_hyp8.sv` (`RR_EN=1, TAG_SRAM=1, WRITE_UPDATE=1, POSTED_WRITES=1, SET_ASSOC=8`, tag `hyp8-l2-hitprot-t8`):
+  - Positive: `PASS tb_g6lc_l2_hitprot_hyp8 hot_hits=24/24 wupds=1 sinvs=0` (`rc=0`; **100%** hot-line retention across 24 streaming scan rounds + eWT write-update read-back hit with `sinvs=0`).
+  - Mutant `-DG6LC_MUT_L2_RR_NO_HIT_PROTECT`: caught `FAIL S1_HOT_LINE_EVICTED hot_hits=21/24` (hot line evicted every 8 rounds).
+- Full coherence + L2 + L3 regression (`hyp8-coh-hitprot-t4`, `tb_g6lc_coherence_hub.sv`):
+  - `HUB_BC_PASS count=24`, `HUB_OOO_PASS` (`cyc=34`), both hub mutants caught (`HUB_MUT_WBUSY_28`, `HUB_MUT_INV_12`), `COH_L2_0_7_PASS`, `COH_L3_0_7_PASS` (`rc=0`).
+
+## 2026-11-25 — Top-level `architecture/` concordance review + L3 eWT warm-set prefetching (0.0% -> 87.5% / 100% steady-state) + `g6lc_l2_tag.sv` silent-probe `pf_q` bug + RVFI LR `lsu_rmask`
+
+### 1. Concordance audit against top-level `architecture/` specifications
+
+Audited all implemented fixes against:
+- `architecture/l2-l3-cache/{ewt-caching.md,README.md,dts-l3-prefetch.md}`
+- `architecture/branch-prediction/README.md`
+- `architecture/out-of-order/README.md`
+- `architecture/speculative-execution/README.md`
+- `architecture/multi-core/README.md`
+
+Confirmed all prior fixes (MMU/PTW/TLB/shared-TLB, PMP priority, Zicclsm `tval`/Beat-1 commit & forwarding, `store_buffer` b2b commit, `commit_stage` Port-1 drop + `CSR_READ` dual-commit + `dirty_fp_state_o`, `load_unit` parallel tombstone drain, `g6lc_memdep` flush-persistent Store-Set, `g6lc_fe_nextline` `flush_bp_i`, `g6lc_coherence_hub` `sig_start`/`w_busy_q` overlap + A118 `ACK_AFTER_INVAL` + `hub_idle_o`, `g6lc_l2_top` Hit-Protected RR) are 100% concordant with the pre-redesign architecture contracts.
+
+### 2. Three new concordance/eWT L3 fixes implemented across both trees
+
+1. **L3 eWT warm-set prefetching (`PF_EVICT_OK`, `g6lc_l2_top.sv` + `g6lc_l3_top.sv` + `g6lc_cluster.sv`, both trees)**:
+   - Previously, `pf_avail_way` only accepted invalid ways (`!tag_way_valid[w] && !pf_pend_way[w]`), dropping 100% of prefetch candidates once all 16 L3 ways warmed up (`hits=0/32`, `pf_drp=58`).
+   - Added `parameter bit PF_EVICT_OK = 1'b0` (default `0` -> L2 and inclusive L3 stay bit-identical; wired `.PF_EVICT_OK(!L3InclusiveEn)` on `i_l3` in `g6lc_cluster.sv` where non-inclusive eWT L3 eviction is a tag overwrite with zero dirty writeback / zero back-inval per `ewt-caching.md:75`). On all-valid warm sets, falls back to a rotating non-pending way (`pf_rr_q`). Mutant: `G6LC_MUT_L3_PF_NO_WARM_EVICT`.
+2. **L3 eWT PF-hit stream re-training (`g6lc_l2_top.sv`, both trees)**:
+   - Miss-only `pf_train` broke stride confirmation whenever a demand read hit a prefetched line (capping warm-set streaming hit rate at `10/32 = 31.2%`).
+   - Extended `pf_train` to `PF_EN && ((mshr_alloc && (state_q == S_TAG)) || (PF_EVICT_OK && l2_pf_useful_o))` so first demand hits on prefetched lines keep the stream locked at 100% confidence. Mutant: `G6LC_MUT_L3_PF_NO_HIT_RETRAIN`.
+3. **Real `g6lc_l2_tag.sv` bug — silent PF dedup / WU tag probes consumed `pf_q` before demand hit (both trees)**:
+   - `g6lc_l2_tag.sv:237,447` cleared `pf_d[index_i]` on any `|hit_way` — including silent `pf_probe_fire` dedup probes and silent `S_BYPASS_AW` write-update probes — destroying `pf_q` before the demand read arrived (`hits=15`, `pf_use=10`, `pf_drp=5`).
+   - Added `input logic pf_consume_i` to `g6lc_l2_tag.sv` (wired to `l2_hit_o` in `g6lc_l2_top.sv`, and `1'b1` in `tb_g6lc_l2_tag_miter.sv`) so only real demand hits consume `pf_q`.
+4. **Documented `architecture/out-of-order/README.md:97` RVFI LR `lsu_rmask` gap (`core/cva6_rvfi.sv:360`)**:
+   - Extended `lsu_rmask` to include `CVA6Cfg.RVA && instr.lsu_ctrl_fu == STORE && instr.lsu_ctrl_op inside {AMO_LRW, AMO_LRD}` so LR emits exact read mask with zero write mask.
+
+### 3. Remote verification (`ovh_calltorch`)
+
+- `hyp8-l3-pf-ewt-t3` (`verif/tb/l2/tb_g6lc_l3_pf_ewt_hyp8.sv`, 16-way non-inclusive eWT L3 after 100% set warmup):
+  - **Positive (`PF_EVICT_OK=1` + PF-hit re-train + `pf_consume_i`)**: `L3_WARM_STREAM hits=28/32 (87.5%, 28/28 = 100% steady-state after 4-line training) pf_iss=30 pf_use=28`, `PASS tb_g6lc_l3_pf_ewt_hyp8` (`rc=0`).
+  - **Mutant `-DG6LC_MUT_L3_PF_NO_WARM_EVICT`**: `hits=0/32 (0.0%) pf_iss=0 pf_drp=58` -> caught `FAIL L3_WARM_PF_ISSUED`.
+  - **Mutant `-DG6LC_MUT_L3_PF_NO_HIT_RETRAIN`**: `hits=10/32 (31.2%) pf_iss=10 pf_use=10` -> caught `FAIL L3_WARM_HIT_GT80`.
+- `hyp8-coh-l3pf-t2` (`verif/tb/l2/tb_g6lc_coherence_hub.sv`):
+  - `HUB_BC_PASS count=24`, `HUB_OOO_PASS` (`cyc=34`), both hub mutants caught, `COH_L2_0_7_PASS`, `COH_L3_0_7_PASS` (`rc=0`).
+
+## 2026-11-25 — Multi-issue / RVC branch-prediction concordance (`g6lc_bp_loop.sv`, both trees) + L3-only PF `build_config_pkg` audit
+
+### 1. Findings
+
+- **`build_config_pkg.sv:553-566`**: confirmed `L2PfMshrReserve` (default `1`), `L2PfMaxOutstanding` (default `1`), `L2PfStreams` (`4`), `L2PfDistance` (`2`), and `L2PfQuiet` (`8`) are already unconditionally defaulted regardless of `L2PrefetchEn`, so `L2PrefetchEn=0, L3PrefetchEn=1` passes `check_cfg` cleanly (`L3MshrDepth=4 > 1`).
+- **`g6lc_bp_loop.sv` (both hyp8 & main `core/frontend/g6lc_bp_loop.sv`) — two real multi-issue / RVC defects**:
+  1. **Missing T21e/T18 per-slot column alignment**: unlike `g6lc_bp_ittage` and `g6lc_bp_statcor`, `g6lc_bp_loop` looked up only `vpc_i` (slot 0) and wrote only `pred_o[0]`. Under `FetchWidth=64, RVC=1` (`INSTR_PER_FETCH=4`), 75% of loop branches (slots 1..3 at `+2/+4/+6`) never hit `g6lc_bp_loop`, and an unaligned redirect (`vpc_i = ...4`) corrupted `pred_o[0]` instead of overriding its own column `pred_o[2]`.
+  2. **8-bit `conf_cnt` wraparound on >255-iter loops**: `conf_cnt` incremented modulo 256 (`cnt_n = conf_cnt + 1`), causing >255-iteration loops (`mc_l2_write_read=2048`, `mc_l3_stride_scan=8192`, `memcpy`) to wrap `255 -> 0` and learn bogus `trip=0` (predicting not-taken on every iteration).
+
+### 2. Implemented fix, `sv-timing` & remote isolated leaf verification (`ovh_calltorch`, tag `hyp8-bploop-t2`)
+
+- `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_bp_loop.sv` & mirrored in `core/frontend/g6lc_bp_loop.sv`:
+  - Added per-slot aligned `slot_pc[i]` / `idx_c[i]` lookup and parallel `genvar` per-slot `pred_o[i]` override matching `g6lc_bp_ittage`/`g6lc_bp_statcor` column semantics (mutant `G6LC_MUT_BP_LOOP_SLOT0_ONLY`).
+  - Saturated `conf_cnt` at `8'hFF` and gated `hit_q` on `(trip != 8'd0) && (trip != 8'hFF)` so >254-iter loops yield cleanly to TAGE (mutant `G6LC_MUT_BP_LOOP_WRAP_TRIP`).
+- `sv-timing` (`delay-v50`, `g6lc_bp_loop`): **8.10 -> 9.50 FO4** (within P1/P2 fabric slack; well below sibling `g6lc_bp_tage`/`g6lc_fe_override`).
+- New standalone leaf `verif/tb/core/tb_g6lc_bp_loop_hyp8.sv` (`ovh_calltorch`, tag `hyp8-bploop-t2`):
+  - Positive: `PASS tb_g6lc_bp_loop_hyp8 checked=5` (`rc=0`; S1 slot-2 loop under aligned fetch overrides `pred_o[2]` cleanly; S2 unaligned redirect overrides `pred_o[2]` without touching `pred_o[0]`; S3 256-iter loop at slot 3 saturates and yields cleanly to base TAGE).
+  - Mutant `-DG6LC_MUT_BP_LOOP_SLOT0_ONLY`: caught `FAIL S1_SLOT2_PRED_EXIT`.
+  - Mutant `-DG6LC_MUT_BP_LOOP_WRAP_TRIP`: caught `FAIL S3_LONG_LOOP_NO_BOGUS_WRAP`.
+
+## 2026-11-25 — Multicore coherence & L3 eWT prefetcher concordance (`g6lc_ooo_snoop_filter.sv` XOR page-folding + `g6lc_l2_pf.sv` zero-redundant-drop frontier arming, both trees)
+
+### 1. Findings & root causes
+
+1. **`g6lc_ooo_snoop_filter.sv` (4-core `COH_OOO` 4 KiB private-stack broadcast aliasing, both trees)**:
+   - Under `hyp8-mc` (`NR_ENTRIES=256`, `LINE_BYTES=16`, `OFF=4`, `IDX_W=8`), raw `addr[11:4]` wraps at exactly `4 KiB` (`0x1000`). Because OpenSBI/Linux place per-core private stacks and `sbi_scratch` pages at identical 4 KiB offsets on consecutive 4 KiB pages (`0x8004_0080`, `0x8004_1080`, `0x8004_2080`, `0x8004_3080`), core 0's private stack aliased 100% onto cores 1–3 (`m=4'b1111`), generating useless peer invalidations and `ACK_AFTER_INVAL` / `hub_aw_hold_other` stalls.
+   - **Fix**: added pure combinational XOR page-folding `sf_idx(a) = a[OFF +: IDX_W] ^ a[OFF + IDX_W +: IDX_W]` (100% conservative superset, 0 extra SRAM bits, ~0.5 FO4). Mutant: `G6LC_MUT_SF_NO_PAGE_XOR`.
+2. **`g6lc_l2_pf.sv` (redundant duplicate-candidate L3 tag-probe elimination, both trees)**:
+   - On steady-state confirmed advances with `PEND_CAP > 1`, `g6lc_l2_pf` unconditionally re-armed `ahead = 1..PEND_CAP`, re-emitting already-issued lines `+1..+(PEND_CAP-1)` and producing `pf_drp=28` wasted L3 tag-port probes per 32-line stream.
+   - **Fix**: when `(st_q[s].conf >= 2'd2) && (st_q[s].pend == '0) && (PEND_CAP > 1)`, arm only the single new frontier line at `+PEND_CAP*stride` (`pend=1, ahead=PEND_CAP`), cutting `pf_drp` from `28` to `0` while keeping `87.5%` (`100%` steady-state) warm-set L3 hit rate. Mutant: `G6LC_MUT_PF_REDUNDANT_REARM`.
+3. **`g6lc_bp_statcor.sv` & `g6lc_bp_ittage.sv`**: audited lookup/update/flush/token paths — confirmed concordant with T18/T21/T21e contracts.
+
+### 2. Remote verification (`ovh_calltorch`)
+
+- `hyp8-l3-pf-ewt-t4` (`verif/tb/l2/tb_g6lc_l3_pf_ewt_hyp8.sv`, 16-way non-inclusive eWT L3 after 100% set warmup):
+  - Positive: `L3_WARM_STREAM hits=28/32 (87.5%, 100% steady-state) pf_iss=30 pf_use=28 pf_drp=0`, `PASS tb_g6lc_l3_pf_ewt_hyp8` (`rc=0`).
+  - 3/3 mutants caught:
+    - `-DG6LC_MUT_L3_PF_NO_WARM_EVICT`: `hits=0/32 (0.0%)` -> `FAIL L3_WARM_PF_ISSUED`.
+    - `-DG6LC_MUT_L3_PF_NO_HIT_RETRAIN`: `hits=10/32 (31.2%)` -> `FAIL L3_WARM_HIT_GT80`.
+    - `-DG6LC_MUT_PF_REDUNDANT_REARM`: `pf_drp=28` -> `FAIL L3_PF_REDUNDANT_DROPS`.
+- `hyp8-sf-pagexor-t1` (`verif/tb/l2/tb_g6lc_sf_pagexor_hyp8.sv`, 4-core `COH_OOO` 256-entry signature):
+  - Positive: `PASS tb_g6lc_sf_pagexor_hyp8` (`rc=0`; private 4 KiB stacks isolated `4'b0001`/`4'b0100`, shared line `4'b1001`).
+  - Mutant `-DG6LC_MUT_SF_NO_PAGE_XOR`: caught `FAIL S2_NO_4K_STACK_ALIAS core0 m=1111 (want 0001)`.
+- `hyp8-coh-sfpf-t1` (`verif/tb/l2/tb_g6lc_coherence_hub.sv`):
+  - `HUB_BC_PASS count=24`, `HUB_OOO_PASS` (`cyc=34`), both hub mutants caught, `COH_L2_0_7_PASS`, `COH_L3_0_7_PASS` (`rc=0`).
+
+## 2026-11-25 — N2 Zicclsm Beat-1 RVFI `mem_paddr` overwrite fix (`store_buffer.sv`) & assertion-control forensic confirmation
+
+### 1. Root cause & fix (N2)
+
+- `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/store_buffer.sv:609-626`:
+  - `rvfi_st_push_valid_o = valid_i` fired twice for Zicclsm two-beat cross-word stores carrying the same `trans_id`, allowing Beat 1 (`0x8000_6008`) to overwrite Beat 0's architectural base physical address (`0x8000_6005`) in RVFI.
+  - Gated `rvfi_st_push_valid_o` on `valid_i && !rvfi_st_is_beat1` where `rvfi_st_is_beat1 = G6LCCfg.RVZicclsm && ((s1_v && s1_tid == trans_id_i) || (|rvfi_tid_in_spec))`. Added review mutation `G6LC_MUT_STQ_RVFI_BEAT1_OVERWRITE`.
+
+### 2. Remote verification (`ovh_calltorch`, tag `hyp8-stq-rvfin2-t1`) & assertion forensic check
+
+- **`POS` (production RTL, no mutations, `remote-runs/hyp8-stq-rvfin2-t1/output/pos.log`)**: `PASS tb_g6lc_stq_zicclsm_hyp8 wr_n=16` (`rc=0`, 0 errors, 0 warnings, 0 RTL assertion failures across S1–S6).
+- **5/5 deliberate negative & fault-injection mutation controls caught** (each intentionally injects a broken RTL/oracle mode to prove non-vacuous detection):
+  - `NEG` (`+oracle_negative`): `STQ_ZICCLSM_COMMIT_DEADLOCK oracle_negative wr_n=16`
+  - `MUT_ZICCLSM` (`-DG6LC_MUT_STQ_ZICCLSM_SINGLE_BEAT`): `STQ_ZICCLSM_COMMIT_LOST S1 expected 3 writes, got 2`
+  - `MUT_B2B` (`-DG6LC_MUT_STQ_NO_B2B_COMMIT`): `STQ_B2B_COMMIT_STALL k=1 tid=11 commit_ready=0`
+  - `MUT_PEND2FWD` (`-DG6LC_MUT_STQ_NO_PEND2_FWD`): `STQ_PEND2_FWD_STALE got=1111111111111111 want=1111118877665544`
+  - `MUT_RVFI_B1` (`-DG6LC_MUT_STQ_RVFI_BEAT1_OVERWRITE`): `STQ_RVFI_BEAT1_SUPPRESS beat1 overwrote rvfi paddr=00000080006008`
+- **Live OpenWrt witnesses (`ovh_calltorch`, 0 `%Error`/`Assertion failed` lines across all 3 logs)**:
+  - `hyp8-witness-zicclsmfix`: **19,000,000 cycles** (`ret={6,963,331, 377,079, 0, 0}`, 0 hangs).
+  - `hyp8-witness-zicclsm-all3`: **16,000,000 cycles** (`ret={5,672,107, 377,079, 0, 0}`, complete `OpenSBI v1.5` banner, 0 hangs).
+  - `hyp8-witness-zicclsm-all4`: **12,000,000 cycles** (`ret={3,972,533, 377,079, 0, 0}`, 0 hangs).
+
+## 2026-11-25 — Complete N1–N11 residual parity closure (hyp8 `g6lc_rvfi.sv` N1/N2 + main `cva6_rvfi_probes.sv` `r99` N2 + hyp8 `g6lc_core.sv` WT `sc_rtab_full` N8)
+
+### 1. Four newly isolated & fixed N1/N2/N8 residuals
+
+1. **N1 (hyp8 `third_party/core/g6lc_rvfi.sv:1149`)**: `valid_iti = instr.commit_ack` lacked `& ~instr.commit_drop` (parity with main `core/cva6_rvfi.sv:343`), allowing dropped wrong-path slots to emit phantom `rvfi_to_iti_o.valid` records. Gated on `& ~instr.commit_drop` (mutant `G6LC_MUT_RVFI_DROP_ITI`).
+2. **N2 (hyp8 `third_party/core/g6lc_rvfi.sv:1177`)**: `lsu_rmask` omitted `AMO_LRW`/`AMO_LRD` (documented in `architecture/out-of-order/README.md:97`; parity with main `core/cva6_rvfi.sv:360`). Extended `lsu_rmask` to include `G6LCCfg.RVA && instr.lsu_ctrl_fu == STORE && instr.lsu_ctrl_op inside {AMO_LRW, AMO_LRD}` (mutant `G6LC_MUT_RVFI_NO_LR_RMASK`).
+3. **N2 (main `core/cva6_rvfi_probes.sv:102`)**: ported hyp8 `r99` idle-LSU protection by gating `instr.lsu_ctrl_be = lsu_ctrl_i.valid ? lsu_ctrl_i.be : '0;` so an idle `lsu_bypass` head (`valid=0`) cannot pollute a reallocated `trans_id` with stale `lsu_wmask`/`lsu_rmask` (zero struct/interface change).
+4. **N8 (hyp8 `core/g6lc_core.sv:3012`)**: wired `sc_rtab_full` inside `gen_sc_wt` to `&gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.tx_vld_i` so all three N8 counters (`wbuf_full`, `mshr_full`, `rtab_full`) report live WT occupancy.
+
+### 2. Remote verification (`ovh_calltorch`, tag `hyp8-rvfi-n1n2-t2`)
+
+- New standalone leaf `verif/tb/core/tb_g6lc_rvfi_n1n2_hyp8.sv` against hyp8 `third_party/core/g6lc_rvfi.sv`:
+  - Positive (`POS`): `PASS tb_g6lc_rvfi_n1n2_hyp8 checked=9` (`rc=0`; S1 wrong-path drop suppresses both `rvfi_instr_o.valid` and `rvfi_to_iti_o.valid`; S2 `AMO_LRD` reports `mem_rmask=8'hff`, `mem_wmask=8'h00`, exact `mem_addr`; S3 idle `lsu_ctrl_valid=0` does not pollute reallocated `tid=5`).
+  - Mutant `-DG6LC_MUT_RVFI_DROP_ITI`: caught `FAIL S1_DROP_SUPPRESSES_ITI`.
+  - Mutant `-DG6LC_MUT_RVFI_NO_LR_RMASK`: caught `FAIL S2_LR_RMASK_SET`.
+- Audited N5 (`wt_dcache_wbuffer.sv`), N6, N7, N9, N10, N11: all remaining N1–N11 items verified clean with zero open RTL/telemetry defects.
+
+## 2026-11-25 — Five additional Q4/Q6/Q7/Q10/Q11 root-cause fixes (Zicclsm cross-word/cross-line LSQ + COH_OOO ordering & `ras.sv` general depth, both trees)
+
+### 1. Five newly resolved RTL bugs
+
+1. **Bug #1 (Q4/Q7/Q11 — `g6lc_lsq_cam_bank.sv` + main `core/ooo/g6lc_lsq.sv` — Zicclsm cross-word CAM overlap blindspot)**:
+   - `same_word(a, b) && ((be_a & be_b) != 0)` assumed misaligned accesses trap (broken once `RVZicclsm=1` landed), silently missing cross-word overlaps (`SD` at `0x8000_1005` bytes `5..12` vs younger `LD` at `0x8000_1008` bytes `8..15`).
+   - Added compact Zicclsm cross-word overlap detection in `g6lc_lsq_cam_bank.sv` (3-bit intra-line word-adjacency + line-boundary wrap, `24.6 FO4` vs `32.0 FO4` wide-adder version) and exact 2-word `bytes_overlap` in main `core/ooo/g6lc_lsq.sv`. Mutant: `G6LC_MUT_LSQ_NO_ZICCLSM_CROSSWORD`.
+2. **Bug #2 (Q4/Q7/Q11 — hyp8 `g6lc_lsq.sv:529-630, 1285-1340` & main `core/ooo/g6lc_lsq.sv` — Same-cycle virtual-leaf (`vv_match_d`) & `COH_OOO` `PHYS_VALIDATE` (`condA`/`pm`) cross-word blindspot)**:
+   - Both same-cycle store-vs-load virtual leaves and `PHYS_VALIDATE` load-vs-load/store-vs-load comparisons missed cross-word Zicclsm overlaps in either direction (`SD` crossing into `LD` or `LD` crossing into `SD`). Switched all three to exact 2-word `bytes_overlap`.
+3. **Bug #3 (Q4/Q10/Q11 — hyp8 `g6lc_lsq.sv:1322` & main `core/ooo/g6lc_lsq.sv:670` — `COH_OOO` peer invalidation `mod_valid_i` blindspot on cross-cache-line Zicclsm loads)**:
+   - `mod_valid_i` only matched `laddr >> LINE_OFF`, so a speculative cross-cache-line `LD` (`0x8000_003D`, spanning lines `0x0000` and `0x0040`) never replayed on a peer write to `0x8000_0040`. Extended `mm[m]` / `phys_replay_o` to also check `((laddr + (1 << lsize) - 1) >> LINE_OFF)` under `RVZicclsm`. Mutant: `G6LC_MUT_LSQ_NO_CROSSLINE_MOD`.
+4. **Bug #4 (Q4/Q7/Q11 — main `core/ooo/g6lc_lsq.sv:513-536` — Cross-word load false single-word `stl_forward_o` + missing STL stall)**:
+   - Truncated `lane_be` allowed an older aligned store at `0x8000_1000` to falsely satisfy `(sbe & ld_be) == ld_be` for a cross-word load at `0x8000_1005`. Gated `stl_match[i]` on `same_word && (lane_be_hi(ld) == 0)` and forced `stl_need_stall = 1'b1` on cross-word overlap. Mutant: `G6LC_MUT_LSQ_CROSS_FALSE_FWD`.
+5. **Bug #5 (Q6 — hyp8 `core/frontend/ras.sv:346-415` — Undriven `ra_d`/`tos_d`/`cnt_d`/`data_o`/`snap_*` for any `RASDepth != 2`)**:
+   - `if (DEPTH == 2) begin : gen_ras_d2` had no `else` branch, leaving every RAS output and next-state register undriven on `RASDepth = 4/8/16` configs. Added parameterized `else begin : gen_ras_dn` circular-ring implementation (zero change to `DEPTH == 2` netlist). Mutant: `G6LC_MUT_RAS_NO_GENERAL_DEPTH`.
+
+### 2. Timing (`sv-timing`) & remote verification (`ovh_calltorch`, tag `hyp8-lsqras-5bug-t3`)
+
+- `sv-timing` (`delay-v50`): `g6lc_lsq_cam_bank` **24.6 FO4** (down from 32.0 FO4 naive wide-adder), `ras` `DEPTH==2` netlist unchanged.
+- `hyp8-lsqras-5bug-t3` (`verif/tb/core/tb_g6lc_lsq_zicclsm_hyp8.sv` + `verif/tb/core/tb_g6lc_ras_depth_hyp8.sv`):
+  - `LSQ_POS`: `PASS tb_g6lc_lsq_zicclsm_hyp8 checked=4` (`rc=0`; S1 cross-word ST->LD replay, S2 cross-word LD->ST replay, S3 cross-cache-line `COH_OOO` `mod_valid_i` replay, S4 disjoint same-word no false replay).
+  - `LSQ_MUT_XW` (`-DG6LC_MUT_LSQ_NO_ZICCLSM_CROSSWORD`): caught `FAIL S1_CROSSWORD_ST_LD_REPLAY`.
+  - `LSQ_MUT_XL` (`-DG6LC_MUT_LSQ_NO_CROSSLINE_MOD`): caught `FAIL S3_CROSSLINE_MOD_REPLAY`.
+  - `RAS_POS`: `PASS tb_g6lc_ras_depth_hyp8 checked=8` (`rc=0`; `DEPTH=8` 4-deep LIFO push/pop + empty zero + checkpoint restore-with-push).
+  - `RAS_MUT_DN` (`-DG6LC_MUT_RAS_NO_GENERAL_DEPTH`): caught `FAIL S1_PUSH_VALID`.
+
+## 2026-11-25 — Hyp8 worst-FO4 full board (`sv-timing` `delay-v50`) & 11 verified algorithmic FO4 reductions (`-150.56 FO4` combined, 0 regressions)
+
+### 1. Full hyp8-core `sv-timing` board baseline (284 modules, 12,986 paths)
+
+Scanned all 284 modules via `sv-timing analyze --all-modules --target-mhz 5000 --fo4-ps 20 --budget-margin 0.2 --param-map params-hyp8-default.json --stages` (top active core bottleneck: `stb_insert` at **131.00 FO4**, followed by `serdiv` 55.30, `instr_queue` 43.25, `bht` 42.25, `g6lc_ptw_leg_decode` 41.25, `issue_read_operands` 40.00, `g6lc_iq` 37.07, `g6lc_shared_tlb` 36.30, `g6lc_ptw` 35.70, `load_unit` 35.45, `csr_regfile` 34.90, `g6lc_rename_read` 34.75, `instr_realign` 34.50, `g6lc_freelist` 32.57, `g6lc_fe_override` 32.45, `g6lc_bp_ckpt` 32.30, `g6lc_iq_arb` 32.21, `wt_axi_adapter` 32.00, `ras` 31.67, `g6lc_fe_redirect` 29.95, `perf_counters` 29.37, `g6lc_rrip_repl` 27.30, `g6lc_rob` 27.15).
+
+### 2. Eleven strictly-improved, cycle-exact algorithmic FO4 reductions (0 regressions; total `-150.56 FO4`)
+
+| # | Module | BEFORE | AFTER | Delta | Algorithmic reduction |
+|---|---|---:|---:|---:|---|
+| 1 | `stb_insert` | 131.00 | **24.70** | **-106.30** | Replaced 16-iter serial `for` loop inside `always_ff` with parallel `genvar` per-slot age row/col + prefix-OR `free_slot_oh` |
+| 2 | `bht` | 42.25 | **25.70** | **-16.55** | Replaced serial `INSTR_PER_FETCH` loop + nested `if/else` counter with parallel `genvar` slots + branchless 2-bit saturating truth-table |
+| 3 | `g6lc_fe_redirect` | 29.95 | **21.60** | **-8.35** | Replaced 7-arm `case` + 3-deep `else if` priority chain with flat parallel `arb_no_arch` / `low_src` mux |
+| 4 | `g6lc_shared_tlb` | 36.30 | **29.75** | **-6.55** | Replaced triple-nested `for (i) for (level) for (k)` sfence/vvma loops with parallel `genvar` per-way prefix-AND match logic |
+| 5 | `g6lc_iq` | 37.07 | **31.67** | **-5.40** | Replaced `rot & (~rot+1)` carry chain + procedural `lane_asgn`/`lane_used` loops with parallel prefix-OR isolate + `genvar` OR-enc |
+| 6 | `instr_realign` | 34.50 | **32.00** | **-2.50** | Replaced linear `NrHalfWords` serial OR-chain with balanced 2-level binary OR-tree (`gen_or4`/`gen_cor4`) |
+| 7 | `g6lc_ptw_leg_decode` | 41.25 | **38.85** | **-2.40** | Flattened 6-deep nested `if/else/case` into parallel boolean predicates + static `!G6LCCfg.RVH` `vpn_sel` mux |
+| 8 | `g6lc_rob` | 27.15 | **25.69** | **-1.46** | Replaced `$countones` + serial `count_d` add/sub chain with branchless 2-bit popcount LUT + single net `count_q + alloc - ret` |
+| 9 | `perf_counters` | 29.37 | **28.87** | **-0.50** | Replaced dynamic `addr_i - base + 1` subtractor + dynamic array write with constant-index per-(hart,counter) CSR decode |
+| 10 | `g6lc_rrip_repl` | 27.30 | **26.95** | **-0.35** | Replaced dynamic `rrpv_d[updt_set_i]` / `rrpv_d[fill_set_i]` chains with parallel `genvar` per-(set,way) constant-index assigns |
+| 11 | `g6lc_fe_override` | 32.45 | **32.25** | **-0.20** | Replaced procedural `NrInstr` loop calling nested 3-deep `g6lc_fetch_pkg` functions with parallel `genvar` split 32-bit hi/lo `>=` compare |
+
+(Candidates whose `sv-timing` model increased — `instr_queue`, `g6lc_freelist`, `g6lc_bp_ckpt`, `serdiv`, `issue_read_operands`, `g6lc_iq_arb`, `axi_adapter_arbiter`, `g6lc_rename_recover`, `g6lc_flu_reserve` — were empirically rejected and reverted to preserve zero FO4 regressions.)
+
+### 3. Remote functional equivalence regressions (`ovh_calltorch`)
+
+- `hyp8-fo4-stq-reg` (`tb_g6lc_stq_zicclsm_hyp8`, exercises `stb_insert`): `PASS wr_n=16` + 5/5 negative/mutant controls caught (`rc=0`).
+- `hyp8-fo4-mmu-reg3` (`HYP8_LEAF=mmu`, exercises `g6lc_shared_tlb` + `g6lc_ptw_leg_decode`): `HYP8_MMU_PASS checked=847 miter=1098` (`rc=0`).
+- `hyp8-fo4-fe-reg2` (`HYP8_LEAF=linecheck`, exercises `g6lc_fe_redirect` + `g6lc_fe_override` + `bht`): `HYP8_LINECHECK_PASS checked=75` (`rc=0`).
+- `hyp8-fo4-realign-reg2` (`HYP8_LEAF=realign`, exercises `instr_realign`): `HYP8_REALIGN_PASS checked=59` (`rc=0`).
+- Architectural note on the 8-FO4 target: latency-neutral combinational flattening (`-150.56 FO4` across 11 modules) removes structural/procedural serialization chains down to ~21–32 FO4; closing the remaining gap to 8.0 FO4 requires multi-cycle retiming/pipeline cuts (`svt-stage` / caller protocol changes) on wide arithmetic, CAM/age tournaments, and SRAM-fed lookup cones.

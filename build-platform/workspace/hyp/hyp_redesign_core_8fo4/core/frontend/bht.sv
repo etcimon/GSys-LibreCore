@@ -156,84 +156,43 @@ module bht #(
     // -------------------------
     // prediction assignment & update Branch History Table
     // -------------------------
-    always_comb begin : prediction_update_bht
-      bht_ram_we = '0;
-      bht_ram_read_address_0 = '0;
-      bht_ram_read_address_1 = '0;
-      bht_ram_write_address = '0;
-      bht_ram_wdata = '0;
-      bht_updated = '0;
-      bht = '0;
-
-      //Write to RAM
-      if (bht_update_i.valid && !debug_mode_i) begin
-        for (int i = 0; i < G6LCCfg.INSTR_PER_FETCH; i++) begin
-          if (update_row_index == i) begin
-            bht_updated[i].valid = 1'b1;
-            bht_ram_we[i] = 1'b1;
-            bht_ram_write_address[i*$clog2(NR_ROWS)+:$clog2(NR_ROWS)] = update_pc;
-          end
-        end
-      end
-
-      for (int i = 0; i < G6LCCfg.INSTR_PER_FETCH; i++) begin
-
-        //When synchronous RAM is used, addresses are needed as soon as available
-        if (G6LCCfg.FpgaAlteraEn)
-          bht_ram_read_address_0[i*$clog2(NR_ROWS)+:$clog2(NR_ROWS)] = index;
-        if (G6LCCfg.FpgaAlteraEn)
-          bht_ram_read_address_1[i*$clog2(NR_ROWS)+:$clog2(NR_ROWS)] = update_pc;
-
-        if (check_update_row_index == i) begin
-          //When asynchronous RAM is used, the address can be updated on the cycle when data is read
-          if (!G6LCCfg.FpgaAlteraEn)
-            bht_ram_read_address_1[i*$clog2(NR_ROWS)+:$clog2(NR_ROWS)] = update_pc;
-          bht[i].saturation_counter = bht_ram_rdata_1[i*BRAM_WORD_BITS+:2];
-
-          if (bht[i].saturation_counter == 2'b11) begin
-            // we can safely decrease it
-            if (!check_bht_update_taken)
-              bht_updated[i].saturation_counter = bht[i].saturation_counter - 1;
-            else bht_updated[i].saturation_counter = 2'b11;
-            // then check if it saturated in the negative regime e.g.: branch not taken
-          end else if (bht[i].saturation_counter == 2'b00) begin
-            // we can safely increase it
-            if (check_bht_update_taken)
-              bht_updated[i].saturation_counter = bht[i].saturation_counter + 1;
-            else bht_updated[i].saturation_counter = 2'b00;
-          end else begin  // otherwise we are not in any boundaries and can decrease or increase it
-            if (check_bht_update_taken)
-              bht_updated[i].saturation_counter = bht[i].saturation_counter + 1;
-            else bht_updated[i].saturation_counter = bht[i].saturation_counter - 1;
-          end
-
-          //The data written in the RAM will have the valid bit from current input (async RAM) or the one from one clock cycle before (sync RAM)
-          bht_ram_wdata[i*BRAM_WORD_BITS+:BRAM_WORD_BITS] = G6LCCfg.FpgaAlteraEn ? {bht_updated_valid[i][0], bht_updated[i].saturation_counter} :
-                                                                           {bht_updated[i].valid, bht_updated[i].saturation_counter};
-        end
-
-
+    // Parallel per-slot BHT RAM control & branchless 2-bit saturating counter
+    // (cycle-exact replacement for serial INSTR_PER_FETCH loop).
+    for (genvar i = 0; i < G6LCCfg.INSTR_PER_FETCH; i++) begin : gen_bht_slot
+      logic       wr_en_i, chk_i;
+      logic [1:0] cur_c, sat_c;
+      assign wr_en_i = bht_update_i.valid && !debug_mode_i && (update_row_index == i);
+      assign chk_i   = (check_update_row_index == i);
+      assign bht_updated[i].valid = wr_en_i;
+      assign bht_ram_we[i]        = wr_en_i;
+      assign bht_ram_write_address[i*$clog2(NR_ROWS)+:$clog2(NR_ROWS)] = wr_en_i ? update_pc : '0;
+      assign bht_ram_read_address_0[i*$clog2(NR_ROWS)+:$clog2(NR_ROWS)] =
+          (G6LCCfg.FpgaAlteraEn || rst_ni) ? index : '0;
+      assign bht_ram_read_address_1[i*$clog2(NR_ROWS)+:$clog2(NR_ROWS)] =
+          (G6LCCfg.FpgaAlteraEn || chk_i) ? update_pc : '0;
+      assign cur_c = chk_i ? bht_ram_rdata_1[i*BRAM_WORD_BITS+:2] : 2'b00;
+      assign bht[i].valid              = 1'b0;
+      assign bht[i].saturation_counter = cur_c;
+      // Exact 2-bit saturating next-counter truth table (zero nested if/add)
+      assign sat_c[1] = (cur_c[1] & cur_c[0]) | (check_bht_update_taken & (cur_c[1] | cur_c[0]));
+      assign sat_c[0] = (cur_c[1] & cur_c[0] & check_bht_update_taken) |
+                        (~cur_c[0] & (cur_c[1] | check_bht_update_taken));
+      assign bht_updated[i].saturation_counter = chk_i ? sat_c : 2'b00;
+      assign bht_ram_wdata[i*BRAM_WORD_BITS+:BRAM_WORD_BITS] = chk_i
+          ? (G6LCCfg.FpgaAlteraEn ? {bht_updated_valid[i][0], sat_c} : {wr_en_i, sat_c})
+          : '0;
+      always_comb begin
         if (!rst_ni) begin
-          //initialize output
           bht_prediction_o[i] = '0;
+        end else if (G6LCCfg.FpgaAlteraEn && bht_updated_valid[i][0] && vpc_q == bht_updated_pc[i][0]) begin
+          bht_prediction_o[i].valid = bht_ram_wdata[i*BRAM_WORD_BITS+2];
+          bht_prediction_o[i].taken = bht_ram_wdata[i*BRAM_WORD_BITS+1];
+        end else if (G6LCCfg.FpgaAlteraEn && bht_updated_valid[i][1] && vpc_q == bht_updated_pc[i][1]) begin
+          bht_prediction_o[i].valid = bht_ram_wdata_q[i*BRAM_WORD_BITS+2];
+          bht_prediction_o[i].taken = bht_ram_wdata_q[i*BRAM_WORD_BITS+1];
         end else begin
-          //When asynchronous RAM is used, addresses can be calculated on the same cycle as data is read
-          if (!G6LCCfg.FpgaAlteraEn)
-            bht_ram_read_address_0[i*$clog2(NR_ROWS)+:$clog2(NR_ROWS)] = index;
-          //When synchronous RAM is used and data is read right after writing, we need some buffering
-          // This is one cycle of buffering
-          if (G6LCCfg.FpgaAlteraEn && bht_updated_valid[i][0] && vpc_q == bht_updated_pc[i][0]) begin
-            bht_prediction_o[i].valid = bht_ram_wdata[i*BRAM_WORD_BITS+2];
-            bht_prediction_o[i].taken = bht_ram_wdata[i*BRAM_WORD_BITS+1];
-            //This is two cycles of buffering
-          end else if (G6LCCfg.FpgaAlteraEn && bht_updated_valid[i][1] && vpc_q == bht_updated_pc[i][1]) begin
-            bht_prediction_o[i].valid = bht_ram_wdata_q[i*BRAM_WORD_BITS+2];
-            bht_prediction_o[i].taken = bht_ram_wdata_q[i*BRAM_WORD_BITS+1];
-            //In any other case we can safely read from the RAM as data is available
-          end else begin
-            bht_prediction_o[i].valid = bht_ram_rdata_0[i*BRAM_WORD_BITS+2];
-            bht_prediction_o[i].taken = bht_ram_rdata_0[i*BRAM_WORD_BITS+1];
-          end
+          bht_prediction_o[i].valid = bht_ram_rdata_0[i*BRAM_WORD_BITS+2];
+          bht_prediction_o[i].taken = bht_ram_rdata_0[i*BRAM_WORD_BITS+1];
         end
       end
     end

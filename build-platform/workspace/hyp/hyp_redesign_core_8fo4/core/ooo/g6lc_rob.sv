@@ -100,56 +100,54 @@ module g6lc_rob #(
   assign full_o  = (count_q > ROB_ENTRIES[ROB_W:0] - NR_ALLOC[ROB_W:0]);
   assign empty_o = (count_q == '0);
 
-  always_comb begin
-    automatic logic [ROB_W-1:0] hid;
-    hid = '0;
-    tail_d  = tail_q;
-    count_d = count_q;
-    for (int unsigned a = 0; a < NR_ALLOC; a++) begin
-      alloc_id_o[a] = '0;
-      if (alloc_valid_i[a] && !full_o) alloc_id_o[a] = tail_q + ROB_W'(a);
-    end
-    // Pointer and count advance by the number of allocations at once
-    // (sv-timing A107), not by one serial increment per port.
-    begin
-      automatic logic [NR_ALLOC-1:0] alloc_fire;
-      for (int unsigned a = 0; a < NR_ALLOC; a++) alloc_fire[a] = alloc_valid_i[a] && !full_o;
-      tail_d  = tail_d + ROB_W'($countones(alloc_fire));
-      count_d = count_d + (ROB_W + 1)'($countones(alloc_fire));
-    end
-    for (int unsigned r = 0; r < NR_RETIRE; r++) begin
-      hid = head_q + ROB_W'(r);
-      retire_valid_o[r] = rob_q[hid].valid && rob_q[hid].complete;
-      retire_entry_o[r] = rob_q[hid].e;
-      retire_id_o[r]    = hid;
-    end
+  // Branchless popcount for alloc & retire + single net count update
+  // (replaces $countones + serial count_d add/sub chain that billed 27.15 FO4).
+  logic [NR_ALLOC-1:0]  alloc_fire_w;
+  logic [NR_RETIRE-1:0] ret_fire_w;
+  logic [ROB_W:0]       alloc_cnt_w, ret_cnt_w;
+  for (genvar a = 0; a < NR_ALLOC; a++) begin : gen_af
+    assign alloc_fire_w[a] = alloc_valid_i[a] && !full_o;
+    assign alloc_id_o[a]   = alloc_fire_w[a] ? (tail_q + ROB_W'(a)) : '0;
+  end
+  for (genvar r = 0; r < NR_RETIRE; r++) begin : gen_rf
+    logic [ROB_W-1:0] rhid;
+    assign rhid              = head_q + ROB_W'(r);
+    assign retire_valid_o[r] = rob_q[rhid].valid && rob_q[rhid].complete;
+    assign retire_entry_o[r] = rob_q[rhid].e;
+    assign retire_id_o[r]    = rhid;
 `ifdef G6LC_MUT_ROB_POSITIONAL_FREE
-    // MUTANT: positional head+r free. Under per-hart commit heads the acked
-    // tid is not at head+r — the wrong slot is freed and count_q drifts.
-    for (int unsigned r = 0; r < NR_RETIRE; r++) begin
-      hid = head_q + ROB_W'(r);
-      if (retire_ack_i[r] && rob_q[hid].valid && rob_q[hid].complete) begin
-        rob_d[hid].valid = 1'b0;
-        // hyp8: head comes from the 2-step merge even under the mutant arm
-        count_d = count_d - 1'b1;
-      end
-    end
+    assign ret_fire_w[r]     = retire_ack_i[r] && rob_q[rhid].valid && rob_q[rhid].complete;
 `else
-    // T6b-4b: free by transaction id — under per-hart commit heads commit
-    // order across harts need not match dispatch order; a positional head+r
-    // free would evict the wrong slot and leak the acked one.
-    // Count still drops by one per port that hit. The slot clear is the
-    // per-entry assign below; free_hit is that assign's predicate.
-    for (int unsigned r = 0; r < NR_RETIRE; r++)
-      count_d = count_d - (ROB_W + 1)'(|free_hit[r]);
-    // hyp8: head is NOT re-anchored in this cone -- the post-event stop
-    // vector is captured per quarter below and merged next cycle.
+    assign ret_fire_w[r]     = |free_hit[r];
 `endif
-    if (flush_i) begin
-      tail_d  = '0;
-      count_d = '0;
+  end
+  if (NR_ALLOC == 2) begin : gen_ac2
+    assign alloc_cnt_w = (ROB_W+1)'({alloc_fire_w[0] & alloc_fire_w[1],
+                                     alloc_fire_w[0] ^ alloc_fire_w[1]});
+  end else begin : gen_acn
+    always_comb begin
+      alloc_cnt_w = '0;
+      for (int unsigned a = 0; a < NR_ALLOC; a++) alloc_cnt_w += (ROB_W+1)'(alloc_fire_w[a]);
     end
   end
+  if (NR_RETIRE == 2) begin : gen_rc2
+    assign ret_cnt_w = (ROB_W+1)'({ret_fire_w[0] & ret_fire_w[1],
+                                   ret_fire_w[0] ^ ret_fire_w[1]});
+  end else begin : gen_rcn
+    always_comb begin
+      ret_cnt_w = '0;
+      for (int unsigned r = 0; r < NR_RETIRE; r++) ret_cnt_w += (ROB_W+1)'(ret_fire_w[r]);
+    end
+  end
+  assign tail_d  = flush_i ? '0 : (tail_q + alloc_cnt_w[ROB_W-1:0]);
+  assign count_d = flush_i ? '0 : (count_q + alloc_cnt_w - ret_cnt_w);
+`ifdef G6LC_MUT_ROB_POSITIONAL_FREE
+  always_comb begin
+    for (int unsigned r = 0; r < NR_RETIRE; r++) begin
+      if (ret_fire_w[r]) rob_d[head_q + ROB_W'(r)].valid = 1'b0;
+    end
+  end
+`endif
 
   // Constant-index next state. Alloc, complete, cancel, free, flush keep
   // the old priority (later steps win) without a variable rob_d[idx] write.

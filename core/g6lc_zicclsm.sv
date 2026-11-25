@@ -223,6 +223,7 @@ module g6lc_zicclsm
               end else if (ld_match_idle) begin
                 if (ld_ex_fu_i.valid) begin
                   ld_valid_o   = 1'b1;
+                  if (CVA6Cfg.TvalEn) ld_ex_o.tval = CVA6Cfg.XLEN'(ctrl_i.vaddr);
                   pop_ld_byp_o = 1'b1;
                   state_d      = IDLE;
                 end else begin
@@ -260,6 +261,7 @@ module g6lc_zicclsm
           end else if (ld_match) begin
             if (ld_ex_fu_i.valid) begin
               ld_valid_o   = 1'b1;
+              if (CVA6Cfg.TvalEn) ld_ex_o.tval = CVA6Cfg.XLEN'(orig_q.vaddr);
               pop_ld_byp_o = 1'b1;
               state_d      = IDLE;
             end else begin
@@ -291,6 +293,7 @@ module g6lc_zicclsm
           if (ld_match) begin
             if (ld_ex_fu_i.valid) begin
               ld_valid_o   = 1'b1;
+              if (CVA6Cfg.TvalEn) ld_ex_o.tval = CVA6Cfg.XLEN'(orig_q.vaddr);
               pop_ld_byp_o = 1'b1;
               state_d      = IDLE;
             end else begin

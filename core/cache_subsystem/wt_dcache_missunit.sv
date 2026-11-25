@@ -484,13 +484,17 @@ module wt_dcache_missunit
   ///////////////////////////////////////////////////////
 
   logic sc_fail, sc_pass, sc_backoff_over;
+  logic lr_pending_q;
+  // Parity with hyp8 r127m: only a paired SC failure (an LR completed since
+  // the previous SC result) is a contention retry worth backing off for.
+  // Unpaired trap-entry reservation-clear SCs must not saturate exp_backoff.
   exp_backoff #(
       .Seed  (3),
       .MaxExp(16)
   ) i_exp_backoff (
       .clk_i,
       .rst_ni,
-      .set_i    (sc_fail),
+      .set_i    (sc_fail && lr_pending_q),
       .clr_i    (sc_pass),
       .is_zero_o(sc_backoff_over)
   );
@@ -846,6 +850,7 @@ module wt_dcache_missunit
       stores_inflight_q     <= '0;
       cas_old_q             <= '0;
       cas_new_q             <= '0;
+      lr_pending_q          <= 1'b0;
     end else begin
       state_q               <= state_d;
       cnt_q                 <= cnt_d;
@@ -865,6 +870,10 @@ module wt_dcache_missunit
       stores_inflight_q     <= stores_inflight_d;
       cas_old_q             <= cas_old_d;
       cas_new_q             <= cas_new_d;
+      if (CVA6Cfg.RVA && amo_ack) begin
+        if      (amo_req_i.amo_op == AMO_LR) lr_pending_q <= 1'b1;
+        else if (amo_req_i.amo_op == AMO_SC) lr_pending_q <= 1'b0;
+      end
     end
   end
 

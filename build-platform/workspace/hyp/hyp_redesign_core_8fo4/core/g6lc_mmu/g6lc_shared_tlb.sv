@@ -429,7 +429,11 @@ assign shared_tlb_access_o = shared_tlb_access_q;
   genvar w_gen;
   generate
     for (w_gen = 0; w_gen < G6LCCfg.PtLevels; w_gen++) begin
+`ifdef G6LC_MUT_MMU_ITLB_BLOCK_DHIT
       assign vpn_d[w_gen]               = ((|v_st_enbl[1][HYP_EXT:0]) && itlb_access_i && ~itlb_hit_i && ~dtlb_access_i) ? //
+`else
+      assign vpn_d[w_gen]               = ((|v_st_enbl[1][HYP_EXT:0]) && itlb_access_i && ~itlb_hit_i && ~(dtlb_access_i && ~dtlb_hit_i)) ? //
+`endif
           itlb_vaddr_i[12+((G6LCCfg.VpnLen/G6LCCfg.PtLevels)*(w_gen+1))-1:12+((G6LCCfg.VpnLen/G6LCCfg.PtLevels)*w_gen)] :  //
           (((|v_st_enbl[0][HYP_EXT:0]) && dtlb_access_i && ~dtlb_hit_i) ?  //
           dtlb_vaddr_i[12+((G6LCCfg.VpnLen/G6LCCfg.PtLevels)*(w_gen+1))-1:12+((G6LCCfg.VpnLen/G6LCCfg.PtLevels)*w_gen)] : vpn_q[w_gen]);
@@ -437,7 +441,11 @@ assign shared_tlb_access_o = shared_tlb_access_q;
   endgenerate
 
   if (G6LCCfg.RVH)  //THIS UPDATES THE EXTRA BITS OF VPN IN SV39x4
+`ifdef G6LC_MUT_MMU_ITLB_BLOCK_DHIT
     assign vpn_d[G6LCCfg.PtLevels] = ((|v_st_enbl[1][HYP_EXT:0]) && itlb_access_i && ~itlb_hit_i && ~dtlb_access_i) ? //
+`else
+    assign vpn_d[G6LCCfg.PtLevels] = ((|v_st_enbl[1][HYP_EXT:0]) && itlb_access_i && ~itlb_hit_i && ~(dtlb_access_i && ~dtlb_hit_i)) ? //
+`endif
         {{(((G6LCCfg.VpnLen/G6LCCfg.PtLevels)-(G6LCCfg.VpnLen%G6LCCfg.PtLevels))){1'b0}}, itlb_vaddr_i[G6LCCfg.VpnLen-1:G6LCCfg.VpnLen-(G6LCCfg.VpnLen%G6LCCfg.PtLevels)]} :  //
         (((|v_st_enbl[0][HYP_EXT:0]) && dtlb_access_i && ~dtlb_hit_i) ?  //
         {{(((G6LCCfg.VpnLen/G6LCCfg.PtLevels)-(G6LCCfg.VpnLen%G6LCCfg.PtLevels))){1'b0}}, dtlb_vaddr_i[G6LCCfg.VpnLen-1: G6LCCfg.VpnLen-(G6LCCfg.VpnLen%G6LCCfg.PtLevels)]} : //
@@ -492,11 +500,23 @@ assign shared_tlb_access_o = shared_tlb_access_q;
       pte_rd_en   = '1;
       tag_rd_addr = flush_idx_q;
       pte_rd_addr = flush_idx_q;
+`ifdef G6LC_MUT_STLB_RW_COLLIDE
     end else if (walk_blk_q || flush_i || flush_vvma_i || flush_gvma_i) begin
+`else
+    // N4: single-port tag/pte SRAMs share tag_addr = tag_wr_en ? wr : rd across
+    // all ways; hold lookup quiet on a same-cycle SRAM fill (UseSharedTlb=1) so
+    // an incoming read never aliases to tag_wr_addr while shared_tag_valid reads tag_rd_addr.
+    end else if (walk_blk_q || flush_i || flush_vvma_i || flush_gvma_i ||
+                 (G6LCCfg.UseSharedTlb && shared_tlb_update_i.valid)) begin
+`endif
 `endif
       //minimal approach holding lookup quiet during flush
-      // if we got an ITLB miss
+      // if we got an ITLB miss (yield only to a real DTLB miss, not a DTLB hit)
+`ifdef G6LC_MUT_MMU_ITLB_BLOCK_DHIT
     end else if ((|v_st_enbl[1][HYP_EXT:0]) & itlb_access_i & ~itlb_hit_i & ~dtlb_access_i) begin
+`else
+    end else if ((|v_st_enbl[1][HYP_EXT:0]) & itlb_access_i & ~itlb_hit_i & ~(dtlb_access_i & ~dtlb_hit_i)) begin
+`endif
       tag_rd_en           = '1;
       tag_rd_addr         = itlb_vaddr_i[12+:$clog2(G6LCCfg.SharedTlbDepth)];
       pte_rd_en           = '1;
@@ -594,7 +614,7 @@ assign shared_tlb_access_o = shared_tlb_access_q;
         // check if translation is a: S-Stage and G-Stage, S-Stage only or G-Stage only translation and virtualization mode is on/off
         match_stage[i] = shared_tag_rd[i].v_st_enbl == v_st_enbl[i_req_q][HYP_EXT*2:0];
 
-        if (shared_tag_valid[i] && match_asid[i] && match_vmid[i] && match_hart[i] && match_stage[i]) begin
+        if (shared_tlb_access_q && shared_tag_valid[i] && match_asid[i] && match_vmid[i] && match_hart[i] && match_stage[i]) begin
           if (|level_match[i] || napot_tag_match[i]) begin
             shared_tlb_hit_d = 1'b1;
             // Prepare PTE with NAPOT patching if needed
@@ -774,116 +794,51 @@ assign shared_tlb_access_o = shared_tlb_access_q;
   end
 
   localparam int unsigned VPN_SEG_W = G6LCCfg.VpnLen / G6LCCfg.PtLevels;
-  always_comb begin : sfence_match_logic
-    sfence_match_way = '0;
-
-    for (int unsigned i = 0; i < SHARED_TLB_WAYS; i++) begin
-      logic [G6LCCfg.PtLevels-1:0] flush_vpn_match;
-      logic [G6LCCfg.PtLevels-1:0] flush_level_match;
-      logic                        flush_addr_matches;
-      logic                        flush_addr_napot_matches;
-      logic                        upper_levels_match;
-
-      flush_vpn_match          = '0;
-      flush_level_match        = '0;
-      flush_addr_matches       = 1'b0;
-      flush_addr_napot_matches = 1'b0;
-      upper_levels_match       = 1'b0;
-
-      for (int unsigned level = 0; level < G6LCCfg.PtLevels; level++) begin
-        flush_vpn_match[level] = flush_vaddr_q[12 + VPN_SEG_W*level +: VPN_SEG_W] == shared_tag_rd[i].vpn[level];
-      end
-      //comparing the flush VA with stored VPN level by level_match
-      for (int unsigned level = 0; level < G6LCCfg.PtLevels; level++) begin
-        upper_levels_match = 1'b1;
-        for (int unsigned k = level; k < G6LCCfg.PtLevels; k++) begin
-          upper_levels_match &= flush_vpn_match[k];
-        end
-        flush_level_match[level] = upper_levels_match && ((level==0)? 1'b1: shared_tag_rd[i].is_page[G6LCCfg.PtLevels-1-level][0]);
-      end
-
-      if (G6LCCfg.SvnapotEn && shared_tag_rd[i].is_napot_64k) begin
-        //VA matching NAPOT tag
-        flush_addr_napot_matches = ((G6LCCfg.PtLevels > 1)? (&flush_vpn_match[G6LCCfg.PtLevels-1:1]): 1'b1) && (flush_vaddr_q[12+VPN_SEG_W-1: 16] == shared_tag_rd[i].vpn[0][VPN_SEG_W-1: 4]);
-      end
-
-      flush_addr_matches = (|flush_level_match) || flush_addr_napot_matches;
-
-      if (shared_tag_valid[i] && ((HYP_EXT == 0) || !shared_tag_rd[i].v_st_enbl[HYP_EXT*2])) begin
-        if (flush_asid_is0 && flush_vaddr_is0) begin  //SFENCE.VMA x0, x0
-          sfence_match_way[i] = 1'b1;
-        end else if(flush_asid_is0 && flush_addr_matches && !flush_vaddr_is0) begin //SFENCE.VMA vaddr, x0
-          sfence_match_way[i] = 1'b1;
-        end else if(!pte[i][0].g && flush_addr_matches && (flush_asid_q == shared_tag_rd[i].asid) && !flush_vaddr_is0 && !flush_asid_is0) begin //SFENCE.VMA vaddr, asid
-          sfence_match_way[i] = 1'b1;
-        end else if(!pte[i][0].g && flush_vaddr_is0  &&(flush_asid_q == shared_tag_rd[i].asid) && !flush_asid_is0)begin
-          sfence_match_way[i] = 1'b1;
-        end
+  // Parallel per-way sfence/vvma flush-match logic (replaces triple-nested
+  // procedural for (i) for (level) for (k) loop that billed 36.30 FO4).
+  for (genvar i = 0; i < SHARED_TLB_WAYS; i++) begin : gen_flush_match_way
+    logic [G6LCCfg.PtLevels-1:0] f_vpn_m, f_lvl_m;
+    logic f_napot_m, f_addr_m, f_asid_ok, f_vmid_m;
+    for (genvar lv = 0; lv < G6LCCfg.PtLevels; lv++) begin : gen_flv
+      assign f_vpn_m[lv] =
+          (flush_vaddr_q[12 + VPN_SEG_W*lv +: VPN_SEG_W] == shared_tag_rd[i].vpn[lv]);
+    end
+    for (genvar lv = 0; lv < G6LCCfg.PtLevels; lv++) begin : gen_flm
+      if (lv == 0) begin : gen_l0
+        assign f_lvl_m[0] = &f_vpn_m;
+      end else begin : gen_ln
+        assign f_lvl_m[lv] = (&f_vpn_m[G6LCCfg.PtLevels-1:lv]) &&
+                             shared_tag_rd[i].is_page[G6LCCfg.PtLevels-1-lv][0];
       end
     end
-  end
+    assign f_napot_m = G6LCCfg.SvnapotEn && shared_tag_rd[i].is_napot_64k &&
+        ((G6LCCfg.PtLevels > 1) ? (&f_vpn_m[G6LCCfg.PtLevels-1:1]) : 1'b1) &&
+        (flush_vaddr_q[12+VPN_SEG_W-1:16] == shared_tag_rd[i].vpn[0][VPN_SEG_W-1:4]);
+    assign f_addr_m  = (|f_lvl_m) || f_napot_m;
+    assign f_asid_ok = flush_asid_is0 || (!pte[i][0].g && (flush_asid_q == shared_tag_rd[i].asid));
+    assign f_vmid_m  = !shared_tag_rd[i].v_st_enbl[HYP_EXT] ||
+                       (flush_vmid_q == shared_tag_rd[i].vmid);
 
-  always_comb begin : vvma_match_logic
-    vvma_match_way = '0;
-
-    for (int unsigned i = 0; i < SHARED_TLB_WAYS; i++) begin
-      logic [G6LCCfg.PtLevels-1:0] flush_vpn_match;
-      logic [G6LCCfg.PtLevels-1:0] flush_level_match;
-      logic                        flush_addr_matches;
-      logic                        flush_addr_napot_matches;
-      logic                        upper_levels_match;
-      logic                        current_vmid_matches;
-
-      flush_vpn_match = '0;
-      flush_level_match = '0;
-      flush_addr_matches = 1'b0;
-      flush_addr_napot_matches = 1'b0;
-      upper_levels_match = 1'b0;
-
-      for (int unsigned level = 0; level < G6LCCfg.PtLevels; level++) begin
-        flush_vpn_match[level] = flush_vaddr_q[12 + VPN_SEG_W*level +: VPN_SEG_W] == shared_tag_rd[i].vpn[level];
-      end
-      for (int unsigned level = 0; level < G6LCCfg.PtLevels; level++) begin
-        upper_levels_match = 1'b1;
-        for (int unsigned k = level; k < G6LCCfg.PtLevels; k++) begin
-          upper_levels_match &= flush_vpn_match[k];
-        end
-        flush_level_match[level] = upper_levels_match && ((level==0) ? 1'b1: shared_tag_rd[i].is_page[G6LCCfg.PtLevels-1-level][0]);
-      end
-
-      if (G6LCCfg.SvnapotEn && shared_tag_rd[i].is_napot_64k) begin
-        flush_addr_napot_matches = ((G6LCCfg.PtLevels > 1) ? (&flush_vpn_match[G6LCCfg.PtLevels-1:1]) : 1'b1) && (flush_vaddr_q[12+VPN_SEG_W-1:16]==shared_tag_rd[i].vpn[0][VPN_SEG_W-1:4]);
-      end
-
-      flush_addr_matches = (|flush_level_match) || flush_addr_napot_matches;
-
-      current_vmid_matches = ((shared_tag_rd[i].v_st_enbl[HYP_EXT] && (flush_vmid_q == shared_tag_rd[i].vmid)) ||!shared_tag_rd[i].v_st_enbl[HYP_EXT]);
+    assign sfence_match_way[i] =
+        shared_tag_valid[i] && ((HYP_EXT == 0) || !shared_tag_rd[i].v_st_enbl[HYP_EXT*2]) &&
+        (flush_vaddr_is0 || f_addr_m) && f_asid_ok;
 
 `ifdef G6LC_MUT_T3_STLB_VVMA
-      // Review mutant: the pre-r43 priority if-chain.
-      if(G6LCCfg.RVH && shared_tag_valid[i] && shared_tag_rd[i].v_st_enbl[HYP_EXT*2] && shared_tag_rd[i].v_st_enbl[0]) begin
-        if (flush_asid_is0 && flush_vaddr_is0 && current_vmid_matches) begin
-          vvma_match_way[i] = 1'b1;
-        end else if (flush_asid_is0 && flush_addr_matches && !flush_vaddr_is0 && current_vmid_matches) begin
-          vvma_match_way[i] = 1'b1;
-        end else if(!pte[i][0].g && flush_addr_matches && (flush_asid_q == shared_tag_rd[i].asid) && !flush_vaddr_is0 && !flush_asid_is0 && current_vmid_matches) begin
-          vvma_match_way[i] = 1'b1;
-        end else if(!pte[i][0].g && flush_vaddr_is0 && (flush_asid_q == shared_tag_rd[i].asid) && !flush_asid_is0 && current_vmid_matches) begin
-          vvma_match_way[i] = 1'b1;
-        end
+    always_comb begin : vvma_mut_way
+      vvma_match_way[i] = 1'b0;
+      if (G6LCCfg.RVH && shared_tag_valid[i] && shared_tag_rd[i].v_st_enbl[HYP_EXT*2] && shared_tag_rd[i].v_st_enbl[0]) begin
+        if (flush_asid_is0 && flush_vaddr_is0 && f_vmid_m) vvma_match_way[i] = 1'b1;
+        else if (flush_asid_is0 && f_addr_m && !flush_vaddr_is0 && f_vmid_m) vvma_match_way[i] = 1'b1;
+        else if (!pte[i][0].g && f_addr_m && (flush_asid_q == shared_tag_rd[i].asid) && !flush_vaddr_is0 && !flush_asid_is0 && f_vmid_m) vvma_match_way[i] = 1'b1;
+        else if (!pte[i][0].g && flush_vaddr_is0 && (flush_asid_q == shared_tag_rd[i].asid) && !flush_asid_is0 && f_vmid_m) vvma_match_way[i] = 1'b1;
       end
-`else
-      // r43-T T5 (A22): the four exclusive vvma arms factor to
-      // (vaddr0 || addr_matches) && (asid0 || (!g && asid_eq)) — the
-      // priority chain is exact-flattened into parallel arm values.
-      if(G6LCCfg.RVH && shared_tag_valid[i] && shared_tag_rd[i].v_st_enbl[HYP_EXT*2] && shared_tag_rd[i].v_st_enbl[0]) begin
-        vvma_match_way[i] = current_vmid_matches &&
-            (flush_vaddr_is0 || flush_addr_matches) &&
-            (flush_asid_is0 ||
-             (!pte[i][0].g && (flush_asid_q == shared_tag_rd[i].asid)));
-      end
-`endif
     end
+`else
+    assign vvma_match_way[i] =
+        G6LCCfg.RVH && shared_tag_valid[i] && shared_tag_rd[i].v_st_enbl[HYP_EXT*2] &&
+        shared_tag_rd[i].v_st_enbl[0] && f_vmid_m &&
+        (flush_vaddr_is0 || f_addr_m) && f_asid_ok;
+`endif
   end
 
 //pragma translate_off

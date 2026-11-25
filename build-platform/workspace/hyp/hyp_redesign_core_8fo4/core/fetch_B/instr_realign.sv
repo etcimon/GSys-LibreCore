@@ -521,52 +521,62 @@ module instr_realign
     // Slot gather is an OR of one-hot matches. rl_coh is the last set
     // carry, so the masked OR matches the old ascending last-writer.
     for (genvar k = 0; k < G6LCCfg.INSTR_PER_FETCH; k++) begin : gen_slot
-      logic [NrHalfWords-1:0]                   vacc;
-      logic [NrHalfWords-1:0][31:0]             iacc;
-      logic [NrHalfWords-1:0][G6LCCfg.VLEN-1:0] aacc, bacc, oacc;
+      logic [NrHalfWords-1:0]                   v_terms, vacc;
+      logic [NrHalfWords-1:0][31:0]             i_terms, iacc;
+      logic [NrHalfWords-1:0][G6LCCfg.VLEN-1:0] a_terms, b_terms, o_terms, aacc, bacc, oacc;
       for (genvar h = 0; h < NrHalfWords; h++) begin : gen_acc
-        logic                    vterm;
-        logic [31:0]             iterm;
-        logic [G6LCCfg.VLEN-1:0] aterm, bterm, oterm;
-        assign vterm = rl_carryf[side][k][h] | rl_normf[side][k][h];
-        assign iterm = ({32{rl_carryf[side][k][h]}} & {hw[0], carry_instr_q}) |
-                       ({32{rl_normf[side][k][h]}}  & {rl_hi[h], hw[h]});
-        assign aterm = ({G6LCCfg.VLEN{rl_carryf[side][k][h]}} & carry_addr_q) |
-                       ({G6LCCfg.VLEN{rl_normf[side][k][h]}}  & rl_saddr[h]);
-        assign bterm = ({G6LCCfg.VLEN{rl_carryf[side][k][h]}} & carry_addr_q) |
-                       ({G6LCCfg.VLEN{rl_normf[side][k][h]}}  & a_addr_q);
-        assign oterm = {G6LCCfg.VLEN{rl_normf[side][k][h]}} & rl_soff[h];
+        assign v_terms[h] = rl_carryf[side][k][h] | rl_normf[side][k][h];
+        assign i_terms[h] = ({32{rl_carryf[side][k][h]}} & {hw[0], carry_instr_q}) |
+                            ({32{rl_normf[side][k][h]}}  & {rl_hi[h], hw[h]});
+        assign a_terms[h] = ({G6LCCfg.VLEN{rl_carryf[side][k][h]}} & carry_addr_q) |
+                            ({G6LCCfg.VLEN{rl_normf[side][k][h]}}  & rl_saddr[h]);
+        assign b_terms[h] = ({G6LCCfg.VLEN{rl_carryf[side][k][h]}} & carry_addr_q) |
+                            ({G6LCCfg.VLEN{rl_normf[side][k][h]}}  & a_addr_q);
+        assign o_terms[h] = {G6LCCfg.VLEN{rl_normf[side][k][h]}} & rl_soff[h];
         if (h == 0) begin : gen_z
-          assign vacc[h] = vterm;
-          assign iacc[h] = iterm;
-          assign aacc[h] = aterm;
-          assign bacc[h] = bterm;
-          assign oacc[h] = oterm;
+          assign vacc[h] = v_terms[0];
+          assign iacc[h] = i_terms[0];
+          assign aacc[h] = a_terms[0];
+          assign bacc[h] = b_terms[0];
+          assign oacc[h] = o_terms[0];
         end else begin : gen_n
-          assign vacc[h] = vacc[h-1] | vterm;
-          assign iacc[h] = iacc[h-1] | iterm;
-          assign aacc[h] = aacc[h-1] | aterm;
-          assign bacc[h] = bacc[h-1] | bterm;
-          assign oacc[h] = oacc[h-1] | oterm;
+          assign vacc[h] = vacc[h-1] | v_terms[h];
+          assign iacc[h] = iacc[h-1] | i_terms[h];
+          assign aacc[h] = aacc[h-1] | a_terms[h];
+          assign bacc[h] = bacc[h-1] | b_terms[h];
+          assign oacc[h] = oacc[h-1] | o_terms[h];
         end
       end
-      assign sv_s[side][k] = vacc[NrHalfWords-1];
-      assign si_s[side][k] = iacc[NrHalfWords-1];
-      assign sa_s[side][k] = aacc[NrHalfWords-1];
-      assign sb_s[side][k] = bacc[NrHalfWords-1];
-      assign so_s[side][k] = oacc[NrHalfWords-1];
-    end
-    for (genvar h = 0; h < NrHalfWords; h++) begin : gen_carry_mux
-      logic [15:0] i_term;
-      assign i_term = {16{rl_coh[side][h]}} & hw[h];
-      if (h == 0) begin : gen_z
-        assign carry_i_acc[side][h] = i_term;
-      end else begin : gen_n
-        assign carry_i_acc[side][h] = carry_i_acc[side][h-1] | i_term;
+      // Balanced log-depth OR reduction (replaces linear NrHalfWords serial chain)
+      if (NrHalfWords == 4) begin : gen_or4
+        assign sv_s[side][k] = (v_terms[0] | v_terms[1]) | (v_terms[2] | v_terms[3]);
+        assign si_s[side][k] = (i_terms[0] | i_terms[1]) | (i_terms[2] | i_terms[3]);
+        assign sa_s[side][k] = (a_terms[0] | a_terms[1]) | (a_terms[2] | a_terms[3]);
+        assign sb_s[side][k] = (b_terms[0] | b_terms[1]) | (b_terms[2] | b_terms[3]);
+        assign so_s[side][k] = (o_terms[0] | o_terms[1]) | (o_terms[2] | o_terms[3]);
+      end else begin : gen_orn
+        assign sv_s[side][k] = vacc[NrHalfWords-1];
+        assign si_s[side][k] = iacc[NrHalfWords-1];
+        assign sa_s[side][k] = aacc[NrHalfWords-1];
+        assign sb_s[side][k] = bacc[NrHalfWords-1];
+        assign so_s[side][k] = oacc[NrHalfWords-1];
       end
     end
-    assign cv_s[side]   = |rl_coh[side];
-    assign ci_fin[side] = cv_s[side] ? carry_i_acc[side][NrHalfWords-1] : carry_instr_q;
+    logic [NrHalfWords-1:0][15:0] c_terms;
+    for (genvar h = 0; h < NrHalfWords; h++) begin : gen_carry_mux
+      assign c_terms[h] = {16{rl_coh[side][h]}} & hw[h];
+      if (h == 0) begin : gen_z
+        assign carry_i_acc[side][h] = c_terms[0];
+      end else begin : gen_n
+        assign carry_i_acc[side][h] = carry_i_acc[side][h-1] | c_terms[h];
+      end
+    end
+    assign cv_s[side] = |rl_coh[side];
+    if (NrHalfWords == 4) begin : gen_cor4
+      assign ci_fin[side] = cv_s[side] ? ((c_terms[0] | c_terms[1]) | (c_terms[2] | c_terms[3])) : carry_instr_q;
+    end else begin : gen_corn
+      assign ci_fin[side] = cv_s[side] ? carry_i_acc[side][NrHalfWords-1] : carry_instr_q;
+    end
     // FastContinuation: the split PC is window_last_pc for every side.
     assign ca_fin[side] = cv_s[side] ? window_last_pc : carry_addr_q;
   end

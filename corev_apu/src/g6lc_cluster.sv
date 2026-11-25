@@ -736,6 +736,7 @@ module g6lc_cluster
         .PF_MSHR_RESERVE(CVA6Cfg.L2PfMshrReserve != 0 ? CVA6Cfg.L2PfMshrReserve : 32'd1),
         .PF_MAX_OUT     (CVA6Cfg.L2PfMaxOutstanding != 0 ? CVA6Cfg.L2PfMaxOutstanding : 32'd1),
         .PF_QUIET       (CVA6Cfg.L2PfQuiet != 0 ? CVA6Cfg.L2PfQuiet : 32'd8),
+        .PF_EVICT_OK    (!CVA6Cfg.L3InclusiveEn),
         .AXI_ADDR_WIDTH (AXI_ADDR_WIDTH),
         .AXI_DATA_WIDTH (AXI_DATA_WIDTH),
         .AXI_ID_WIDTH   (AXI_ID_WIDTH),

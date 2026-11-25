@@ -760,7 +760,13 @@ module g6lc_tlb
       end
 
       if (flush_i) begin
+`ifdef G6LC_MUT_TLB_FILL_BEATS_FLUSH
+        // Review mutation: a coincident fill suppresses the SFENCE eviction.
+        // The mmu leaf's TLB_FF_* checks must catch the surviving stale entry.
+        if (!fill_fire && row_sfence_match[i]) tags_n[i].valid = 1'b0;
+`else
         if (row_sfence_match[i]) tags_n[i].valid = 1'b0;
+`endif
       end else if (flush_vvma_i && G6LCCfg.RVH) begin
         if (tags_q[i].v_st_enbl[HYP_EXT*2] && tags_q[i].v_st_enbl[0]) begin
           // invalidate logic

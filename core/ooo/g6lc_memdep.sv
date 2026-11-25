@@ -12,8 +12,9 @@
 
 module g6lc_memdep #(
     parameter config_pkg::cva6_cfg_t CVA6Cfg = config_pkg::cva6_cfg_empty,
-    parameter int unsigned NR_SETS  = 64,
-    parameter int unsigned NR_TRAIN = 2
+    parameter int unsigned NR_SETS    = 64,
+    parameter int unsigned NR_TRAIN   = 2,
+    parameter int unsigned CLEAR_BITS = 16
 ) (
     input  logic clk_i,
     input  logic rst_ni,
@@ -68,6 +69,9 @@ module g6lc_memdep #(
   logic [NR_SETS-1:0][7:0] set_ssid_q, set_ssid_d;
   // Load PCs that previously collided with older stores
   logic [NR_SETS-1:0] ld_wait_q, ld_wait_d;
+  logic [CLEAR_BITS-1:0] clear_cnt_q;
+  logic                  clear_pulse;
+  assign clear_pulse = &clear_cnt_q;
 
   function automatic logic [SW-1:0] idx(input logic [CVA6Cfg.VLEN-1:0] pc);
     return pc[2 +: SW];
@@ -111,7 +115,10 @@ module g6lc_memdep #(
       end
     end
 
-    if (flush_i) begin
+    // Predictor tables survive replay/mispredict flushes so a violating load's
+    // learned ld_wait entry is not erased by its own replay flush; periodic
+    // epoch clear prevents long-term table saturation.
+    if (clear_pulse) begin
       set_valid_d = '0;
       ld_wait_d   = '0;
     end
@@ -122,10 +129,12 @@ module g6lc_memdep #(
       set_valid_q <= '0;
       set_ssid_q  <= '0;
       ld_wait_q   <= '0;
+      clear_cnt_q <= '0;
     end else begin
       set_valid_q <= set_valid_d;
       set_ssid_q  <= set_ssid_d;
       ld_wait_q   <= ld_wait_d;
+      clear_cnt_q <= clear_cnt_q + CLEAR_BITS'(1);
     end
   end
 

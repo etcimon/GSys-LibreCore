@@ -526,6 +526,27 @@ module g6lc_lsq #(
   end
 //pragma translate_on
 
+  function automatic logic [31:0][LANES-1:0] lane_be_hi_table();
+    logic [2*LANES-1:0] m;
+    for (int unsigned s = 0; s < 4; s++) begin
+      for (int unsigned off = 0; off < 8; off++) begin
+        m = '0;
+        for (int unsigned b = 0; b < LANES; b++)
+          if (b < (1 << s)) m[b] = 1'b1;
+        m = (G6LCCfg.XLEN == 64) ? (m << off[2:0]) : (m << off[1:0]);
+        lane_be_hi_table[{s[1:0], off[2:0]}] = m[2*LANES-1:LANES];
+      end
+    end
+  endfunction
+  localparam logic [31:0][LANES-1:0] LANE_BE_HI_TAB = lane_be_hi_table();
+
+  function automatic logic [LANES-1:0] lane_be_hi(
+      input logic [G6LCCfg.PLEN-1:0] a,
+      input logic [1:0]              size
+  );
+    return G6LCCfg.RVZicclsm ? LANE_BE_HI_TAB[{size, a[2:0]}] : '0;
+  endfunction
+
   function automatic logic same_word(
       input logic [G6LCCfg.PLEN-1:0] a,
       input logic [G6LCCfg.PLEN-1:0] b
@@ -536,15 +557,41 @@ module g6lc_lsq #(
       same_word = (a == b);
   endfunction
 
+  function automatic logic bytes_overlap(
+      input logic [G6LCCfg.PLEN-1:0] a,
+      input logic [LANES-1:0]        a_lo,
+      input logic [LANES-1:0]        a_hi,
+      input logic [G6LCCfg.PLEN-1:0] b,
+      input logic [LANES-1:0]        b_lo,
+      input logic [LANES-1:0]        b_hi
+  );
+    logic sw, ab, ba;
+    sw = same_word(a, b) && ((a_lo & b_lo) != '0);
+`ifdef G6LC_MUT_LSQ_NO_ZICCLSM_CROSSWORD
+    ab = 1'b0;
+    ba = 1'b0;
+`else
+    ab = G6LCCfg.RVZicclsm && (G6LCCfg.PLEN > 6) &&
+         ((a[G6LCCfg.PLEN-1:3] + (G6LCCfg.PLEN-3)'(1)) == b[G6LCCfg.PLEN-1:3]) &&
+         ((a_hi & b_lo) != '0);
+    ba = G6LCCfg.RVZicclsm && (G6LCCfg.PLEN > 6) &&
+         ((b[G6LCCfg.PLEN-1:3] + (G6LCCfg.PLEN-3)'(1)) == a[G6LCCfg.PLEN-1:3]) &&
+         ((a_lo & b_hi) != '0);
+`endif
+    return sw || ab || ba;
+  endfunction
+
   // Same hoist the file already uses for s_be[s]/ev0_be: the event
   // byte enables are invariant in the (u,v) pair scan — compute them
   // once per event instead of inside the guarded block.
-  logic [LANES-1:0] ev_be [NR_UPDATE];
-  logic [LANES-1:0] q_be;
+  logic [LANES-1:0] ev_be [NR_UPDATE], ev_be_hi [NR_UPDATE];
+  logic [LANES-1:0] q_be, q_be_hi;
   for (genvar u = 0; u < NR_UPDATE; u++) begin : gen_ev_be
-    assign ev_be[u] = lane_be(ev_addr[u], ev_addr_size[u]);
+    assign ev_be[u]    = lane_be(ev_addr[u], ev_addr_size[u]);
+    assign ev_be_hi[u] = lane_be_hi(ev_addr[u], ev_addr_size[u]);
   end
-  assign q_be = lane_be(ev_query_addr, ev_query_size);
+  assign q_be    = lane_be(ev_query_addr, ev_query_size);
+  assign q_be_hi = lane_be_hi(ev_query_addr, ev_query_size);
 
   always_comb begin
     vv_match_d = '0;
@@ -563,7 +610,8 @@ module g6lc_lsq #(
             if (ev_addr_valid[v] && !ev_addr_is_st[v] &&
                 !cancelled_mask_i[ev_addr_id[v]] &&
                 (!LSQ_HART_OWN || ev_ld_hart[v] == ev_st_hart[u])) begin
-              if (same_word(ev_addr[v], ev_addr[u]) && (ev_be[u] & ev_be[v]) != '0)
+              if (bytes_overlap(ev_addr[v], ev_be[v], ev_be_hi[v],
+                                ev_addr[u], ev_be[u], ev_be_hi[u]))
                 vv_match_d[u][(v < u) ? v : v-1] = 1'b1;
               vv_older_d[u][(v < u) ? v : v-1] = g6lc_ooo_pkg::ooo_age_older(
                   IDW, 32'(ev_addr_id[u]), 32'(ev_addr_id[v]),
@@ -578,7 +626,8 @@ module g6lc_lsq #(
         vv_pay_d[u][NR_UPDATE-1] = q_ld_pc;
         if (q_ev_valid && !cancelled_mask_i[ev_query_id] &&
             (!LSQ_HART_OWN || ev_query_hart == ev_st_hart[u])) begin
-          if (same_word(ev_query_addr, ev_addr[u]) && (ev_be[u] & q_be) != '0)
+          if (bytes_overlap(ev_query_addr, q_be, q_be_hi,
+                            ev_addr[u], ev_be[u], ev_be_hi[u]))
             vv_match_d[u][NR_UPDATE-1] = 1'b1;
           vv_older_d[u][NR_UPDATE-1] = g6lc_ooo_pkg::ooo_age_older(
               IDW, 32'(ev_addr_id[u]), 32'(ev_query_id),
@@ -1233,42 +1282,52 @@ module g6lc_lsq #(
   logic [ST_ENTRIES-1:0]           s_sev, s_skn;
   logic [ST_ENTRIES-1:0][G6LCCfg.PLEN-1:0] s_addr;
   logic [ST_ENTRIES-1:0][1:0]      s_size;
-  logic [ST_ENTRIES-1:0][LANES-1:0] s_be;
-  logic [LANES-1:0]                ev0_be;
+  logic [ST_ENTRIES-1:0][LANES-1:0] s_be, s_be_hi;
+  logic [LANES-1:0]                ev0_be, ev0_be_hi;
   for (genvar s = 0; s < ST_ENTRIES; s++) begin : gen_sattr
-    assign s_sev[s]  = ev_phys_valid[1] && ev_phys_id[1] == st_q[s].id &&
-                       ev_phys_hart[1] == st_q[s].hart;
-    assign s_skn[s]  = st_q[s].addr_v || s_sev[s];
-    assign s_addr[s] = s_sev[s] ? ev_phys_addr[1] : st_q[s].addr;
-    assign s_size[s] = s_sev[s] ? ev_phys_size[1] : st_q[s].size;
-    assign s_be[s]   = lane_be(s_addr[s], s_size[s]);
+    assign s_sev[s]   = ev_phys_valid[1] && ev_phys_id[1] == st_q[s].id &&
+                        ev_phys_hart[1] == st_q[s].hart;
+    assign s_skn[s]   = st_q[s].addr_v || s_sev[s];
+    assign s_addr[s]  = s_sev[s] ? ev_phys_addr[1] : st_q[s].addr;
+    assign s_size[s]  = s_sev[s] ? ev_phys_size[1] : st_q[s].size;
+    assign s_be[s]    = lane_be(s_addr[s], s_size[s]);
+    assign s_be_hi[s] = lane_be_hi(s_addr[s], s_size[s]);
   end
-  assign ev0_be = lane_be(ev_phys_addr[0], ev_phys_size[0]);
+  assign ev0_be    = lane_be(ev_phys_addr[0], ev_phys_size[0]);
+  assign ev0_be_hi = lane_be_hi(ev_phys_addr[0], ev_phys_size[0]);
 
   for (genvar l = 0; l < LD_ENTRIES; l++) begin : gen_phys_l
     logic                        levt, lkn, outer_l, condA;
-    logic [G6LCCfg.PLEN-1:0]     laddr;
+    logic [G6LCCfg.PLEN-1:0]     laddr, laddr_end;
     logic [1:0]                  lsize;
-    logic [LANES-1:0]            lbe;
+    logic [LANES-1:0]            lbe, lbe_hi;
     logic [1:0]                  mm;
     logic [ST_ENTRIES-1:0]       pm;
-    assign levt  = ev_phys_valid[0] && ev_phys_id[0] == ld_q[l].id &&
-                   ev_phys_hart[0] == ld_q[l].hart;
-    assign lkn   = ld_q[l].addr_v || levt;
-    assign laddr = levt ? ev_phys_addr[0] : ld_q[l].addr;
-    assign lsize = levt ? ev_phys_size[0] : ld_q[l].size;
-    assign lbe   = lane_be(laddr, lsize);
+    assign levt      = ev_phys_valid[0] && ev_phys_id[0] == ld_q[l].id &&
+                       ev_phys_hart[0] == ld_q[l].hart;
+    assign lkn       = ld_q[l].addr_v || levt;
+    assign laddr     = levt ? ev_phys_addr[0] : ld_q[l].addr;
+    assign lsize     = levt ? ev_phys_size[0] : ld_q[l].size;
+    assign laddr_end = laddr + G6LCCfg.PLEN'((4'd1 << lsize) - 4'd1);
+    assign lbe       = lane_be(laddr, lsize);
+    assign lbe_hi    = lane_be_hi(laddr, lsize);
     assign outer_l = ld_q[l].valid && sb_live_i[ld_q[l].id] &&
         !cancelled_mask_i[ld_q[l].id] && lkn &&
         !config_pkg::is_inside_nonidempotent_regions(G6LCCfg, 64'(laddr));
     assign condA = pv_live && ev_phys_hart[0] == ld_q[l].hart &&
         g6lc_ooo_pkg::ooo_age_older(IDW, 32'(ev_phys_id[0]),
                                     32'(ld_q[l].id), 32'(commit_ptr_i)) &&
-        same_word(ev_phys_addr[0], laddr) &&
-        ((ev0_be & lbe) != '0);
+        bytes_overlap(ev_phys_addr[0], ev0_be, ev0_be_hi, laddr, lbe, lbe_hi);
     for (genvar m = 0; m < 2; m++)
+`ifdef G6LC_MUT_LSQ_NO_CROSSLINE_MOD
       assign mm[m] = ev_mod_valid[m] &&
                      ((laddr >> LINE_OFF) == (ev_mod_addr[m] >> LINE_OFF));
+`else
+      assign mm[m] = ev_mod_valid[m] && (
+                     ((laddr >> LINE_OFF) == (ev_mod_addr[m] >> LINE_OFF)) ||
+                     (G6LCCfg.RVZicclsm &&
+                      ((laddr_end >> LINE_OFF) == (ev_mod_addr[m] >> LINE_OFF))));
+`endif
     for (genvar s = 0; s < ST_ENTRIES; s++) begin : gen_phys_s
       assign pm[s] = st_q[s].valid && sb_live_i[st_q[s].id] &&
               !cancelled_mask_i[st_q[s].id] &&
@@ -1276,8 +1335,7 @@ module g6lc_lsq #(
               (levt || s_sev[s]) &&
               g6lc_ooo_pkg::ooo_age_older(IDW, 32'(st_q[s].id),
                                           32'(ld_q[l].id), 32'(commit_ptr_i)) &&
-              same_word(s_addr[s], laddr) &&
-              ((s_be[s] & lbe) != '0);
+              bytes_overlap(s_addr[s], s_be[s], s_be_hi[s], laddr, lbe, lbe_hi);
     end
     assign pv_replay_c[l] = outer_l && (condA || (|mm) || (|pm));
     assign phys_alias_cand[l] = (PHYS_VALIDATE && !flush_i) && (outer_l && |pm);

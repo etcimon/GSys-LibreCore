@@ -159,35 +159,11 @@ module g6lc_fe_redirect
                          g6lc_fetch_pkg::SRC_RESTORE,
                          g6lc_fetch_pkg::SRC_MISP});
 
-  always_comb begin : arb_select_id
-    arb_valid = 1'b1;
-    arb_src   = arch_src;
-    unique case (arch_src)
-      g6lc_fetch_pkg::SRC_EX,
-      g6lc_fetch_pkg::SRC_ERET,
-      g6lc_fetch_pkg::SRC_COMMIT,
-      g6lc_fetch_pkg::SRC_PEER,
-      g6lc_fetch_pkg::SRC_DEBUG,
-      g6lc_fetch_pkg::SRC_RESTORE,
-      g6lc_fetch_pkg::SRC_MISP: ;
-      default: begin
-        arb_valid = 1'b0;
-      end
-    endcase
-    // ---- lower-priority sources, only when no arch/misp winner ----
-    if (!arb_valid) begin
-      if (replay_i) begin
-        arb_valid  = 1'b1;
-        arb_src    = SRC_REPLAY;
-      end else if (ov1_valid_i) begin
-        arb_valid  = 1'b1;
-        arb_src    = SRC_OV1;
-      end else if (ov2_valid_i) begin
-        arb_valid  = 1'b1;
-        arb_src    = SRC_OV2;
-      end
-    end
-  end
+  // Flat parallel arb_valid / arb_src (replaces 7-arm case + 3-deep else-if chain)
+  logic [3:0] low_src;
+  assign low_src   = replay_i ? SRC_REPLAY : (ov1_valid_i ? SRC_OV1 : (ov2_valid_i ? SRC_OV2 : SRC_NONE));
+  assign arb_valid = !arb_no_arch || replay_i || ov1_valid_i || ov2_valid_i;
+  assign arb_src   = arb_no_arch ? low_src : arch_src;
 
   always_comb begin : arb_select_pc
     arb_pc = '0;

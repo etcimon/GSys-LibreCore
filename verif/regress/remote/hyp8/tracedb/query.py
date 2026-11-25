@@ -16,11 +16,13 @@ Reports
                             events of an error type (symbolized)
   asserts                   every model assertion, with its last instructions
   hangs    [-r TAG]         commit-gap dumps grouped by head instruction
+  buckets  [-r TAG ...]     event_analysis counts by bucket and evidence
+  primary  [-r TAG ...]     grouped primary-candidate events from event_analysis
   threads  [-r TAG]         per core / hart: retired, IPC, gap, events
   uart     -r TAG           boot phases: cycle, kernel time, text
   profile  -r TAG [-b N]    where the sampled PCs are (region x privilege)
   diff     A B              error types of two runs over their common cycles
-  sql      "SELECT ..."     anything else
+  sql      "SELECT ..."     anything else (or `sql -f query.sql`)
 
 Under the testharness proxy: HYP8_TRACEDB and HYP8_TRACE_QUERY (the argument
 string), output to stdout and TH_OUT_DIR/query.txt.
@@ -65,9 +67,15 @@ class Q:
         short = tag.replace('hyp8-osbi-scalar-', '').replace('hyp8-', '')
         return short if kind == 'witness' else f'{short}/{test}'
 
-    def sym(self, pc):
-        """firmware symbol+offset of a hex PC (kernel images carry no symbols here)."""
+    def kind(self, rid):
+        r = self.db.execute('SELECT kind FROM run WHERE id=?', (rid,)).fetchone()
+        return r[0] if r else ''
+
+    def sym(self, pc, rid=None):
+        """firmware symbol+offset of a hex PC (OpenSBI symbols apply to witness boots only)."""
         if pc is None:
+            return ''
+        if rid is not None and self.kind(rid) != 'witness':
             return ''
         a = int(pc, 16)
         if not 0x80000000 <= a < 0x80200000:
@@ -144,7 +152,7 @@ class Q:
                 f"WHERE run_id=? AND etype LIKE ? AND {col} IS NOT NULL GROUP BY {col} ORDER BY 2 DESC LIMIT ?",
                 (rid, a.etype + '%', a.n)).fetchall()
             if rows:
-                rows = [list(r) + [self.sym(r[0]) if col != 'aux' else ''] for r in rows]
+                rows = [list(r) + [self.sym(r[0], rid) if col != 'aux' else ''] for r in rows]
                 out.append(table(rows, [col, 'count', 'first_cycle', 'last_cycle', 'etypes', 'symbol']))
         return '\n\n'.join(out) or 'no events'
 
@@ -161,7 +169,7 @@ class Q:
                 fmt.append(['', '', '', '>>> event', '', '', '', ''])
                 continue
             fmt.append([r[0], r[1], r[2], r[3], r[4], f'x{r[5]}={r[6]}' if r[5] is not None else '',
-                        (f'{r[7]}' + (f' <- {r[8]}' if r[8] else '')) if r[7] else '', self.sym(r[3])])
+                        (f'{r[7]}' + (f' <- {r[8]}' if r[8] else '')) if r[7] else '', self.sym(r[3], rid)])
         return table(fmt, ['cycle', 'hart', 'priv', 'pc', 'insn', 'rd', 'mem', 'symbol'])
 
     def around(self, a):
@@ -186,8 +194,32 @@ class Q:
             out.append(self._context(rid, eid, a.k))
         return '\n'.join(out) or 'no assertions'
 
+    def _has_analysis(self):
+        r = self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='event_analysis'"
+        ).fetchone()
+        return r is not None
+
     def hangs(self, a):
         ids = self.run_ids(a.run)
+        if self._has_analysis():
+            rows = self.db.execute(
+                f"SELECT e.run_id, COALESCE(a.bucket,''), COALESCE(a.evidence,''), e.etype, e.pc, "
+                f"COUNT(*), MIN(e.cycle), MAX(e.cycle), MAX(a.since_ack), MAX(a.series_max_ack), e.detail "
+                f"FROM event e LEFT JOIN event_analysis a ON a.event_id=e.id "
+                f"WHERE e.class='hang' AND e.run_id IN ({','.join('?' * len(ids))}) "
+                "GROUP BY e.run_id, a.bucket, a.evidence, e.etype, e.pc "
+                "ORDER BY CASE a.bucket WHEN 'primary-candidate' THEN 0 ELSE 1 END, "
+                "MAX(a.series_max_ack) DESC, e.run_id, 7", ids).fetchall()
+            fmt = []
+            for rid, bkt, ev, et, pc, n, c0, c1, max_ack, smax, det in rows:
+                d = json.loads(det) if det else {}
+                lu, lsu = d.get('LU req:', {}), {**d.get('LSU bypass', {}), **d.get('LU', {})}
+                fmt.append([self.name(rid), bkt, ev, et, pc, self.sym(pc, rid), n, c0, c1, max_ack, smax,
+                            f"lu_state={lsu.get('state', '')} lsu_cnt={lsu.get('cnt', '')} "
+                            f"ld_va={lu.get('vaddr', '')} dtlb_hit={lu.get('dtlb_hit', '')}"])
+            return table(fmt, ['run', 'bucket', 'evidence', 'head', 'head_pc', 'symbol', 'dumps',
+                               'first', 'last', 'max_ack', 'series_max', 'lsu'])
         rows = self.db.execute(
             f"SELECT e.run_id, e.etype, e.pc, e.addr, COUNT(*), MIN(e.cycle), MAX(e.cycle), e.aux, e.detail "
             f"FROM event e WHERE e.class='hang' AND e.run_id IN ({','.join('?' * len(ids))}) "
@@ -196,10 +228,41 @@ class Q:
         for rid, et, pc, addr, n, c0, c1, aux, det in rows:
             d = json.loads(det) if det else {}
             lu, lsu = d.get('LU req:', {}), {**d.get('LSU bypass', {}), **d.get('LU', {})}
-            fmt.append([self.name(rid), et, pc, self.sym(pc), n, c0, c1, aux,
+            fmt.append([self.name(rid), et, pc, self.sym(pc, rid), n, c0, c1, aux,
                         f"lu_state={lsu.get('state', '')} lsu_cnt={lsu.get('cnt', '')} "
                         f"ld_va={lu.get('vaddr', '')} dtlb_hit={lu.get('dtlb_hit', '')}"])
         return table(fmt, ['run', 'head', 'head_pc', 'symbol', 'dumps', 'first', 'last', 'gap', 'lsu'])
+
+    def buckets(self, a):
+        if not self._has_analysis():
+            return 'event_analysis table not present (re-run ingest.py)'
+        ids = self.run_ids(a.run)
+        rows = self.db.execute(
+            f"SELECT a.bucket, a.evidence, COUNT(*), COUNT(DISTINCT a.run_id), "
+            f"MAX(a.since_ack), MAX(a.series_max_ack) "
+            f"FROM event_analysis a WHERE a.run_id IN ({','.join('?' * len(ids))}) "
+            "GROUP BY a.bucket, a.evidence ORDER BY 3 DESC", ids).fetchall()
+        return table(rows, ['bucket', 'evidence', 'count', 'runs', 'max_ack', 'max_series_ack'])
+
+    def primary(self, a):
+        if not self._has_analysis():
+            return 'event_analysis table not present (re-run ingest.py)'
+        ids = self.run_ids(a.run)
+        rows = self.db.execute(
+            f"SELECT e.run_id, a.evidence, e.class, e.etype, e.core, e.hart, e.pc, "
+            f"COUNT(*), MIN(e.cycle), MAX(e.cycle), MAX(a.since_ack), MAX(a.series_max_ack), "
+            f"MAX(a.series_span), MIN(a.note) "
+            f"FROM event_analysis a JOIN event e ON e.id=a.event_id "
+            f"WHERE a.bucket='primary-candidate' AND e.run_id IN ({','.join('?' * len(ids))}) "
+            "GROUP BY e.run_id, a.evidence, e.class, e.etype, e.core, e.hart, e.pc "
+            "ORDER BY CASE a.evidence WHEN 'model-assert' THEN 0 WHEN 'hang-persistent' THEN 1 ELSE 2 END, "
+            "MAX(a.series_max_ack) DESC, COUNT(*) DESC", ids).fetchall()
+        fmt = []
+        for rid, ev, cls, et, core, hart, pc, n, c0, c1, mack, smax, span, note in rows:
+            fmt.append([self.name(rid), ev, cls, et, core, hart, pc, self.sym(pc, rid),
+                        n, c0, c1, mack, smax, span, (note or '')[:60]])
+        return table(fmt, ['run', 'evidence', 'class', 'etype', 'core', 'hart', 'pc', 'symbol',
+                           'n', 'first_cyc', 'last_cyc', 'max_ack', 'smax_ack', 'span', 'note'])
 
     def threads(self, a):
         ids = self.run_ids(a.run)
@@ -257,7 +320,12 @@ class Q:
         return f'common cycles: 0..{lim}\n' + table(rows, ['etype', self.name(ia), self.name(ib), 'delta', 'rfix'])
 
     def sql(self, a):
-        cur = self.db.execute(' '.join(a.args))
+        stmt = open(a.file).read() if a.file else ' '.join(a.args)
+        if not stmt.strip():
+            sys.exit('sql requires a query string or -f/--file PATH')
+        cur = self.db.execute(stmt)
+        if cur.description is None:
+            return 'ok'
         return table(cur.fetchall(), [d[0] for d in cur.description])
 
 
@@ -268,6 +336,7 @@ def main():
     ap.add_argument('report')
     ap.add_argument('-r', '--run', action='append', default=[])
     ap.add_argument('-e', '--etype', default='')
+    ap.add_argument('-f', '--file', default='', help='SQL file for `sql` report')
     ap.add_argument('-b', '--bucket', type=int, default=100000000)
     ap.add_argument('-n', type=int, default=6)
     ap.add_argument('-k', type=int, default=24, help='instructions of context')

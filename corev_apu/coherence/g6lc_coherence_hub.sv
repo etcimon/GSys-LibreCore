@@ -535,10 +535,19 @@ module g6lc_coherence_hub
     logic aw_may_invalidate;
     assign aw_may_invalidate = core_req_i[aw_winner].aw.cache[1] ||
         (|core_req_i[aw_winner].aw.atop) || core_req_i[aw_winner].aw.lock;
+    // Overlap next AW's 1-cycle snoop-filter lookup (sig_start) with the prior
+    // AW's W-beat (w_busy_q); aw_grant still gates on !w_busy_q and coh_block_ar
+    // blocks ARs during sig_start and sig_pending_q.
+`ifdef G6LC_MUT_HUB_SIG_WAIT_WBUSY
     assign coh_block_ar = OOO_SF &&
         (sig_pending_q || (!w_busy_q && |aw_req && !ar_hold_q));
     assign sig_start = OOO_SF && sig_initialized && !sig_pending_q && !ar_hold_q &&
         !w_busy_q && !inv_pend_valid_q && |aw_req && !aw_ot_full;
+`else
+    assign sig_start = OOO_SF && sig_initialized && !sig_pending_q && !ar_hold_q &&
+        !inv_pend_valid_q && |aw_req && !aw_ot_full;
+    assign coh_block_ar = OOO_SF && (sig_pending_q || sig_start);
+`endif
 
     always_comb begin
       logic [OT_W-1:0] bs, rs;
@@ -1252,9 +1261,8 @@ module g6lc_coherence_hub
         .inv_deq_seq_o   (inv_deq_seq)
     );
 
-    assign hub_idle_o = (aw_ot_cnt_q == '0) && (ar_ot_cnt_q == '0) &&
-                        !w_busy_q && !aw_hold_q && !ar_hold_q &&
-                        !inv_pend_valid_q && (inv_enq_seq == inv_deq_seq);
+    assign hub_idle_o = !(|slot_used) && !w_busy_q && !aw_hold_q && !ar_hold_q &&
+                        !sig_pending_q && !inv_pend_valid_q && (inv_enq_seq == inv_deq_seq);
 
     //pragma translate_off
     // N1d/T10g hub stall dump (+smt_stats): birth-stamp AR/AW slots; when a

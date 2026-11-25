@@ -346,6 +346,71 @@ assign fsel = (NH <= 1) ? '0 : hart_i[HID_W-1:0];
         assign ra_d[h][s] = {ra_hi, ra_lo};
       end
     end
+  end else begin : gen_ras_dn
+`ifndef G6LC_MUT_RAS_NO_GENERAL_DEPTH
+    // General DEPTH != 2 circular-ring RAS (parity with DEPTH == 2 semantics
+    // so configs with RASDepth = 4/8/16 never leave ra_d/tos_d/cnt_d undriven).
+    assign data_o.valid = (cnt_q[fsel] != '0);
+    assign data_o.ra    = data_o.valid ? ra_q[fsel][tos_q[fsel]] : '0;
+    assign snap_tos_o   = tos_q[fsel];
+    assign snap_cnt_o   = cnt_q[fsel];
+    assign snap_top_o   = ra_q[fsel][tos_q[fsel]];
+
+    always_comb begin
+      ra_d  = ra_q;
+      tos_d = tos_q;
+      cnt_d = cnt_q;
+      for (int unsigned h = 0; h < NH; h++) begin
+        logic spec_here, res_here, flush_here, pop_do;
+        logic [PTR_W-1:0] t0, t_after, t_push_slot;
+        logic [CNT_W-1:0] cnt_res;
+        spec_here  = spec_live && (fsel == HID_W'(h));
+        res_here   = res_valid_q && (res_epoch_q == epoch_i) && (res_hart_q == HID_W'(h));
+        flush_here = flush_bp_i && (fsel == HID_W'(h));
+        pop_do     = res_pop_q && (res_cnt_q != '0);
+        t0         = res_tos_q;
+        t_after    = pop_do ? dec(t0) : t0;
+        t_push_slot = inc(t_after);
+        cnt_res    = pop_do ? (res_cnt_q - CNT_W'(1)) : res_cnt_q;
+        if (res_push_q && (cnt_res != CNT_W'(DEPTH))) cnt_res = cnt_res + CNT_W'(1);
+
+        if (flush_here) begin
+          tos_d[h] = '0;
+          cnt_d[h] = '0;
+        end else if (res_here) begin
+          ra_d[h][t0] = res_top_q;
+          if (res_push_q) ra_d[h][t_push_slot] = res_push_ra_q;
+          tos_d[h] = res_push_q ? t_push_slot : t_after;
+          cnt_d[h] = cnt_res;
+        end else if (spec_here) begin
+          if (push_i && pop_i) begin
+            if (cnt_q[h] == '0) begin
+              tos_d[h]          = inc(tos_q[h]);
+              cnt_d[h]          = CNT_W'(1);
+              ra_d[h][inc(tos_q[h])] = data_i;
+            end else begin
+              ra_d[h][tos_q[h]] = data_i;
+            end
+          end else if (push_i) begin
+            tos_d[h]          = inc(tos_q[h]);
+            cnt_d[h]          = (cnt_q[h] == CNT_W'(DEPTH)) ? CNT_W'(DEPTH) : cnt_q[h] + CNT_W'(1);
+            ra_d[h][inc(tos_q[h])] = data_i;
+          end else if (pop_i && (cnt_q[h] != '0)) begin
+            tos_d[h] = dec(tos_q[h]);
+            cnt_d[h] = cnt_q[h] - CNT_W'(1);
+          end
+        end
+      end
+    end
+`else
+    assign data_o     = '0;
+    assign snap_tos_o = '0;
+    assign snap_cnt_o = '0;
+    assign snap_top_o = '0;
+    assign ra_d       = '0;
+    assign tos_d      = '0;
+    assign cnt_d      = '0;
+`endif
   end
 
   //pragma translate_off

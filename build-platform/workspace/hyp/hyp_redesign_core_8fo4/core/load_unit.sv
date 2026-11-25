@@ -541,10 +541,19 @@ assign ldbuf_full = &ldbuf_valid_q;
         rdata_q[rresp_idx] <= req_port_i.data_rdata;
         rkill_q[rresp_idx] <= (rresp_idx == ldbuf_last_id_q) && req_port_o.kill_req;
       end
+`ifdef G6LC_MUT_LU_SERIAL_TOMB
       if (ldbuf_r) begin
         rpend_q[ldbuf_rindex] <= 1'b0;
         rkill_q[ldbuf_rindex] <= 1'b0;
       end
+`else
+      for (int unsigned i = 0; i < G6LCCfg.NrLoadBufEntries; i++) begin
+        if (ldbuf_pop_oh[i]) begin
+          rpend_q[i] <= 1'b0;
+          rkill_q[i] <= 1'b0;
+        end
+      end
+`endif
       // r51: a pending slot whose deferred exception published this
       // cycle is tombstoned; the drn pick frees it next cycle (the
       // publish itself carries no pop, keeping the publish gate out of
@@ -743,6 +752,7 @@ assign ldbuf_full = &ldbuf_valid_q;
   assign pa_capture_state = state_q[1] ||
       (state_q[6] && (G6LCCfg.MmuPresent || G6LCCfg.NonIdemPotenceEn)) ||
       ((state_q[0] || state_q[2]) && !ldbuf_full) ||
+      (LU_TLB_STAGED && state_q[LU_B_WAIT_SPEC_LOAD] && !ldbuf_full) ||
       (LU_TLB_STAGED && state_q[LU_B_ABORT_TRANSACTION] && G6LCCfg.MmuPresent);
   assign load_pa_now_v = valid_i && dtlb_hit_i &&
       (!G6LCCfg.OoOEn || !cancel_hit) && pa_capture_state;
@@ -1042,7 +1052,10 @@ assign ldbuf_full = &ldbuf_valid_q;
 `else
   assign spec_ld = G6LCCfg.OoOEn ? not_commit_time : lsu_ctrl_i.is_speculative_load;
 `endif
-  assign tr_idle_ok = !G6LCCfg.SpeculativeSb || dtlb_hit_i || !spec_ld;
+  // Under a staged TLB (LU_TLB_STAGED), a speculative OoO load must probe the
+  // DTLB across IDLE/WAIT_SPEC_LOAD so dtlb_hit_i can answer 2 cycles later;
+  // g6lc_mmu suppresses PTW walks via lsu_no_walk_i so misses never walk.
+  assign tr_idle_ok = !G6LCCfg.SpeculativeSb || LU_TLB_STAGED || dtlb_hit_i || !spec_ld;
   assign accept_req_w = valid_i && !ldbuf_full;
   assign st_idle = state_q[0];
   assign st_gnt  = state_q[1];
@@ -1060,9 +1073,10 @@ assign ldbuf_full = &ldbuf_valid_q;
   // livelock on every translated load that is granted before its hit
   // (hyp8_sv39_load; the first translated load of the Linux witness).
   // TlbStages == 1: the term is the constant 0 (the unstaged netlist).
-  logic tr_abort_hold;
+  logic tr_abort_hold, tr_spec_hold;
   assign tr_abort_hold = LU_TLB_STAGED & state_q[LU_B_ABORT_TRANSACTION] & G6LCCfg.MmuPresent;
-  assign tr_state = tr_or_gx | tr_issue | tr_abort_hold;
+  assign tr_spec_hold  = LU_TLB_STAGED & state_q[LU_B_WAIT_SPEC_LOAD] & accept_req_w;
+  assign tr_state = tr_or_gx | tr_issue | tr_abort_hold | tr_spec_hold;
   assign translation_req_o = ~cancelled_request & tr_state;
   // D$ request is the same decode, not a priority arm inside the FSM.
   // IDLE and SEND_TAG issue only when the load is not speculative-NC,
@@ -1697,15 +1711,21 @@ assign ldbuf_full = &ldbuf_valid_q;
   assign a_drn  = drn_any && (LU_EXPEND ? 1'b1 : !a_expub) && !a_data;
 `endif
   for (genvar gi = 0; gi < G6LCCfg.NrLoadBufEntries; gi++) begin : gen_pop_oh
-    // r127: the publish and drain picks are already one-hot (pub_oh /
-    // drn_oh, lowest set of pub_ok / drn_ok); a_data implies pub_any and
-    // a_drn implies drn_any, so the pick bit itself is the pop bit. The
-    // former form went one-hot -> index tree -> per-slot compare. Checked
-    // every cycle by g6lc_r127_lu_pop_eq below.
+    // Parallel tombstone drain: ready flushed/killed ldbuf slots need no
+    // writeback port and are disjoint from pub_ok/ex_pub, so free ALL ready
+    // tombstones immediately (even while a_data or a_expub publishes) to
+    // relieve post-flush ldbuf_full stalls (305k cycles in r127m).
+`ifdef G6LC_MUT_LU_SERIAL_TOMB
     assign ldbuf_pop_oh[gi] =
         ((LU_EXPEND ? 1'b0 : a_expub) && (ldbuf_id_t'(rresp_idx) == ldbuf_id_t'(gi))) |
         (a_data && pub_oh[gi]) |
         (a_drn  && drn_oh[gi]);
+`else
+    assign ldbuf_pop_oh[gi] =
+        ((LU_EXPEND ? 1'b0 : a_expub) && (ldbuf_id_t'(rresp_idx) == ldbuf_id_t'(gi))) |
+        (a_data && pub_oh[gi]) |
+        drn_ok[gi];
+`endif
   end
   //pragma translate_off
   // r127 equivalence: the pre-r127 serial arm order and the indexed pop.
@@ -1718,9 +1738,17 @@ assign ldbuf_full = &ldbuf_valid_q;
       g6lc_r127_lu_arms_eq: assert (a_data === rf_a_data && a_drn === rf_a_drn)
         else $error("load_unit: equiv publish arms");
 `endif
+`ifdef G6LC_MUT_LU_SERIAL_TOMB
       g6lc_r127_lu_pop_eq: assert (ldbuf_pop_oh ===
           (ldbuf_r ? (G6LCCfg.NrLoadBufEntries'(1) << ldbuf_rindex) : '0))
         else $error("load_unit: equiv pop mask");
+`else
+      g6lc_r127_lu_pop_eq: assert (ldbuf_pop_oh ===
+          (((LU_EXPEND ? 1'b0 : a_expub) ? (G6LCCfg.NrLoadBufEntries'(1) << rresp_idx) : '0) |
+           (a_data ? (G6LCCfg.NrLoadBufEntries'(1) << pub_idx_w) : '0) |
+           drn_ok))
+        else $error("load_unit: equiv pop mask");
+`endif
     end
   end
   //pragma translate_on
@@ -1925,7 +1953,7 @@ assign ldbuf_full = &ldbuf_valid_q;
         if (ldbuf_w && ldbuf_windex == ldbuf_id_t'(i) &&
             offset_misaligned(ldbuf_wdata.operation, ldbuf_wdata.address_offset))
           mis_trk_q[i] <= 1'b1;
-        else if (ldbuf_r && ldbuf_rindex == ldbuf_id_t'(i))
+        else if (ldbuf_pop_oh[i])
           mis_trk_q[i] <= 1'b0;
         // r129: the same four causes the pop-cycle check accepts (r124);
         // under LoadExPubStages==2 the record presents the cycle before
@@ -1937,7 +1965,7 @@ assign ldbuf_full = &ldbuf_valid_q;
              ex_o.cause == riscv::LOAD_GUEST_PAGE_FAULT) &&
             trans_id_o == ldbuf_q[i].trans_id)
           mis_done_q[i] <= 1'b1;
-        else if (ldbuf_r && ldbuf_rindex == ldbuf_id_t'(i))
+        else if (ldbuf_pop_oh[i])
           mis_done_q[i] <= 1'b0;
       end
     end
@@ -1945,7 +1973,7 @@ assign ldbuf_full = &ldbuf_valid_q;
   for (genvar gi = 0; gi < NLD; gi++) begin : gen_misaligned_entry_check
     misaligned_entry_excepts :
     assert property (@(posedge clk_i) disable iff (~rst_ni)
-        (mis_trk_q[gi] && ldbuf_r && ldbuf_rindex == ldbuf_id_t'(gi)) |->
+        (mis_trk_q[gi] && ldbuf_pop_oh[gi]) |->
           // r124 (@475,300,009): the privileged spec lets a misaligned
           // load report its page/access fault instead of the misaligned
           // exception ("may have either higher or lower priority"); the
@@ -2293,7 +2321,7 @@ assign ldbuf_full = &ldbuf_valid_q;
         if (accept_req) begin
           // start the translation process even though we do not know if the addresses match this should ease timing
           // don't start the translation for speculative loads that miss on tlb
-          rf_translation_req_o = (!G6LCCfg.SpeculativeSb || dtlb_hit_i || !spec_ld);
+          rf_translation_req_o = (!G6LCCfg.SpeculativeSb || LU_TLB_STAGED || dtlb_hit_i || !spec_ld);
           // check if load is speculative and non idempotent, if it is then stall and wait for branch result
           if (!G6LCCfg.SpeculativeSb || !spec_ld || (dtlb_hit_i && !paddr_ni)) begin
             // R3a: if STQ can fully satisfy this load, complete from forward
@@ -2386,6 +2414,7 @@ assign ldbuf_full = &ldbuf_valid_q;
       end
 
       4'(LU_B_WAIT_SPEC_LOAD): begin
+        if (LU_TLB_STAGED && accept_req) rf_translation_req_o = 1'b1;
         // if we have a misspredicted speculative load
         if (G6LCCfg.SpeculativeSb && lsu_ctrl_i.is_speculative_load_miss) begin
           // pop load - but only if we are not getting an rvalid in here - otherwise we will over-write an incoming transaction
@@ -2436,7 +2465,7 @@ assign ldbuf_full = &ldbuf_valid_q;
         if (accept_req) begin
           // start the translation process even though we do not know if the addresses match this should ease timing
           // don't start the translation for speculative loads that miss on tlb
-          rf_translation_req_o = (!G6LCCfg.SpeculativeSb || dtlb_hit_i || !spec_ld);
+          rf_translation_req_o = (!G6LCCfg.SpeculativeSb || LU_TLB_STAGED || dtlb_hit_i || !spec_ld);
           // check if load is speculative and non idempotent, if it is then stall and wait for branch result
           if (!G6LCCfg.SpeculativeSb || !spec_ld || (dtlb_hit_i && !paddr_ni)) begin
             // check if the page offset matches with a store, if it does stall and wait

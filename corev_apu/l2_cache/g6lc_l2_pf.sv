@@ -187,8 +187,19 @@ module g6lc_l2_pf #(
             st_d[train_hit_idx].conf   = (st_q[train_hit_idx].conf == 2'd3)
                 ? st_q[train_hit_idx].conf : st_q[train_hit_idx].conf + 2'd1;
             if (st_q[train_hit_idx].conf >= 2'd1) begin
+`ifdef G6LC_MUT_PF_REDUNDANT_REARM
               st_d[train_hit_idx].pend  = PW'(PEND_CAP);
               st_d[train_hit_idx].ahead = PW'(1);
+`else
+              if ((st_q[train_hit_idx].conf >= 2'd2) &&
+                  (st_q[train_hit_idx].pend == '0) && (PEND_CAP > 1)) begin
+                st_d[train_hit_idx].pend  = PW'(1);
+                st_d[train_hit_idx].ahead = PW'(PEND_CAP);
+              end else begin
+                st_d[train_hit_idx].pend  = PW'(PEND_CAP);
+                st_d[train_hit_idx].ahead = PW'(1);
+              end
+`endif
             end
           end else begin
             // First/changed delta: (re)train, drop the confidence history.

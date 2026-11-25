@@ -2952,7 +2952,7 @@ module tb_g6lc_hyp8_linecheck;
   int lim = 0;
 
   // nextline kernel + line table
-  logic               flush, red_valid, red_step, hold, advance;
+  logic               flush, flush_bp, red_valid, red_step, hold, advance;
   logic [C.VLEN-1:0]  boot_addr, red_pc, hold_pc;
   logic               train_valid, train_taken, train_tagdom;
   logic [C.VLEN-1:0]  train_pc, train_target;
@@ -2978,6 +2978,7 @@ module tb_g6lc_hyp8_linecheck;
       .clk_i           (clk),
       .rst_ni          (rst_n),
       .flush_i         (flush),
+      .flush_bp_i      (flush_bp),
       .boot_addr_i     (boot_addr),
       .red_valid_i     (red_valid),
       .red_pc_i        (red_pc),
@@ -3130,7 +3131,7 @@ module tb_g6lc_hyp8_linecheck;
   endtask
 
   initial begin
-    flush = 0; red_valid = 0; red_step = 0; hold = 0; advance = 0;
+    flush = 0; flush_bp = 0; red_valid = 0; red_step = 0; hold = 0; advance = 0;
     hold_pc = '0; red_pc = '0; boot_addr = 64'h10000;
     train_valid = 0; train_taken = 0; train_tagdom = 0;
     train_pc = '0; train_target = '0;
@@ -3281,6 +3282,19 @@ module tb_g6lc_hyp8_linecheck;
     step(1, 1'b0);                            // push 0x10050, new frontier
     check(ov1_valid && ov1_pc == 64'h10058, "LINECHECK_OV1_NEW_STATE");
     resume_pc = '0;
+
+    // ---- F3: pipeline flush_i preserves trained ltaken_q (only kills
+    //    in-flight line_taken_q); architectural flush_bp_i clears ltaken_q.
+    train(64'h10060, 1'b1, 64'h10070, 1'b1);
+    flush = 1'b1; tick(); flush = 1'b0;        // ordinary trap/replay flush
+    reseed(64'h10058);
+    step(1);
+    check(fetch_address == 64'h10060, "F3_CURSOR");
+    check(line_taken && line_target == 64'h10070, "F3_FLUSH_PRESERVES_NL");
+    flush_bp = 1'b1; tick(); flush_bp = 1'b0;  // architectural BP flush
+    reseed(64'h10058);
+    step(1);
+    check(!line_taken, "F3_FLUSH_BP_CLEARS_NL");
 
     // ---- G: the g6lc_fe_frontier predicted-successor cases -------------
     if (C.INSTR_PER_FETCH < 3)
@@ -4152,6 +4166,32 @@ module tb_g6lc_hyp8_pmp;
     #1;
     check(lsu_valid_o === 1'b0, "B4_NOVALID");
     check(lsu_ex_o.valid === 1'b0, "B4_NOEX");
+
+    // B5: higher-priority MMU page fault or address-misaligned exception must
+    // NEVER be overwritten by a PMP access fault when the untranslated/stale
+    // paddr falls outside PMP (RISC-V Priv §3.1.15; caught by G6LC_MUT_PMP_OVERWRITE_EX).
+    lsu_valid    = 1'b1;
+    lsu_is_store = 1'b0;
+    lsu_paddr    = 64'h0000_0000_0000_0000;  // denied by PMP in S-mode
+    lsu_vaddr    = 64'h6a09_e667_bb67_ae80;  // non-canonical VA
+    lsu_ex_i     = '{valid: 1'b1, cause: riscv::LOAD_PAGE_FAULT,
+                     tval: 64'h6a09_e667_bb67_ae80, default: '0};
+    #1;
+    check(lsu_ex_o.valid === 1'b1, "B5_LD_PF_VALID");
+    check(lsu_ex_o.cause === riscv::LOAD_PAGE_FAULT, "B5_LD_PF_PRESERVED");
+    check(lsu_ex_o.tval  === 64'h6a09_e667_bb67_ae80, "B5_LD_PF_TVAL");
+
+    lsu_is_store = 1'b1;
+    lsu_ex_i     = '{valid: 1'b1, cause: riscv::STORE_PAGE_FAULT,
+                     tval: 64'h0000_0040_0000_1000, default: '0};
+    #1;
+    check(lsu_ex_o.valid === 1'b1, "B5_ST_PF_VALID");
+    check(lsu_ex_o.cause === riscv::STORE_PAGE_FAULT, "B5_ST_PF_PRESERVED");
+    check(lsu_ex_o.tval  === 64'h0000_0040_0000_1000, "B5_ST_PF_TVAL");
+
+    lsu_valid = 1'b0;
+    lsu_ex_i  = '0;
+    #1;
 
     // ---- F: fetch areq currency. if_req_q snapshots the MMU/PMA reply
     // every cycle, so it answers the PREVIOUS cycle's request. The
@@ -7612,6 +7652,52 @@ module tb_g6lc_hyp8_mmu;
     tick(); s1drv.upd.valid = 1'b0;
   endtask
 
+  // Drive one coincident SFENCE/fill edge. The lookup pins are parked off-map
+  // so fill_fire is not suppressed by a leftover hit; the fill itself is not
+  // required to win. The architectural invariant under test is narrower and
+  // stronger: the flushed translation must never survive the edge.
+  task automatic t0_fill_flush_edge(int i, logic [C_G0.VpnLen-1:0] vpn,
+                                    logic [C_G0.ASID_WIDTH-1:0] asid, logic glob,
+                                    logic [C_G0.PPNW-1:0] ppn, logic [1:0] ispg,
+                                    logic napot,
+                                    logic [C_G0.ASID_WIDTH-1:0] flush_asid,
+                                    logic [C_G0.VLEN-1:0] flush_va);
+    s0sel = i;
+    s0drv.va = 64'hFFFF_FF00_0000_0000; s0drv.acc = 1'b0;
+    s0drv.upd = '0;
+    s0drv.upd.valid = 1'b1;
+    s0drv.upd.vpn = vpn;
+    s0drv.upd.asid = asid;
+    s0drv.upd.v_st_enbl = 1'b1;
+    s0drv.upd.is_page = ispg;
+    s0drv.upd.is_napot_64k = napot;
+    s0drv.upd.content.v = 1'b1;
+    s0drv.upd.content.g = glob;
+    s0drv.upd.content.ppn = ppn;
+    s0drv.upd.g_content.v = 1'b1;
+    s0drv.upd.g_content.ppn = ppn + 44'h111;
+    s0drv.fa = flush_asid;
+    s0drv.fva = flush_va;
+    s0drv.fl = 1'b1;
+    tick();
+    s0drv.upd.valid = 1'b0;
+    s0drv.fl = 1'b0;
+  endtask
+
+  // After a flush/fill race the coincident fill may either be dropped or
+  // installed after the flush. Both are valid microarchitectural orders. A
+  // hit is therefore required to be the new translation; a miss is accepted.
+  task automatic t0_expect_miss_or_new(int i, logic [C_G0.VLEN-1:0] va,
+                                       logic [C_G0.ASID_WIDTH-1:0] asid,
+                                       logic [C_G0.PPNW-1:0] new_ppn,
+                                       string tag);
+    t0_look(i, va, asid, '0);
+    if (t_hit0[i])
+      check(t_ct0[i].ppn === new_ppn, $sformatf("%s_NEW_T%0d", tag, i));
+    s0drv.acc = 1'b0;
+    tick();
+  endtask
+
   // rfix131a-07 helpers: flush-all, and a lookup with its expected outcome
   // followed by one idle edge (a staged instance still presents the hit of
   // the previous response on the next edge, which would hold off a fill).
@@ -7682,6 +7768,48 @@ module tb_g6lc_hyp8_mmu;
     t0_expect(i, 64'h0000_0000_0090_1000, C_G0.ASID_WIDTH'(5), 1, 44'h6001, "TLB_OVL_KEEP_A");
     t0_expect(i, 64'h0000_0000_0090_2000, C_G0.ASID_WIDTH'(5), 1, 44'h6002, "TLB_OVL_KEEP_B");
     t0_expect(i, 64'h0000_0000_0090_1000, C_G0.ASID_WIDTH'(6), 1, 44'h6003, "TLB_OVL_KEEP_C");
+    t0_flush_all(i);
+  endtask
+
+  // rfix131a deep-tracedb residual TLB race: SFENCE invalidation and a PTW
+  // fill can arrive on one edge while an SMT sibling keeps using the shared
+  // TLB. The coincident fill is allowed to drop (the current conservative
+  // order) or serialize after the flush; what must never happen is the
+  // pre-SFENCE translation surviving. The non-overlapping fill makes the
+  // review mutation G6LC_MUT_TLB_FILL_BEATS_FLUSH visible: it leaves the
+  // stale translation behind even though the new fill succeeds elsewhere.
+  task automatic t0_fill_flush_race(int i);
+    // A: selective vaddr+ASID flush of A coincident with non-overlapping fill B.
+    t0_flush_all(i);
+    t0_fill(i, C_G0.VpnLen'(27'h000_0210), C_G0.ASID_WIDTH'(5), 1'b0, 44'h1111, 2'b00, 1'b0);
+    t0_expect(i, 64'h0000_0000_0021_0abc, C_G0.ASID_WIDTH'(5), 1, 44'h1111, "TLB_FF_PRE_A");
+    t0_fill_flush_edge(i, C_G0.VpnLen'(27'h000_0310), C_G0.ASID_WIDTH'(5), 1'b0,
+                       44'h2222, 2'b00, 1'b0,
+                       C_G0.ASID_WIDTH'(5), 64'h0000_0000_0021_0abc);
+    t0_expect(i, 64'h0000_0000_0021_0abc, C_G0.ASID_WIDTH'(5), 0, '0, "TLB_FF_OLD_GONE");
+    t0_expect_miss_or_new(i, 64'h0000_0000_0031_0abc, C_G0.ASID_WIDTH'(5), 44'h2222, "TLB_FF_B_STATE");
+    t0_fill(i, C_G0.VpnLen'(27'h000_0310), C_G0.ASID_WIDTH'(5), 1'b0, 44'h2222, 2'b00, 1'b0);
+    t0_expect(i, 64'h0000_0000_0031_0abc, C_G0.ASID_WIDTH'(5), 1, 44'h2222, "TLB_FF_B_CLEAN");
+
+    // B: broad x0/x0 flush coincident with an overlapping same-VA replacement.
+    // A hit may only return the replacement PPN; a miss means the fill dropped.
+    t0_flush_all(i);
+    t0_fill(i, C_G0.VpnLen'(27'h000_0410), C_G0.ASID_WIDTH'(6), 1'b0, 44'h3333, 2'b00, 1'b0);
+    t0_expect(i, 64'h0000_0000_0041_0abc, C_G0.ASID_WIDTH'(6), 1, 44'h3333, "TLB_FF_PRE_OVR");
+    t0_fill_flush_edge(i, C_G0.VpnLen'(27'h000_0410), C_G0.ASID_WIDTH'(6), 1'b0,
+                       44'h4444, 2'b00, 1'b0,
+                       C_G0.ASID_WIDTH'(0), 64'h0);
+    t0_expect_miss_or_new(i, 64'h0000_0000_0041_0abc, C_G0.ASID_WIDTH'(6), 44'h4444, "TLB_FF_OVR_STATE");
+
+    // C: selective flush of a global translation. ASID is architecturally
+    // ignored for global entries; the old global translation must still go.
+    t0_flush_all(i);
+    t0_fill(i, C_G0.VpnLen'(27'h000_0510), C_G0.ASID_WIDTH'(1), 1'b1, 44'h5555, 2'b00, 1'b0);
+    t0_expect(i, 64'h0000_0000_0051_0abc, C_G0.ASID_WIDTH'(3), 1, 44'h5555, "TLB_FF_PRE_GLB");
+    t0_fill_flush_edge(i, C_G0.VpnLen'(27'h000_0610), C_G0.ASID_WIDTH'(1), 1'b0,
+                       44'h6666, 2'b00, 1'b0,
+                       C_G0.ASID_WIDTH'(0), 64'h0000_0000_0051_0abc);
+    t0_expect(i, 64'h0000_0000_0051_0abc, C_G0.ASID_WIDTH'(3), 0, '0, "TLB_FF_GLB_GONE");
     t0_flush_all(i);
   endtask
 
@@ -7758,16 +7886,14 @@ module tb_g6lc_hyp8_mmu;
     check(nva0[2] == 64'h0000_0000_8000_2000, "MMU0_D_VADDR");
     tick();
 
-    // ---------- M3: simultaneous access; a D HIT still suppresses I ------
+    // ---------- M3: simultaneous ITLB miss + DTLB HIT -> I miss lands ----
     iva0 = 64'h0000_0000_8000_3000;
     dva0 = 64'h0000_0000_8000_3800;
     iacc0 = 1'b1; ihit0 = 1'b0; dacc0 = 1'b1; dhit0 = 1'b1;
     #2; tick(); #2;
-    check(!nacc0[2], "MMU0_DHIT_SUPPRESS");          // nothing accepted
-    dacc0 = 1'b0; #2;                                // now the I miss lands
-    tick(); iacc0 = 1'b0; #2;
-    check(nacc0[2] && nireq0[2], "MMU0_I_AFTER_DHIT");
+    check(nacc0[2] && nireq0[2], "MMU0_I_OVER_DHIT");
     check(nva0[2] == 64'h0000_0000_8000_3000, "MMU0_I_VA_KEPT");
+    iacc0 = 1'b0; dacc0 = 1'b0; #2;
     tick();
 
     // ---------- M4: both-miss simultaneous -> D wins the arbiter ---------
@@ -8031,6 +8157,11 @@ module tb_g6lc_hyp8_mmu;
     // T_H (rfix131a-07): fill-overlap rule on every HYP_EXT=0 instance
     // ({4,1}, {4,3}, {16,3} = entries, TlbStages)
     for (int i = 0; i < NT0; i++) t0_fill_overlap(i);
+
+    // T_I (deep tracedb residual): coincident SFENCE/fill ordering on the
+    // same instance matrix. The exact fill result may drop, but the flushed
+    // translation may never survive.
+    for (int i = 0; i < NT0; i++) t0_fill_flush_race(i);
 
     check(!miter_bad, "MMU_MITER_EQ_FINAL");
 

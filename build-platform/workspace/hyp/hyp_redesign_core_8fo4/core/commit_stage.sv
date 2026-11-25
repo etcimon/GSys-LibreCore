@@ -198,10 +198,17 @@ module commit_stage
   // after the refetch (hyp8_csr_flush_skip: markerA committed with
   // t2=2). The reference raised the flush in the CSR's own commit cycle
   // and blocked port 1 behind a CSR, which made this window empty.
+  // Pure read-only CSR_READ (csrr/rdtime/rdcycle/rdinstret) never asserts
+  // csr_we or flush_o in csr_regfile, so it needs no post-commit hold cycle;
+  // all CSR writes / xret / fences still arm csr_hold_q (preserving r59).
   logic csr_hold_q;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) csr_hold_q <= 1'b0;
+`ifdef G6LC_MUT_CMT_CSR_READ_HOLD
     else         csr_hold_q <= commit_csr_o;
+`else
+    else         csr_hold_q <= commit_csr_o && (commit_instr_i[0].op != CSR_READ);
+`endif
   end
   assign suppress = {G6LCCfg.NrCommitPorts{csr_hold_q}};
   assign commit_ack_o = fire;
@@ -475,22 +482,44 @@ module commit_stage
       // -----------------
       // check if the second instruction can be committed as well and the
       // first wasn't a CSR instruction; also if we are in single step
-      // mode don't retire the second instruction
-      if (!p1_cross && commit_dec[0] && commit_instr_i[1].valid
-                                && commit_bundle_valid_i[1]
-                                && !halt_i
-                                && !suppress[1]
-                                && !commit_replay_i[0] && !commit_replay_i[1]
-                                && !(commit_instr_i[0].fu inside {CSR})
-                                && !flush_dcache_i
-                                && !(G6LCCfg.RVA && instr_0_is_amo)
-                                && !single_step_i
-                                && (!MixedSmt ||
-                                    (commit_instr_i[1].trans_id != commit_instr_i[0].trans_id))) begin
+      // mode don't retire the second instruction.
+      // Dual-port wrong-path squash: a cancelled, non-replay slot on port 1
+      // performs zero architectural side effects, so it drops alongside port 0
+      // regardless of valid/ex/fu (drains wrong-path bursts at 2/cycle instead
+      // of 1/cycle; cuts mc_branchy held-oth 47.3k / r127m 4.79M cycles).
+      if (!p1_cross && commit_dec[0]
+                    && commit_bundle_valid_i[1]
+                    && !halt_i
+                    && !suppress[1]
+                    && !commit_replay_i[0] && !commit_replay_i[1]
+`ifdef G6LC_MUT_CMT_NO_CSR_READ_P1
+                    && !(commit_instr_i[0].fu inside {CSR} && !commit_drop_i[0])
+`else
+                    // Pure read-only CSR_READ never writes a CSR or flushes, so
+                    // non-FP port-1 ops (and drops) can dual-commit alongside it.
+                    && !(commit_instr_i[0].fu inside {CSR} && !commit_drop_i[0] &&
+                         (MixedSmt || (commit_instr_i[0].op != CSR_READ)))
+`endif
+                    && !flush_dcache_i
+                    && !(G6LCCfg.RVA && instr_0_is_amo && !commit_drop_i[0])
+                    && !single_step_i
+                    && (!MixedSmt ||
+                        (commit_instr_i[1].trans_id != commit_instr_i[0].trans_id))) begin
+        if (commit_drop_i[1] &&
+            (!MixedSmt || (!commit_instr_i[1].ex.valid &&
+                           !(commit_instr_i[1].fu inside {CSR}) &&
+                           !(G6LCCfg.RVA && g6lc_core_pkg::is_amo(commit_instr_i[1].op))))) begin
+`ifndef G6LC_MUT_CMT_NO_P1_DROP
+          commit_dec[1] = 1'b1;
+`endif
         // only if the first instruction didn't throw an exception and
         // this instruction won't throw an exception and the functional
         // unit is of type ALU, LOAD, CTRL_FLOW, MULT, FPU or FPU_VEC
-        if (!commit_instr_i[1].ex.valid && (commit_instr_i[1].fu inside {ALU, LOAD, CTRL_FLOW, MULT, FPU, FPU_VEC})) begin
+        // (FPU/FPU_VEC excluded behind CSR_READ so csr_wdata_dec/fflags stay clean)
+        end else if (commit_instr_i[1].valid && !commit_instr_i[1].ex.valid &&
+                     (commit_instr_i[1].fu inside {ALU, LOAD, CTRL_FLOW, MULT, FPU, FPU_VEC}) &&
+                     !(csr_head && !commit_drop_i[0] &&
+                       (commit_instr_i[1].fu inside {FPU, FPU_VEC}))) begin
 
           if (G6LCCfg.RVZCMP && commit_instr_i[1].is_macro_instr && commit_instr_i[1].is_last_macro_instr)
             commit_macro_ack[1] = 1'b1;
@@ -579,11 +608,21 @@ module commit_stage
   always_comb begin : dirty_fp_state
     dirty_fp_state_o = 1'b0;
     for (int i = 0; i < G6LCCfg.NrCommitPorts; i++) begin
+      // Cancelled wrong-path FP instructions dropped on commit_drop_i must not
+      // architecturally dirty mstatus.FS.
+`ifdef G6LC_MUT_CMT_DROP_DIRTY_FS
       dirty_fp_state_o |= fire[i] & ((commit_instr_i[i].fu inside {FPU, FPU_VEC} & G6LCCfg.FpPresent & g6lc_core_pkg::fd_changes_rd_state(
           commit_instr_i[i].op
       )) || (G6LCCfg.FpPresent && g6lc_core_pkg::is_rd_fpr(
           commit_instr_i[i].op
       ))) | (commit_instr_i[i].fu == ACCEL && commit_instr_i[i].vfp);
+`else
+      dirty_fp_state_o |= (fire[i] & !commit_drop_i[i]) & ((commit_instr_i[i].fu inside {FPU, FPU_VEC} & G6LCCfg.FpPresent & g6lc_core_pkg::fd_changes_rd_state(
+          commit_instr_i[i].op
+      )) || (G6LCCfg.FpPresent && g6lc_core_pkg::is_rd_fpr(
+          commit_instr_i[i].op
+      ))) | ((fire[i] & !commit_drop_i[i]) & (commit_instr_i[i].fu == ACCEL && commit_instr_i[i].vfp));
+`endif
     end
   end
 

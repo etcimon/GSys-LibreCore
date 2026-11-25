@@ -1146,7 +1146,11 @@ always_comb begin
   assign ex_commit_cause = instr.ex_commit_cause;
   assign ex_commit_valid = instr.ex_commit_valid;
 
+`ifdef G6LC_MUT_RVFI_DROP_ITI
   assign valid_iti = instr.commit_ack;
+`else
+  assign valid_iti = instr.commit_ack & ~instr.commit_drop;
+`endif
   assign pc_iti = instr.commit_instr_pc;
   assign op_iti = instr.commit_instr_op;
   assign branch_valid_iti = instr.branch_valid;
@@ -1170,8 +1174,16 @@ always_comb begin
   // reallocated the new (non-store) instruction retired with wmask=ff
   // (hyp8-osbi-scalar-r99: lu_paddr_captured on commit port 1 at cycle
   // 24288, the first ALU op to reuse the last _bss_zero store's tid).
+`ifdef G6LC_MUT_RVFI_NO_LR_RMASK
   assign lsu_rmask = (instr.lsu_ctrl_valid && instr.lsu_ctrl_fu == LOAD)
       ? instr.lsu_ctrl_be : '0;
+`else
+  assign lsu_rmask = (instr.lsu_ctrl_valid &&
+                      (instr.lsu_ctrl_fu == LOAD ||
+                       (G6LCCfg.RVA && instr.lsu_ctrl_fu == STORE &&
+                        instr.lsu_ctrl_op inside {AMO_LRW, AMO_LRD})))
+      ? instr.lsu_ctrl_be : '0;
+`endif
   // A load-reserved is dispatched down the STORE path like every other AMO, but
   // it only reads memory. Reporting a write mask for it makes the tracer emit a
   // memory write the architecture never performs, which diverges from any

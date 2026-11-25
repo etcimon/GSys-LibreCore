@@ -340,7 +340,7 @@ module cva6_rvfi
   assign ex_commit_cause = instr.ex_commit_cause;
   assign ex_commit_valid = instr.ex_commit_valid;
 
-  assign valid_iti = instr.commit_ack;
+  assign valid_iti = instr.commit_ack & ~instr.commit_drop;
   assign pc_iti = instr.commit_instr_pc;
   assign op_iti = instr.commit_instr_op;
   assign branch_valid_iti = instr.branch_valid;
@@ -357,7 +357,10 @@ module cva6_rvfi
   assign wdata = instr.wdata;
 
   assign lsu_addr = instr.lsu_ctrl_vaddr;
-  assign lsu_rmask = instr.lsu_ctrl_fu == LOAD ? instr.lsu_ctrl_be : '0;
+  assign lsu_rmask = (instr.lsu_ctrl_fu == LOAD ||
+                      (CVA6Cfg.RVA && instr.lsu_ctrl_fu == STORE &&
+                       instr.lsu_ctrl_op inside {AMO_LRW, AMO_LRD}))
+      ? instr.lsu_ctrl_be : '0;
   // A load-reserved is dispatched down the STORE path like every other AMO, but
   // it only reads memory. Reporting a write mask for it makes the tracer emit a
   // memory write the architecture never performs, which diverges from any

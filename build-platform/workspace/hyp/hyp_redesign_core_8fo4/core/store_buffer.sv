@@ -581,24 +581,47 @@ module store_buffer
   // profile whose scoreboard tids are not globally unique, this match must
   // also compare the entry's .hart — recorded SMT2 obligation (single-hart
   // hyp8: tid identity is complete).
+  logic [DEPTH_SPEC-1:0] commit_tid_match;
   logic commit_tid_present, commit_tid_in_s1;
-  always_comb begin
-    commit_tid_present = 1'b0;
-    for (int unsigned i = 0; i < DEPTH_SPEC; i++)
-      commit_tid_present |= spec_valid_q[i] &&
-          (speculative_queue_q[i].trans_id == commit_trans_id_i);
+  for (genvar i = 0; i < DEPTH_SPEC; i++) begin : gen_commit_tid_match
+    assign commit_tid_match[i] = spec_valid_q[i] &&
+        (speculative_queue_q[i].trans_id == commit_trans_id_i);
   end
+  assign commit_tid_present = |commit_tid_match;
   assign commit_tid_in_s1 = G6LCCfg.RVZicclsm &&
       ((s1_v && (s1_tid == commit_trans_id_i)) ||
        (valid_i && (trans_id_i == commit_trans_id_i)));
+  // Single-beat stores pipeline back-to-back through stb_commit's pend_q
+  // (stb_drain reserves 1 slot when commit_push_valid is pushing this cycle),
+  // eliminating the 1-cycle held st_sb bubble between consecutive commits
+  // (~93.8M cycles in r127m). Two-beat Zicclsm commits still gate on
+  // !commit_pend2_v while beat1 drains from pend2_q.
+`ifdef G6LC_MUT_STQ_NO_B2B_COMMIT
   assign commit_ready_o  = drain_commit_ready && !commit_pend_v &&
                           (!G6LCCfg.OoOEn || (commit_tid_present && !commit_tid_in_s1));
+`else
+  assign commit_ready_o  = drain_commit_ready && !commit_pend2_v &&
+                          (!G6LCCfg.OoOEn || (commit_tid_present && !commit_tid_in_s1));
+`endif
 
   assign rvfi_mem_paddr_o = spec_head.address;
 
-  // r76 F14: per-instruction paddr record — the same strobe/fields the
-  // insertion writes into the speculative queue.
+  // r76 F14 / N2: per-instruction paddr record — fire only on Beat 0 so a
+  // Zicclsm two-beat store's Beat 1 (same trans_id) never overwrites the
+  // instruction's base physical address in RVFI.
+  logic [DEPTH_SPEC-1:0] rvfi_tid_in_spec;
+  for (genvar i = 0; i < DEPTH_SPEC; i++) begin : gen_rvfi_b1
+    assign rvfi_tid_in_spec[i] = spec_valid_q[i] &&
+        (speculative_queue_q[i].trans_id == trans_id_i);
+  end
+  logic rvfi_st_is_beat1;
+  assign rvfi_st_is_beat1 = G6LCCfg.RVZicclsm &&
+      ((s1_v && (s1_tid == trans_id_i)) || (|rvfi_tid_in_spec));
+`ifdef G6LC_MUT_STQ_RVFI_BEAT1_OVERWRITE
   assign rvfi_st_push_valid_o = valid_i;
+`else
+  assign rvfi_st_push_valid_o = valid_i && !rvfi_st_is_beat1;
+`endif
   assign rvfi_st_push_tid_o   = trans_id_i;
   assign rvfi_st_push_paddr_o = paddr_i;
 
@@ -833,6 +856,8 @@ module store_buffer
           .cmt_rd_ptr_i   (commit_read_pointer_q),
           .cmt_pending_valid_i (commit_push_valid),
           .cmt_pending_entry_i (commit_push_entry),
+          .cmt_pend2_valid_i   (commit_pend2_v),
+          .cmt_pend2_entry_i   (commit_pend2_entry),
           .ins_valid_i (ins_valid),
           .ins_tid_i   (ins_tid),
           .ins_hart_i  (ins_hart),
@@ -944,6 +969,26 @@ module store_buffer
                 be_m[b]        = 1'b1;
               end
             end
+            // Committed Beat 0 (commit_push) and Beat 1 (commit_pend2) are
+            // newer than commit_queue_q and older than speculative_queue_q.
+            if (commit_push_valid && pa_eq(commit_push_entry.address, load_paddr_i)) begin
+              for (int unsigned b = 0; b < (G6LCCfg.XLEN / 8); b++) begin
+                if (commit_push_entry.be[b]) begin
+                  data_m[8*b+:8] = commit_push_entry.data[8*b+:8];
+                  be_m[b]        = 1'b1;
+                end
+              end
+            end
+`ifndef G6LC_MUT_STQ_NO_PEND2_FWD
+            if (commit_pend2_v && pa_eq(commit_pend2_entry.address, load_paddr_i)) begin
+              for (int unsigned b = 0; b < (G6LCCfg.XLEN / 8); b++) begin
+                if (commit_pend2_entry.be[b]) begin
+                  data_m[8*b+:8] = commit_pend2_entry.data[8*b+:8];
+                  be_m[b]        = 1'b1;
+                end
+              end
+            end
+`endif
           end
           // A141: the speculative sources in program order without walking a
           // ring: every entry is a candidate per byte (older than the load, same

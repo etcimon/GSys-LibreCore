@@ -79,6 +79,37 @@ module stb_insert
   assign reserved_slots = s1_v_q ? s1_slot_q : '0;
   assign free_slots     = ~(spec_valid_i | reserved_slots);
 
+  // Parallel per-slot lowest-free one-hot (prefix-OR, zero procedural loop)
+  // and parallel per-slot age row/col computation (replaces serial DEPTH_SPEC
+  // loop inside always_ff that billed 131.0 FO4 in sv-timing).
+  logic [DEPTH_SPEC-1:0] free_slot_oh, s1_row_d, s1_col_d;
+  localparam int unsigned TIDW = G6LCCfg.TRANS_ID_BITS;
+  logic [TIDW-1:0] arr_dist;
+  assign arr_dist = trans_id_i - oldest_live_tid_i;
+
+  for (genvar j = 0; j < DEPTH_SPEC; j++) begin : gen_s1_par
+    if (j == 0) begin : gen_ls0
+      assign free_slot_oh[0] = free_slots[0];
+    end else begin : gen_lsn
+      assign free_slot_oh[j] = free_slots[j] && !(|free_slots[j-1:0]);
+    end
+    logic [TIDW-1:0] j_tid, j_dist;
+    logic            j_older, j_live;
+    assign j_tid  = (s1_slot_q[j] && s2_wr_valid_o) ? s1_tid_q : spec_tid_i[j];
+    assign j_dist = j_tid - oldest_live_tid_i;
+`ifdef G6LC_MUT_STQ_ZICCLSM_SINGLE_BEAT
+    assign j_older = (j_dist < arr_dist);
+`else
+    // Equal-TID two-beat Zicclsm stores: beat0 (already in slot j) is
+    // strictly older than arriving beat1 so beat0 drains first.
+    assign j_older = (G6LCCfg.RVZicclsm && (j_tid == trans_id_i)) ||
+                     (j_dist < arr_dist);
+`endif
+    assign j_live      = live_after_i[j] || (s2_wr_valid_o && s1_slot_q[j]);
+    assign s1_row_d[j] = j_live && (!AGE_EN || j_older);
+    assign s1_col_d[j] = j_live && (AGE_EN && !j_older);
+  end
+
   wire ins_take = valid_i && !flush_i && !cancelled_mask_i[trans_id_i];
 
   always_ff @(posedge clk_i or negedge rst_ni) begin : p_s1
@@ -94,41 +125,21 @@ module stb_insert
       // cancel of the staged tid kills the writeback instead.
       s1_v_q <= ins_take;
       if (ins_take) begin
-        s1_slot_q            <= lowest_set(free_slots);
-        s1_entry_q.address   <= paddr_i;
-        s1_entry_q.data      <= data_i;
-        s1_entry_q.be        <= be_i;
-        s1_entry_q.data_size <= data_size_i;
-        s1_entry_q.data_prot <= data_prot_i;
-        s1_entry_q.valid     <= 1'b1;
-        s1_entry_q.cbo_op    <= cbo_op_i;
-        s1_entry_q.trans_id  <= trans_id_i;
-        s1_entry_q.hart      <= st_hart_i;
+        s1_slot_q              <= free_slot_oh;
+        s1_entry_q.address     <= paddr_i;
+        s1_entry_q.data        <= data_i;
+        s1_entry_q.be          <= be_i;
+        s1_entry_q.data_size   <= data_size_i;
+        s1_entry_q.data_prot   <= data_prot_i;
+        s1_entry_q.valid       <= 1'b1;
+        s1_entry_q.cbo_op      <= cbo_op_i;
+        s1_entry_q.trans_id    <= trans_id_i;
+        s1_entry_q.hart        <= st_hart_i;
         s1_entry_q.wait_rvalid <= 1'b0;
-        s1_entry_q.fwd_keep  <= fwd_keep_i;
-        s1_tid_q             <= trans_id_i;
-        for (int unsigned j = 0; j < DEPTH_SPEC; j++) begin
-          automatic logic [G6LCCfg.TRANS_ID_BITS-1:0] j_tid;
-          automatic logic                             j_older;
-          j_tid = (s1_slot_q[j] && s2_wr_valid_o) ? s1_tid_q : spec_tid_i[j];
-`ifdef G6LC_MUT_STQ_ZICCLSM_SINGLE_BEAT
-          j_older = ooo_older(j_tid, trans_id_i);
-`else
-          // Equal-TID two-beat Zicclsm stores: beat0 (already in slot j) is
-          // strictly older than arriving beat1 so beat0 drains first.
-          j_older = (G6LCCfg.RVZicclsm && (j_tid == trans_id_i)) ||
-                    ooo_older(j_tid, trans_id_i);
-`endif
-          // spec_older[j][i]: entry j older than the arrival. The pending
-          // S1 owner installs at this same edge, so its reserved slot is
-          // live for the new row and its trans_id is the staged one, not
-          // the array's current contents at that slot.
-          s1_row_q[j] <= (live_after_i[j] || (s2_wr_valid_o && s1_slot_q[j])) &&
-                         (!AGE_EN || j_older);
-          // spec_older[i][j]: the arrival older than entry j
-          s1_col_q[j] <= (live_after_i[j] || (s2_wr_valid_o && s1_slot_q[j])) &&
-                         (AGE_EN && !j_older);
-        end
+        s1_entry_q.fwd_keep    <= fwd_keep_i;
+        s1_tid_q               <= trans_id_i;
+        s1_row_q               <= s1_row_d;
+        s1_col_q               <= s1_col_d;
       end
     end
   end

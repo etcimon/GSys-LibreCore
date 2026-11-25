@@ -224,8 +224,27 @@ module cva6_mmu
 
   // Assignments
 
-  assign itlb_lu_access = icache_areq_i.fetch_req;
-  assign dtlb_lu_access = lsu_req_i & !misaligned_ex_i.valid;
+  // Sv39/Sv39x4 canonical/range check at the lookup boundary so non-canonical
+  // virtual addresses raise an immediate page fault and never start a PTW walk
+  // or install aliased low-VA TLB entries (RISC-V Priv §4.4.1).
+  logic fetch_noncanon_i, lsu_noncanon_i;
+  assign fetch_noncanon_i =
+      (enable_translation_i &&
+       !((&icache_areq_i.fetch_vaddr[CVA6Cfg.VLEN-1:CVA6Cfg.SV-1]) == 1'b1 ||
+         (|icache_areq_i.fetch_vaddr[CVA6Cfg.VLEN-1:CVA6Cfg.SV-1]) == 1'b0)) ||
+      (enable_g_translation_i && !enable_translation_i && CVA6Cfg.IS_XLEN64 &&
+       (|icache_areq_i.fetch_vaddr[CVA6Cfg.VLEN-1:CVA6Cfg.GPLEN] != 1'b0));
+  assign lsu_noncanon_i =
+      en_ld_st_translation_i &&
+      !((&lsu_vaddr_i[CVA6Cfg.VLEN-1:CVA6Cfg.SV-1]) == 1'b1 ||
+        (|lsu_vaddr_i[CVA6Cfg.VLEN-1:CVA6Cfg.SV-1]) == 1'b0);
+
+  assign itlb_lu_access = icache_areq_i.fetch_req &
+                          (enable_translation_i || enable_g_translation_i) &
+                          ~fetch_noncanon_i;
+  assign dtlb_lu_access = lsu_req_i & !misaligned_ex_i.valid &
+                          (en_ld_st_translation_i || en_ld_st_g_translation_i) &
+                          !lsu_noncanon_i;
   // T6b-2b: instruction-side lookups use the fetch hart's context, data-side
   // lookups the LSU request hart's.
   assign itlb_lu_asid   = v_i ? fet_vs_asid_i : fet_asid_i;
@@ -438,6 +457,18 @@ module cva6_mmu
   // Evaluates to 9 for Sv39 and (unused but elaboration-legal) 1 for Sv32.
   localparam int unsigned MegaPageSubstWidth = PPNWMin - (CVA6Cfg.VpnLen / CVA6Cfg.PtLevels) - 8 - CVA6Cfg.PtLevels;
 
+  // r100 (fetch-side counterpart of T42, parity with hyp8 g6lc_mmu.sv):
+  // deliver a PTW instruction fault only to the fetch request whose page the
+  // walk was started for (prevents stale mret-window walks from faulting the
+  // mret target fetch).
+  logic ptw_walk_is_fetch;
+`ifdef G6LC_MUT_MMU_PTW_FOREIGN
+  assign ptw_walk_is_fetch = 1'b1;
+`else
+  assign ptw_walk_is_fetch = icache_areq_i.fetch_req &&
+      (update_vaddr[CVA6Cfg.VLEN-1:12] == icache_areq_i.fetch_vaddr[CVA6Cfg.VLEN-1:12]);
+`endif
+
   // The instruction interface is a simple request response interface
   always_comb begin : instr_interface
     // MMU disabled: just pass through
@@ -460,23 +491,6 @@ module cva6_mmu
     // AXI decode error), or when PTW performs walk due to ITLB miss and raises
     // an error.
     if ((enable_translation_i || enable_g_translation_i)) begin
-      // If second-level address translation is enabled:
-      // - in VS stage, check that all bits [CVA6Cfg.VLEN-1:CVA6Cfg.SV-1] are equal
-      // - in pure G stage (SV39x4 mode), [CVA6Cfg.VLEN-1:CVA6Cfg.GPLEN] must be zero.
-      // - in pure G stage (SV32x4 mode), no check is needed.
-      if ((enable_translation_i && (icache_areq_i.fetch_req && !((&icache_areq_i.fetch_vaddr[CVA6Cfg.VLEN-1:CVA6Cfg.SV-1]) == 1'b1 || (|icache_areq_i.fetch_vaddr[CVA6Cfg.VLEN-1:CVA6Cfg.SV-1]) == 1'b0)))
-          || (enable_g_translation_i && !enable_translation_i && CVA6Cfg.IS_XLEN64 && (|icache_areq_i.fetch_vaddr[CVA6Cfg.VLEN-1:CVA6Cfg.GPLEN] != 1'b0))) begin
-        icache_areq_o.fetch_exception.cause = riscv::INSTR_PAGE_FAULT;
-        icache_areq_o.fetch_exception.valid = 1'b1;
-        if (CVA6Cfg.TvalEn)
-          icache_areq_o.fetch_exception.tval = CVA6Cfg.XLEN'(icache_areq_i.fetch_vaddr);
-        if (CVA6Cfg.RVH) begin
-          icache_areq_o.fetch_exception.tval2 = '0;
-          icache_areq_o.fetch_exception.tinst = '0;
-          icache_areq_o.fetch_exception.gva   = v_i;
-        end
-      end
-
       icache_areq_o.fetch_valid = 1'b0;
 
       final_fetch_ppn = (enable_g_translation_i && CVA6Cfg.RVH)? itlb_g_content.ppn : itlb_content.ppn;
@@ -495,11 +509,26 @@ module cva6_mmu
         icache_areq_o.fetch_paddr[PPNWMin:12] = icache_areq_i.fetch_vaddr[PPNWMin:12];
 
       end
+      // If second-level address translation is enabled:
+      // - in S/VS stage, check that all bits [CVA6Cfg.VLEN-1:CVA6Cfg.SV-1] are equal
+      // - in pure G stage (SV39x4 mode), [CVA6Cfg.VLEN-1:CVA6Cfg.GPLEN] must be zero.
+      // - in pure G stage (SV32x4 mode), no check is needed.
+      if (icache_areq_i.fetch_req && fetch_noncanon_i) begin
+        icache_areq_o.fetch_valid           = 1'b1;
+        icache_areq_o.fetch_exception.cause = riscv::INSTR_PAGE_FAULT;
+        icache_areq_o.fetch_exception.valid = 1'b1;
+        if (CVA6Cfg.TvalEn)
+          icache_areq_o.fetch_exception.tval = CVA6Cfg.XLEN'(icache_areq_i.fetch_vaddr);
+        if (CVA6Cfg.RVH) begin
+          icache_areq_o.fetch_exception.tval2 = '0;
+          icache_areq_o.fetch_exception.tinst = '0;
+          icache_areq_o.fetch_exception.gva   = v_i;
+        end
       // ---------//
       // ITLB Hit
       // --------//
       // if we hit the ITLB output the request signal immediately
-      if (itlb_lu_hit) begin
+      end else if (itlb_lu_hit) begin
         icache_areq_o.fetch_valid = icache_areq_i.fetch_req;
         if (CVA6Cfg.RVH && i_g_st_access_err) begin
           icache_areq_o.fetch_exception.cause = riscv::INSTR_GUEST_PAGE_FAULT;
@@ -525,7 +554,7 @@ module cva6_mmu
             icache_areq_o.fetch_exception.gva   = v_i;
           end
         end
-      end else if (ptw_active && walking_instr) begin
+      end else if (ptw_active && walking_instr && ptw_walk_is_fetch) begin
         // ---------//
         // ITLB Miss
         // ---------//
@@ -551,7 +580,7 @@ module cva6_mmu
               icache_areq_o.fetch_exception.gva   = v_i;
             end
           end
-        end else begin
+        end else if (ptw_access_exception) begin
           icache_areq_o.fetch_exception.cause = riscv::INSTR_ACCESS_FAULT;
           icache_areq_o.fetch_exception.valid = 1'b1;
           if (CVA6Cfg.TvalEn)  // To confirm this is the right TVAL
@@ -717,9 +746,9 @@ module cva6_mmu
 
 
       // ---------
-      // DTLB Hit
+      // DTLB Hit (or non-canonical VA fault, which suppresses DTLB/PTW)
       // --------
-      if (dtlb_hit_q && lsu_req_q) begin
+      if ((dtlb_hit_q || canonical_addr_check) && lsu_req_q) begin
         lsu_valid_o = 1'b1;
         // exception priority:
         // PAGE_FAULTS have higher priority than ACCESS_FAULTS
@@ -730,7 +759,7 @@ module cva6_mmu
         if (lsu_is_store_q) begin
           // check if the page is write-able and we are not violating privileges
           // also check if the dirty flag is set
-          if(CVA6Cfg.RVH && chk_en_ld_st_g_translation && (!dtlb_gpte_q.w || d_g_st_access_err || !dtlb_gpte_q.d)) begin
+          if(CVA6Cfg.RVH && chk_en_ld_st_g_translation && !canonical_addr_check && (!dtlb_gpte_q.w || d_g_st_access_err || !dtlb_gpte_q.d)) begin
             lsu_exception_o.cause = riscv::STORE_GUEST_PAGE_FAULT;
             lsu_exception_o.valid = 1'b1;
             if (CVA6Cfg.TvalEn)
@@ -757,7 +786,7 @@ module cva6_mmu
           end
           // this is a load
         end else begin
-          if (CVA6Cfg.RVH && d_g_st_access_err) begin
+          if (CVA6Cfg.RVH && d_g_st_access_err && !canonical_addr_check) begin
             lsu_exception_o.cause = riscv::LOAD_GUEST_PAGE_FAULT;
             lsu_exception_o.valid = 1'b1;
             if (CVA6Cfg.TvalEn)

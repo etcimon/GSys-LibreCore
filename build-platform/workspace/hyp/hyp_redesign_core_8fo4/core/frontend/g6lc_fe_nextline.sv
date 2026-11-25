@@ -42,6 +42,10 @@ module g6lc_fe_nextline
     input  logic                    clk_i,
     input  logic                    rst_ni,
     input  logic                    flush_i,
+    // Architectural BP flush (fence.i / sfence.vma / debug): clears the
+    // trained 256-entry line table; ordinary pipeline flush_i kills only the
+    // in-flight guess line_taken_q so trained targets survive traps/replays.
+    input  logic                    flush_bp_i,
     // Boot (out of reset the cursor is the boot address)
     input  logic [G6LCCfg.VLEN-1:0] boot_addr_i,
     // Applying redirect record (g6lc_fe_redirect, one-cycle pulse)
@@ -148,8 +152,13 @@ module g6lc_fe_nextline
       if (!rst_ni) begin
         ltaken_q  <= '0;
         ltarget_q <= '0;
+`ifdef G6LC_MUT_FE_NL_FLUSH_WIPE
       end else if (flush_i) begin
         ltaken_q <= '0;
+`else
+      end else if (flush_bp_i) begin
+        ltaken_q <= '0;
+`endif
       end else if (train_valid_i) begin
         // the taken flag doubles as the valid bit — masking it with
         // train_tagdom_i both refuses non-adjudicable taken guesses and

@@ -277,6 +277,117 @@ module tb_g6lc_stq_zicclsm_hyp8
     if (!empty)
       $fatal(1, "STQ_ZICCLSM_LEAK S3 store_buffer not empty");
 
+    // =========================================================================
+    // S4 (pipelined back-to-back single-beat commit + full-queue backpressure):
+    //    Push 4 single-beat stores (tids 10..13), let them install, then commit
+    //    all 4 in 4 CONSECUTIVE cycles with ZERO commit_ready stalls (proving
+    //    pend_q pipelining eliminates the 1-cycle held st_sb bubble).
+    //    Review mutation -DG6LC_MUT_STQ_NO_B2B_COMMIT stalls on cycle 2 and
+    //    must fail STQ_B2B_COMMIT_STALL.
+    //    Also stall data_gnt=0 to verify commit_ready drops cleanly at the
+    //    DEPTH_COMMIT-1 boundary when pend_q is pushing (no commit_queue overflow).
+    // =========================================================================
+    push_st(CFG.PLEN'(64'h8000_4000), 64'h1111_0000_0000_0001, 8'hff, TID_W'(10));
+    push_st(CFG.PLEN'(64'h8000_4008), 64'h2222_0000_0000_0002, 8'hff, TID_W'(11));
+    push_st(CFG.PLEN'(64'h8000_4010), 64'h3333_0000_0000_0003, 8'hff, TID_W'(12));
+    push_st(CFG.PLEN'(64'h8000_4018), 64'h4444_0000_0000_0004, 8'hff, TID_W'(13));
+    repeat (2) tick(); // all 4 installed in spec_valid_q
+
+    // Back-to-back commit in 4 consecutive cycles with data_gnt=0 so commit
+    // queue fills up cleanly without overflowing (DEPTH_COMMIT >= 4).
+    req_in = '{data_gnt: 1'b0, default: '0};
+    for (int k = 0; k < 4; k++) begin
+      oldest     = TID_W'(10 + k);
+      commit_tid = TID_W'(10 + k);
+      #1;
+      if (!commit_ready)
+        $fatal(1, "STQ_B2B_COMMIT_STALL k=%0d tid=%0d commit_ready=0 during b2b burst", k, 10 + k);
+      commit = 1'b1;
+      tick();
+      commit = 1'b0;
+    end
+    oldest = TID_W'(14);
+    req_in = '{data_gnt: 1'b1, default: '0};
+    #1;
+    repeat (12) tick();
+    if (wr_n !== 11) begin
+      for (int i = 7; i < wr_n; i++)
+        $display("  S4 wr[%0d] pa=%h be=%h da=%h", i, wr_pa[i], wr_be[i], wr_da[i]);
+      $fatal(1, "STQ_B2B_COMMIT_LOST S4 expected 11 total writes, got %0d", wr_n);
+    end
+    if (wr_pa[7]  !== CFG.PLEN'(64'h8000_4000) ||
+        wr_pa[8]  !== CFG.PLEN'(64'h8000_4008) ||
+        wr_pa[9]  !== CFG.PLEN'(64'h8000_4010) ||
+        wr_pa[10] !== CFG.PLEN'(64'h8000_4018))
+      $fatal(1, "STQ_B2B_COMMIT_ORDER S4 wrong pa sequence");
+    if (!empty)
+      $fatal(1, "STQ_B2B_COMMIT_LEAK S4 store_buffer not empty");
+
+    // =========================================================================
+    // S5 (Bug #2: Zicclsm Beat-1 commit_pend2 store->load forwarding):
+    //    Commit older Store A (0x8000_5008 = 0x1111_1111_1111_1111) into
+    //    commit_queue (data_gnt=0), then commit Zicclsm Store B whose Beat 1
+    //    (0x8000_5008, be=8'h1f, data=0x0000_0088_7766_5544) sits in pend2_q.
+    //    A younger load querying 0x8000_5008 MUST observe merged bytes
+    //    0x1111_1188_7766_5544 (Beat 1 overrides Store A on bytes 0..4), NOT
+    //    stale Store A data 0x1111_1111_1111_1111!
+    //    Review mutation -DG6LC_MUT_STQ_NO_PEND2_FWD fails STQ_PEND2_FWD_STALE.
+    // =========================================================================
+    req_in = '{data_gnt: 1'b0, default: '0};
+    push_st(CFG.PLEN'(64'h8000_5008), 64'h1111_1111_1111_1111, 8'hff, TID_W'(14));
+    push_st(CFG.PLEN'(64'h8000_5005), 64'h3322_1100_0000_0000, 8'he0, TID_W'(15)); // beat0
+    push_st(CFG.PLEN'(64'h8000_5008), 64'h0000_0088_7766_5544, 8'h1f, TID_W'(15)); // beat1
+    repeat (2) tick();
+    oldest = TID_W'(14);
+    do_commit(TID_W'(14));  // Store A -> pend_q -> commit_queue
+    tick();                 // Store A now in commit_queue
+    oldest = TID_W'(15);
+    do_commit(TID_W'(15));  // Store B beat0 -> pend_q, beat1 -> pend2_q!
+    oldest = TID_W'(16);
+    // Query stb_fwd (F1->F2->F3) while beat1 is sitting in pend2_q!
+    fwd_req = '{valid: 1'b1, pa: CFG.PLEN'(64'h8000_5008), size: 2'b11,
+                tid: TID_W'(16), hart: '0, tag: 'd3};
+    tick();                 // F1 captures (pend2_v == 1!)
+    fwd_req = '0;
+    tick();                 // F2
+    tick();                 // F3 -> fwd_rsp valid!
+    #1;
+    if (!fwd_rsp.valid || fwd_rsp.tag !== 'd3 || fwd_rsp.be !== 8'hff)
+      $fatal(1, "STQ_PEND2_FWD_MISSING valid=%b tag=%0d be=%h", fwd_rsp.valid, fwd_rsp.tag, fwd_rsp.be);
+    if (fwd_rsp.data !== 64'h1111_1188_7766_5544)
+      $fatal(1, "STQ_PEND2_FWD_STALE got=%h want=1111118877665544", fwd_rsp.data);
+    req_in = '{data_gnt: 1'b1, default: '0};
+    repeat (12) tick();
+    if (wr_n !== 14 || !empty)
+      $fatal(1, "STQ_PEND2_DRAIN S5 wr_n=%0d empty=%b", wr_n, empty);
+
+    // =========================================================================
+    // S6 (N2: RVFI rvfi_st_push_valid_o suppresses Zicclsm Beat-1 paddr overwrite):
+    //    Push Beat 0 (0x8000_6005, tid=17) -> rvfi_st_v MUST pulse with 0x8000_6005.
+    //    Push Beat 1 (0x8000_6008, tid=17) -> rvfi_st_v MUST be 0 (base paddr preserved).
+    //    Review mutation -DG6LC_MUT_STQ_RVFI_BEAT1_OVERWRITE fails STQ_RVFI_BEAT1_SUPPRESS.
+    // =========================================================================
+    valid = 1'b1; paddr = CFG.PLEN'(64'h8000_6005); data = 64'h1122_3300_0000_0000;
+    be = 8'he0; tid = TID_W'(17); sb_live[17] = 1'b1;
+    #1;
+    if (!rvfi_st_v || rvfi_st_paddr !== CFG.PLEN'(64'h8000_6005))
+      $fatal(1, "STQ_RVFI_BEAT0_MISSING v=%b pa=%h", rvfi_st_v, rvfi_st_paddr);
+    tick();
+    valid = 1'b1; paddr = CFG.PLEN'(64'h8000_6008); data = 64'h0000_0000_0000_0044;
+    be = 8'h01; tid = TID_W'(17);
+    #1;
+    if (rvfi_st_v)
+      $fatal(1, "STQ_RVFI_BEAT1_SUPPRESS beat1 overwrote rvfi paddr=%h", rvfi_st_paddr);
+    tick();
+    valid = 1'b0;
+    repeat (2) tick();
+    oldest = TID_W'(17);
+    do_commit(TID_W'(17));
+    oldest = TID_W'(18);
+    repeat (10) tick();
+    if (wr_n !== 16 || !empty)
+      $fatal(1, "STQ_RVFI_DRAIN S6 wr_n=%0d empty=%b", wr_n, empty);
+
     if (oracle_neg && (wr_n < 99))
       $fatal(1, "STQ_ZICCLSM_COMMIT_DEADLOCK oracle_negative wr_n=%0d", wr_n);
 

@@ -2684,11 +2684,14 @@ assign irq_active = irq_i[smt_active_hart];
         nack = 0; anyack = 0;
         for (int p = 0; p < SCNP; p++)
           if (commit_ack[p]) begin
-            nack++; anyack = 1;
-            hh = int'(commit_instr_id_commit[p].hart_id) < SCNH ? int'(commit_instr_id_commit[p].hart_id) : 0;
-            sc_ret[hh]++;
-            cls = sc_class(commit_instr_id_commit[p].fu);
-            sc_rc[hh][cls]++;
+            anyack = 1;
+            if (!commit_drop_id_commit[p]) begin
+              nack++;
+              hh = int'(commit_instr_id_commit[p].hart_id) < SCNH ? int'(commit_instr_id_commit[p].hart_id) : 0;
+              sc_ret[hh]++;
+              cls = sc_class(commit_instr_id_commit[p].fu);
+              sc_rc[hh][cls]++;
+            end
           end
         if (flush_ctrl_ex) sc_flush++;
         hs = int'(issue_stage_i.i_scoreboard.commit_sel_slot[0]);
@@ -2997,6 +3000,21 @@ assign irq_active = irq_i[smt_active_hart];
           if (gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.core_req_valid_i) sc_dc_req++;
           if (gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.core_req_valid_i &&
               gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.core_req_ready_o) sc_dc_gnt++;
+        end
+      end
+    end else if (G6LCCfg.DCacheType == config_pkg::WT) begin : gen_sc_wt
+      // N8: wire WT D$ telemetry (previously only HPDCACHE incremented these,
+      // leaving wbuf_full/mshr_full/dmiss/dc_req/dc_gnt at 0 on all WT runs).
+      always @(posedge clk_i) begin
+        if (rst_ni && sc_en) begin
+          sc_mshr_hist[gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.mshr_vld_q ? 1 : 0]++;
+          if (gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.mshr_vld_q) sc_mshr_full++;
+          if (&gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.tx_vld_i) sc_rtab_full++;
+          if (gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_wbuffer.full) sc_wbuf_full++;
+          if (gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.mem_data_req_o &&
+              gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.mem_data_ack_i) sc_dmiss++;
+          if (dcache_req_ports_ex_cache[1].data_req) sc_dc_req++;
+          if (dcache_req_ports_ex_cache[1].data_req && dcache_req_ports_cache_ex[1].data_gnt) sc_dc_gnt++;
         end
       end
     end

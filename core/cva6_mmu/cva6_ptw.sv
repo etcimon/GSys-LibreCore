@@ -313,6 +313,7 @@ module cva6_ptw
       (|pte.reserved && CVA6Cfg.IS_XLEN64) ||
       (!CVA6Cfg.SvpbmtEn && |pte.pbmt && CVA6Cfg.IS_XLEN64) ||
       (CVA6Cfg.SvpbmtEn && (pte.pbmt == 2'b11) && CVA6Cfg.IS_XLEN64) ||
+      (CVA6Cfg.SvpbmtEn && !(pte.r || pte.x) && |pte.pbmt && CVA6Cfg.IS_XLEN64) ||
       (!CVA6Cfg.SvnapotEn && pte.n) ||
       (CVA6Cfg.SvnapotEn && !(pte.r || pte.x) && pte.n);
   assign leaf_itlb_fault = (!pte.x && (!CVA6Cfg.RVH || ptw_stage_q != G_INTERMED_STAGE)) || !pte.a
@@ -710,9 +711,11 @@ module cva6_ptw
         if (is_instr_ptw_q) shared_tlb_update_valid = !leaf_itlb_fault && leaf_itlb_final;
         else                shared_tlb_update_valid = leaf_dtlb_ok && leaf_dtlb_final;
         if (|misaligned_page) shared_tlb_update_valid = 1'b0;
+        if (CVA6Cfg.SvnapotEn && pte.n && !is_napot_64k) shared_tlb_update_valid = 1'b0;
       end
       if (!allow_access) shared_tlb_update_valid = 1'b0;
     end
+    if (flush_i) shared_tlb_update_valid = 1'b0;
   end
 
   // Big Endian Capability Additions

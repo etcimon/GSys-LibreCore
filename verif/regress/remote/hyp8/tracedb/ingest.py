@@ -53,6 +53,11 @@ CREATE TABLE IF NOT EXISTS event(
   addr TEXT, pc TEXT, aux TEXT, detail TEXT, raw TEXT);
 CREATE INDEX IF NOT EXISTS event_run_class ON event(run_id, class, cycle);
 CREATE INDEX IF NOT EXISTS event_run_cycle ON event(run_id, cycle);
+CREATE TABLE IF NOT EXISTS event_analysis(
+  event_id INTEGER PRIMARY KEY, run_id INTEGER, since_ack INTEGER,
+  series_n INTEGER, series_max_ack INTEGER, series_span INTEGER,
+  bucket TEXT, evidence TEXT, note TEXT);
+CREATE INDEX IF NOT EXISTS event_analysis_run ON event_analysis(run_id, bucket, evidence);
 CREATE TABLE IF NOT EXISTS census(
   run_id INTEGER, cycle INTEGER, hart INTEGER, kind TEXT, ret INTEGER,
   ipc REAL, flush_cyc INTEGER, lu_replay INTEGER, mem_viol INTEGER,
@@ -81,6 +86,13 @@ CREATE VIEW IF NOT EXISTS v_event AS
   SELECT r.tag, r.test, r.rev, e.*, t.origin, t.rfix
   FROM event e JOIN run r ON r.id = e.run_id
   LEFT JOIN etype t ON t.etype = e.etype;
+CREATE VIEW IF NOT EXISTS v_event_ex AS
+  SELECT r.tag, r.test, r.rev, e.*, t.origin, t.rfix,
+         a.since_ack, a.series_n, a.series_max_ack, a.series_span,
+         a.bucket, a.evidence, a.note
+  FROM event e JOIN run r ON r.id = e.run_id
+  LEFT JOIN etype t ON t.etype = e.etype
+  LEFT JOIN event_analysis a ON a.event_id = e.id;
 """
 
 # SoC physical map (corev_apu/tb/g6lc_soc_pkg.sv): name, base, length
@@ -121,7 +133,7 @@ ETYPES = {
     'seqgap': ('liveness', '', 'fetch sequence gap over +seq_gap_limit'),
     'assert': ('model-assert', '', 'RTL assertion ($error/$fatal) stopped or flagged the model'),
     'tlb': ('trace', '', '+tlb_trace record'),
-    'wbuf.drop': ('diagnostic', '', 'write-buffer obligation dropped by other than a plain drop'),
+    'wbuf.drop': ('diagnostic', '', 'complete write-buffer obligation drop record; plain/truncated drops are observer artifacts'),
     'verdict': ('verdict', '', 'harness end-of-test line'),
     'stall.l2': ('liveness', '', '+smt_stats L2 FSM/MSHR state older than the stall gap, or live at final'),
     'stall.l3': ('liveness', '', '+smt_stats L3-as-L2 FSM/MSHR state older than the stall gap, or live at final'),
@@ -282,9 +294,10 @@ def parse_log(run):
             # fast paths: the two volume classes
             if line.startswith(b'[l1 dcache'):
                 n_wb += 1
-                # a complete record that is not a plain drop is worth a row; a
-                # record cut short by another stream's line is not
-                if b'freed by' in line and b'plain drop' not in line:
+                # A complete non-plain drop is worth a row. Lines glued into
+                # the harness verdict are truncated before the `freed by`
+                # reason and are observer artifacts, not write-buffer errors.
+                if (b'freed by' in line and b'plain drop' not in line and b'*** ' not in line):
                     run.ev('wbuf', 'wbuf.drop', exact=False, raw=line.decode('utf-8', 'replace'))
                 if b'*** ' not in line:
                     continue
@@ -410,7 +423,8 @@ def parse_log(run):
                 kv = dict(RE_KV.findall(s))
                 mk = re.search(r' c=\d+ (\w+)', s)
                 c = RE_SCOPE_CORE.search(s)
-                run.ev('tlb', f"tlb.{mk.group(1) if mk else '?'}", exact=False,
+                tk = mk.group(1) if mk else ('MULTI_ENTRY' if 'tlb_dump_multi' in s else '?')
+                run.ev('tlb', f"tlb.{tk}", exact=False,
                        core=int(c.group(1)) if c else None,
                        addr=kv.get('vpn') or kv.get('va'), aux=f"c={kv.get('c')}",
                        detail=kv, raw=s)
@@ -576,6 +590,143 @@ def rvfi_files(run_out, test):
     return []
 
 
+def since_ack_of(aux):
+    m = re.search(r'since_ack=(\d+)', aux or '')
+    return int(m.group(1)) if m else None
+
+
+def analyze_run_events(db, run_id):
+    """Derive the evidence bucket of every event after one run is ingested.
+
+    The raw event table intentionally stays close to the log. This table adds
+    the second-pass distinctions used by the boot taxonomy: idle versus real
+    commit-gap evidence, periodic observer samples versus monotonic wedges,
+    budget-end state dumps versus age-based stalls, and complete write-buffer
+    records versus lines truncated by the harness verdict stream.
+    """
+    rows = db.execute(
+        'SELECT id,seq,cycle,class,etype,core,hart,pc,aux,raw FROM event WHERE run_id=? ORDER BY cycle,seq',
+        (run_id,)).fetchall()
+    verdict_row = db.execute('SELECT verdict, cores FROM run WHERE id=?', (run_id,)).fetchone()
+    verdict = verdict_row[0] if verdict_row else None
+    cores = verdict_row[1] if verdict_row else None
+    db.execute('DELETE FROM event_analysis WHERE run_id=?', (run_id,))
+
+    # Build per-cycle max retirement per hart from periodic census rows. Using
+    # periodic rows only (which fire at aligned cycle boundaries) and taking
+    # MAX(ret) per cycle avoids comparing secondary-core final rows (offset by
+    # boot-hold cycles) against core-0 final rows, while proving whether the
+    # active hart retired strictly more instructions after a commit gap.
+    census_by_hart = {}
+    for cyc, hart, mret in db.execute(
+        "SELECT cycle, hart, MAX(ret) FROM census WHERE run_id=? AND kind='periodic' "
+        "AND ret IS NOT NULL GROUP BY hart, cycle ORDER BY cycle",
+        (run_id,)):
+        census_by_hart.setdefault(hart, []).append((cyc, mret))
+
+    def retired_after(core, hart, last_cyc):
+        pts = census_by_hart.get(hart if hart is not None else 0)
+        if not pts and (cores in (None, 1)):
+            pts = census_by_hart.get(0) or census_by_hart.get(None)
+        if not pts:
+            return False
+        after = [(c, r) for c, r in pts if c > last_cyc]
+        if len(after) < 2:
+            return False
+        # Require at least one full census interval after the hang and strict
+        # retirement growth across distinct later cycles.
+        return after[-1][0] > after[0][0] and after[-1][1] > after[0][1]
+
+    hang_series = {}
+    for r in rows:
+        eid, _seq, cyc, cls, et, core, hart, pc, aux, _raw = r
+        if cls == 'hang' and not et.startswith('idle.'):
+            key = (core, hart, et, pc)
+            hang_series.setdefault(key, []).append((eid, cyc, since_ack_of(aux)))
+    series_stats = {}
+    series_resolved = {}
+    for key, vals in hang_series.items():
+        core, hart, _et, _pc = key
+        acks = [a for _eid, _cyc, a in vals if a is not None]
+        cycles = [cyc for _eid, cyc, _a in vals]
+        last_cyc = max(cycles) if cycles else 0
+        stats = (len(vals), max(acks) if acks else 0,
+                 (last_cyc - min(cycles)) if cycles else 0)
+        res_later = (stats[1] < 100000) and retired_after(core, hart, last_cyc)
+        for eid, _cyc, _a in vals:
+            series_stats[eid] = stats
+            series_resolved[eid] = res_later
+
+    # A run that ultimately reaches shell/pass proves that its earlier non-idle
+    # commit gaps resolved. They remain performance/context evidence, but they
+    # are not terminal liveness candidates.
+    resolved_boot = verdict in ('shell', 'pass')
+    out = []
+    for eid, _seq, _cyc, cls, et, core, hart, pc, aux, raw in rows:
+        since = since_ack_of(aux)
+        nseries = maxack = span = None
+        note = None
+        if cls == 'hang':
+            if et.startswith('idle.'):
+                bucket, evidence = 'benign', et
+            else:
+                nseries, maxack, span = series_stats.get(eid, (1, since or 0, 0))
+                note = f'series n={nseries} max_ack={maxack} span={span}'
+                if resolved_boot or series_resolved.get(eid, False):
+                    bucket, evidence = 'context-noise', 'hang-resolved'
+                elif since is not None and since < 2000:
+                    bucket, evidence = 'observer-artifact', 'hang-sample'
+                elif maxack >= 100000:
+                    bucket, evidence = 'primary-candidate', 'hang-persistent'
+                elif maxack >= 10000 and nseries >= 3 and span >= 5000:
+                    bucket, evidence = 'primary-candidate', 'hang-persistent-candidate'
+                elif maxack >= 2000 or (since is not None and since >= 2000):
+                    bucket, evidence = 'primary-candidate', 'hang-unresolved'
+                else:
+                    bucket, evidence = 'observer-artifact', 'hang-sample'
+        elif cls == 'stall':
+            if (aux or '') == 'final':
+                bucket, evidence = 'observer-artifact', 'terminal-state'
+            elif 'age' in (aux or ''):
+                bucket, evidence = 'context-noise', 'age-stall'
+            else:
+                bucket, evidence = 'context-noise', 'live-stall'
+        elif cls == 'wbuf':
+            if 'plain drop' in raw:
+                bucket, evidence = 'observer-artifact', 'diagnostic-plain'
+            elif 'freed by' in raw:
+                bucket, evidence = 'primary-candidate', 'diagnostic-nonplain'
+            else:
+                bucket, evidence = 'observer-artifact', 'diagnostic-truncated'
+        elif cls == 'axi':
+            if et.endswith('.untagged'):
+                bucket, evidence = 'observer-artifact', 'harness-untagged'
+            else:
+                bucket, evidence = 'context-noise', 'addressed-bus-error'
+        elif cls in ('ptw', 'ife', 'seqgap'):
+            bucket, evidence = 'context-noise', 'boot-baseline'
+        elif cls == 'assert':
+            bucket, evidence = 'primary-candidate', 'model-assert'
+        elif cls == 'progress':
+            bucket, evidence = 'progress', 'progress'
+        elif cls == 'verdict':
+            bucket, evidence = 'verdict', 'verdict'
+        elif cls == 'tlb':
+            bucket, evidence = 'context-noise', 'tlb-trace'
+        else:
+            bucket, evidence = 'unknown', 'observed'
+        out.append((eid, run_id, since, nseries, maxack, span, bucket, evidence, note))
+    db.executemany('INSERT INTO event_analysis VALUES(?,?,?,?,?,?,?,?,?)', out)
+
+
+def analyze_events(db, only_missing=False):
+    q = 'SELECT id FROM run'
+    if only_missing:
+        q += ' WHERE NOT EXISTS (SELECT 1 FROM event_analysis a WHERE a.run_id=run.id)'
+    for (rid,) in db.execute(q).fetchall():
+        analyze_run_events(db, rid)
+
+
 def pick_anchors(db, run_id, per_type):
     """Events worth RVFI context: every assert/hang/verdict, and the first
     `per_type` plus the last of every other error type."""
@@ -600,7 +751,7 @@ def ingest_run(db, tag, test, kind, log, out_dir, meta, args):
         print(f'  = {tag}/{test}: unchanged')
         return
     if row:
-        for t in ('event', 'census', 'uart', 'rvfi', 'pc_sample', 'kv', 'thread'):
+        for t in ('event_analysis', 'event', 'census', 'uart', 'rvfi', 'pc_sample', 'kv', 'thread'):
             db.execute(f'DELETE FROM {t} WHERE run_id=?', (row[0],))
         db.execute('DELETE FROM run WHERE id=?', (row[0],))
     t0 = time.time()
@@ -651,6 +802,7 @@ def ingest_run(db, tag, test, kind, log, out_dir, meta, args):
             run.verdict = 'no-shell'
         db.execute('UPDATE run SET verdict=? WHERE id=?', (run.verdict, rid))
     db.executemany('INSERT INTO uart VALUES(?,?,?,?,?)', [(rid,) + u for u in run.uart])
+    analyze_run_events(db, rid)
     files = rvfi_files(out_dir, test)
     harts = sorted({h for (_, h) in run.threads if h is not None}) or [0]
     for (core, hart), t in sorted(run.threads.items(), key=lambda kv: str(kv[0])):
@@ -796,6 +948,9 @@ def main():
         if k and not db.execute('SELECT 1 FROM etype WHERE etype=?', (e,)).fetchone():
             v = ETYPES[k]
             db.execute('INSERT INTO etype VALUES(?,?,?,?,?)', (e, e.split('.')[0], v[0], v[1], v[2]))
+    # Existing unchanged runs do not need their large logs reparsed just to gain
+    # the derived taxonomy; backfill it once from the already ingested rows.
+    analyze_events(db, only_missing=True)
     db.commit()
     db.close()
     th_out = os.environ.get('TH_OUT_DIR')

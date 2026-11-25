@@ -48,8 +48,9 @@ module g6lc_bp_loop
   // svt-pipe: no-cut on=mem_q
   // svt-pipe: cycle lp q=mem_q d=pred_o hold=flush_i steps=1
 
-  localparam int unsigned OFFSET = CVA6Cfg.RVC == 1'b1 ? 1 : 2;
-  localparam int unsigned IDX_W = (NR_ENTRIES <= 1) ? 1 : $clog2(NR_ENTRIES);
+  localparam int unsigned OFFSET   = CVA6Cfg.RVC == 1'b1 ? 1 : 2;
+  localparam int unsigned IDX_W    = (NR_ENTRIES <= 1) ? 1 : $clog2(NR_ENTRIES);
+  localparam int unsigned COL_BITS = (CVA6Cfg.INSTR_PER_FETCH <= 1) ? 0 : $clog2(CVA6Cfg.INSTR_PER_FETCH);
 
   typedef struct packed {
     logic                    valid;
@@ -60,17 +61,30 @@ module g6lc_bp_loop
   } loop_entry_t;
 
   loop_entry_t [NR_ENTRIES-1:0] mem_d, mem_q;
-  logic [IDX_W-1:0] idx, uidx;
+  logic [IDX_W-1:0] uidx;
+  logic [CVA6Cfg.INSTR_PER_FETCH-1:0][CVA6Cfg.VLEN-1:0] slot_pc;
+  logic [CVA6Cfg.INSTR_PER_FETCH-1:0][IDX_W-1:0]        slot_idx;
 
-  assign idx  = vpc_i[OFFSET+:IDX_W];
   assign uidx = bht_update_i.pc[OFFSET+:IDX_W];
+  for (genvar i = 0; i < CVA6Cfg.INSTR_PER_FETCH; i++) begin : gen_slot_pc
+    if (COL_BITS == 0) begin : gen_sp_single
+      assign slot_pc[i] = vpc_i;
+    end else begin : gen_sp_col
+      assign slot_pc[i] = {vpc_i[CVA6Cfg.VLEN-1:OFFSET+COL_BITS], COL_BITS'(i), {OFFSET{1'b0}}};
+    end
+    assign slot_idx[i] = slot_pc[i][OFFSET+:IDX_W];
+  end
 
-  // Prediction: if tag matches and confident, take while conf_cnt < trip
+  // Prediction: per-slot column match (T21e parity) with saturated trip guard
   always_comb begin
     pred_o = pred_i;
-    if (mem_q[idx].valid && mem_q[idx].tag == vpc_i && mem_q[idx].conf[1]) begin
-      pred_o[0].valid = 1'b1;
-      pred_o[0].taken = (mem_q[idx].conf_cnt < mem_q[idx].trip);
+    for (int unsigned i = 0; i < CVA6Cfg.INSTR_PER_FETCH; i++) begin
+      if (mem_q[slot_idx[i]].valid && mem_q[slot_idx[i]].tag == slot_pc[i] &&
+          mem_q[slot_idx[i]].conf[1] &&
+          (mem_q[slot_idx[i]].trip != 8'd0) && (mem_q[slot_idx[i]].trip != 8'hFF)) begin
+        pred_o[i].valid = 1'b1;
+        pred_o[i].taken = (mem_q[slot_idx[i]].conf_cnt < mem_q[slot_idx[i]].trip);
+      end
     end
   end
 
@@ -88,8 +102,8 @@ module g6lc_bp_loop
       mem_train[r] = mem_q[r];
       if (mem_q[r].valid && mem_q[r].tag == bht_update_i.pc) begin
         if (bht_update_i.taken) begin
-          // Still in loop
-          mem_train[r].conf_cnt = mem_q[r].conf_cnt + 8'd1;
+          // Still in loop (saturate at 8'hFF so >255-iter loops never wrap to 0)
+          mem_train[r].conf_cnt = (mem_q[r].conf_cnt == 8'hFF) ? 8'hFF : (mem_q[r].conf_cnt + 8'd1);
         end else begin
           // Exit: learn trip count
           if (mem_q[r].conf_cnt == mem_q[r].trip) begin

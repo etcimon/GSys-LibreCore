@@ -904,6 +904,7 @@ module frontend
       .clk_i,
       .rst_ni,
       .flush_i,
+      .flush_bp_i,
       .boot_addr_i,
       .red_valid_i  (red_valid),
       .red_pc_i     (red_pc),

@@ -853,6 +853,18 @@ module store_buffer
           end
         end
       end
+      // Zicclsm Beat-1 committed entry staged in commit_pend2_entry_q: newer
+      // than commit_queue_q, older than speculative_queue_q.
+`ifndef G6LC_MUT_STQ_NO_PEND2_FWD
+      if (commit_pend2_v_q && pa_eq(commit_pend2_entry_q.address, load_paddr_i)) begin
+        for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
+          if (commit_pend2_entry_q.be[b]) begin
+            data_m[8*b+:8] = commit_pend2_entry_q.data[8*b+:8];
+            be_m[b]        = 1'b1;
+          end
+        end
+      end
+`endif
       // A141: the speculative sources in program order without walking a
       // ring: every entry is a candidate per byte (older than the load, same
       // hart, lane or cbo.zero line match, byte written), and a byte takes

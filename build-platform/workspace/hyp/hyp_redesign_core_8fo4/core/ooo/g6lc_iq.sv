@@ -264,26 +264,37 @@ module g6lc_iq
       end
       assign elig[b] = ge[nused + 1][b];
     end
-    // x & -x lowest-priority pick inside the hint-rotated window,
-    // unchanged from the serial form.
-    always_comb begin : lane_pick
-      rot        = rotr(elig, sh[p]);
-      pick_r     = rot & (~rot + 1'b1);
-      pick_oh[p] = rotl(pick_r, sh[p]);
+    // Flat parallel prefix-OR lowest-set isolate (eliminates ~rot+1 carry chain)
+    // and parallel genvar c_asgn/c_used encoders.
+    assign rot = rotr(elig, sh[p]);
+    for (genvar b = 0; b < BANKS; b++) begin : gen_pick_r
+      if (b == 0) begin : gen_pr0
+        assign pick_r[0] = rot[0];
+      end else begin : gen_prn
+        assign pick_r[b] = rot[b] && !(|rot[b-1:0]);
+      end
     end
+    assign pick_oh[p] = rotl(pick_r, sh[p]);
     assign c_found[p] = sv[p] & (|pick_oh[p]);
-    always_comb begin : lane_asgn
-      c_asgn[p] = '0;
-      for (int unsigned b = 0; b < BANKS; b++)
-        if (sv[p] && pick_oh[p][b])
-          c_asgn[p] |= bank_idx_c[b];
+    for (genvar bit_i = 0; bit_i < BW; bit_i++) begin : gen_asgn_bit
+      logic [BANKS-1:0] ab_m;
+      for (genvar b = 0; b < BANKS; b++) begin : gen_ab
+        assign ab_m[b] = ((b >> bit_i) & 1) ? (sv[p] & pick_oh[p][b]) : 1'b0;
+      end
+      assign c_asgn[p][bit_i] = |ab_m;
     end
     // earlier live lanes that picked the same bank (for the STEER2 recheck):
-    // pick_oh is one-hot, so "same bank" is a non-empty AND of the two picks
-    always_comb begin : lane_used
-      c_used[p] = '0;
-      for (int unsigned j = 0; j < p; j++)
-        c_used[p] += CW'(sv[p] & sv[j] & (|(pick_oh[j] & pick_oh[p])));
+    if (p == 0) begin : gen_cu0
+      assign c_used[0] = '0;
+    end else begin : gen_cun
+      logic [p-1:0] same_bk;
+      for (genvar j = 0; j < p; j++) begin : gen_sb
+        assign same_bk[j] = sv[p] & sv[j] & (|(pick_oh[j] & pick_oh[p]));
+      end
+      always_comb begin : lane_used
+        c_used[p] = '0;
+        for (int unsigned j = 0; j < p; j++) c_used[p] += CW'(same_bk[j]);
+      end
     end
   end
   if (STEER2) begin : gen_steer2

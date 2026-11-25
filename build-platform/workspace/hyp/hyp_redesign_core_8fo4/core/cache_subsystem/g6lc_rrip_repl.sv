@@ -97,40 +97,34 @@ module g6lc_rrip_repl
                                 : RRPV_LONG;
     end
   end
-  always_comb begin
-    any_max = 1'b0;
-    for (int unsigned w = 0; w < NR_WAYS; w++)
-      if (fill_pre[w] == RRPV_MAX) any_max = 1'b1;
+  // Parallel per-way max-check & parallel per-set/way next-state (replaces
+  // dynamic rrpv_d[updt_set_i][w] / rrpv_d[fill_set_i][w] chains).
+  logic [NR_WAYS-1:0] way_is_max;
+  for (genvar w = 0; w < NR_WAYS; w++) begin : gen_wmax
+    assign way_is_max[w] = (fill_pre[w] == RRPV_MAX);
+  end
+  assign any_max = |way_is_max;
+
+  assign lfsr_d = fill_i ? {lfsr_q[3:0], lfsr_q[4] ^ lfsr_q[2]} : lfsr_q;
+  assign psel_d = (DRRIP_EN && fill_i && (fill_set_i == '0) && (psel_q != '0))
+                  ? (psel_q - 10'd1) :
+                  (DRRIP_EN && fill_i && (fill_set_i == SET_W'(1)) && (psel_q != 10'h3ff))
+                  ? (psel_q + 10'd1) : psel_q;
+
+  logic [NR_WAYS-1:0][RRPV_BITS-1:0] fill_next;
+  for (genvar w = 0; w < NR_WAYS; w++) begin : gen_fnext
+    assign fill_next[w] = (fill_i && !any_max && (fill_pre[w] != RRPV_MAX))
+                          ? (fill_pre[w] + {{RRPV_BITS-1{1'b0}}, 1'b1})
+                          : fill_pre[w];
   end
 
-  // ----- Update / fill / age -----
-  always_comb begin
-    rrpv_d = rrpv_q;
-    psel_d = psel_q;
-    lfsr_d = lfsr_q;
-
-    if (fill_i) lfsr_d = {lfsr_q[3:0], lfsr_q[4] ^ lfsr_q[2]};
-
-    if (DRRIP_EN && fill_i) begin
-      if (fill_set_i == '0) begin
-        if (psel_q != '0) psel_d = psel_q - 10'd1;
-      end else if (fill_set_i == SET_W'(1)) begin
-        if (psel_q != 10'h3ff) psel_d = psel_q + 10'd1;
-      end
-    end
-
-    if (updt_i && !fill_same_updt) begin
-      for (int unsigned w = 0; w < NR_WAYS; w++)
-        if (updt_way_i[w]) rrpv_d[updt_set_i][w] = '0;
-    end
-
-    if (fill_i || fill_same_updt) begin
-      for (int unsigned w = 0; w < NR_WAYS; w++) begin
-        if (fill_i && !any_max && (fill_pre[w] != RRPV_MAX))
-          rrpv_d[fill_set_i][w] = fill_pre[w] + {{RRPV_BITS-1{1'b0}}, 1'b1};
-        else
-          rrpv_d[fill_set_i][w] = fill_pre[w];
-      end
+  for (genvar s = 0; s < NR_SETS; s++) begin : gen_rrpv_s
+    logic is_fill_s, is_updt_s;
+    assign is_fill_s = (fill_i || fill_same_updt) && (fill_set_i == SET_W'(s));
+    assign is_updt_s = updt_i && !fill_same_updt && (updt_set_i == SET_W'(s));
+    for (genvar w = 0; w < NR_WAYS; w++) begin : gen_rrpv_w
+      assign rrpv_d[s][w] = is_fill_s ? fill_next[w] :
+                            (is_updt_s && updt_way_i[w]) ? '0 : rrpv_q[s][w];
     end
   end
 

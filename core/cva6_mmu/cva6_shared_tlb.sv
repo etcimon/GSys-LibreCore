@@ -289,7 +289,7 @@ module cva6_shared_tlb #(
   genvar w_gen;
   generate
     for (w_gen = 0; w_gen < CVA6Cfg.PtLevels; w_gen++) begin
-      assign vpn_d[w_gen]               = ((|v_st_enbl[1][HYP_EXT:0]) && itlb_access_i && ~itlb_hit_i && ~dtlb_access_i) ? //
+      assign vpn_d[w_gen]               = ((|v_st_enbl[1][HYP_EXT:0]) && itlb_access_i && ~itlb_hit_i && ~(dtlb_access_i && ~dtlb_hit_i)) ? //
           itlb_vaddr_i[12+((CVA6Cfg.VpnLen/CVA6Cfg.PtLevels)*(w_gen+1))-1:12+((CVA6Cfg.VpnLen/CVA6Cfg.PtLevels)*w_gen)] :  //
           (((|v_st_enbl[0][HYP_EXT:0]) && dtlb_access_i && ~dtlb_hit_i) ?  //
           dtlb_vaddr_i[12+((CVA6Cfg.VpnLen/CVA6Cfg.PtLevels)*(w_gen+1))-1:12+((CVA6Cfg.VpnLen/CVA6Cfg.PtLevels)*w_gen)] : vpn_q[w_gen]);
@@ -297,7 +297,7 @@ module cva6_shared_tlb #(
   endgenerate
 
   if (CVA6Cfg.RVH)  //THIS UPDATES THE EXTRA BITS OF VPN IN SV39x4
-    assign vpn_d[CVA6Cfg.PtLevels] = ((|v_st_enbl[1][HYP_EXT:0]) && itlb_access_i && ~itlb_hit_i && ~dtlb_access_i) ? //
+    assign vpn_d[CVA6Cfg.PtLevels] = ((|v_st_enbl[1][HYP_EXT:0]) && itlb_access_i && ~itlb_hit_i && ~(dtlb_access_i && ~dtlb_hit_i)) ? //
         {{(((CVA6Cfg.VpnLen/CVA6Cfg.PtLevels)-(CVA6Cfg.VpnLen%CVA6Cfg.PtLevels))){1'b0}}, itlb_vaddr_i[CVA6Cfg.VpnLen-1:CVA6Cfg.VpnLen-(CVA6Cfg.VpnLen%CVA6Cfg.PtLevels)]} :  //
         (((|v_st_enbl[0][HYP_EXT:0]) && dtlb_access_i && ~dtlb_hit_i) ?  //
         {{(((CVA6Cfg.VpnLen/CVA6Cfg.PtLevels)-(CVA6Cfg.VpnLen%CVA6Cfg.PtLevels))){1'b0}}, dtlb_vaddr_i[CVA6Cfg.VpnLen-1: CVA6Cfg.VpnLen-(CVA6Cfg.VpnLen%CVA6Cfg.PtLevels)]} : //
@@ -333,10 +333,11 @@ module cva6_shared_tlb #(
       pte_rd_en   = '1;
       tag_rd_addr = flush_idx_q;
       pte_rd_addr = flush_idx_q;
-    end else if ((flush_state_q != IDLE) || flush_i || flush_vvma_i || flush_gvma_i) begin
+    end else if ((flush_state_q != IDLE) || flush_i || flush_vvma_i || flush_gvma_i ||
+                 (CVA6Cfg.UseSharedTlb && shared_tlb_update_i.valid)) begin
       //minimal approach holding lookup quiet during flush
-      // if we got an ITLB miss
-    end else if ((|v_st_enbl[1][HYP_EXT:0]) & itlb_access_i & ~itlb_hit_i & ~dtlb_access_i) begin
+      // if we got an ITLB miss (yield only to a real DTLB miss, not a DTLB hit)
+    end else if ((|v_st_enbl[1][HYP_EXT:0]) & itlb_access_i & ~itlb_hit_i & ~(dtlb_access_i & ~dtlb_hit_i)) begin
       tag_rd_en           = '1;
       tag_rd_addr         = itlb_vaddr_i[12+:$clog2(CVA6Cfg.SharedTlbDepth)];
       pte_rd_en           = '1;
@@ -432,7 +433,7 @@ module cva6_shared_tlb #(
         // check if translation is a: S-Stage and G-Stage, S-Stage only or G-Stage only translation and virtualization mode is on/off
         match_stage[i] = shared_tag_rd[i].v_st_enbl == v_st_enbl[i_req_q][HYP_EXT*2:0];
 
-        if (shared_tag_valid[i] && match_asid[i] && match_vmid[i] && match_hart[i] && match_stage[i]) begin
+        if (shared_tlb_access_q && shared_tag_valid[i] && match_asid[i] && match_vmid[i] && match_hart[i] && match_stage[i]) begin
           if (|level_match[i] || napot_tag_match[i]) begin
             shared_tlb_hit_d = 1'b1;
             // Prepare PTE with NAPOT patching if needed

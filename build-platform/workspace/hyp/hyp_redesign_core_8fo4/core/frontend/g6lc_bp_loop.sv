@@ -63,8 +63,9 @@ module g6lc_bp_loop
   // svt-pipe: no-cut on=mem_q
   // svt-pipe: cycle lp q=mem_q d=pred_o hold=flush_i steps=1
 
-  localparam int unsigned OFFSET = G6LCCfg.RVC == 1'b1 ? 1 : 2;
-  localparam int unsigned IDX_W = (NR_ENTRIES <= 1) ? 1 : $clog2(NR_ENTRIES);
+  localparam int unsigned OFFSET   = G6LCCfg.RVC == 1'b1 ? 1 : 2;
+  localparam int unsigned IDX_W    = (NR_ENTRIES <= 1) ? 1 : $clog2(NR_ENTRIES);
+  localparam int unsigned COL_BITS = (G6LCCfg.INSTR_PER_FETCH <= 1) ? 0 : $clog2(G6LCCfg.INSTR_PER_FETCH);
 
   typedef struct packed {
     logic                    valid;
@@ -75,52 +76,75 @@ module g6lc_bp_loop
   } loop_entry_t;
 
   loop_entry_t [NR_ENTRIES-1:0] mem_d, mem_q;
-  logic [IDX_W-1:0] idx, uidx;
+  logic [IDX_W-1:0] uidx;
 
-  // hyp8 P1: the lookup index and the window tag, registered at the stage-B
-  // edge. Advisory data — killed windows are deadened downstream by the
-  // epoch check, so no flush is applied to these registers.
-  logic [IDX_W-1:0]        idx_q;
-  logic [G6LCCfg.VLEN-1:0] vpc_q;
-
-  assign idx  = vpc_i[OFFSET+:IDX_W];
+  // T21e/T18 per-slot column parity with g6lc_bp_ittage & g6lc_bp_statcor:
+  // output slot i is consumed by column (addr[2:1] == i), so each slot looks
+  // up its own aligned PC inside the fetch block instead of slot 0 only.
+  logic [G6LCCfg.INSTR_PER_FETCH-1:0][G6LCCfg.VLEN-1:0] slot_pc, vpc_q;
+  logic [G6LCCfg.INSTR_PER_FETCH-1:0][IDX_W-1:0]        idx_c, idx_q;
   assign uidx = bht_update_i.pc[OFFSET+:IDX_W];
+
+  for (genvar i = 0; i < G6LCCfg.INSTR_PER_FETCH; i++) begin : gen_slot_pc
+`ifdef G6LC_MUT_BP_LOOP_SLOT0_ONLY
+    assign slot_pc[i] = vpc_i;
+`else
+    if (COL_BITS == 0) begin : gen_sp_single
+      assign slot_pc[i] = vpc_i;
+    end else begin : gen_sp_col
+      assign slot_pc[i] = {vpc_i[G6LCCfg.VLEN-1:OFFSET+COL_BITS], COL_BITS'(i), {OFFSET{1'b0}}};
+    end
+`endif
+    assign idx_c[i] = slot_pc[i][OFFSET+:IDX_W];
+  end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       idx_q <= '0;
       vpc_q <= '0;
     end else begin
-      idx_q <= idx;
-      vpc_q <= vpc_i;
+      idx_q <= idx_c;
+      vpc_q <= slot_pc;
     end
   end
 
-  // hyp8 P2: the selected-row read and the compare stage (tag match +
-  // confidence) run off the P1 registers; the {hit, dir} facts are the
-  // registered verdict. The output merge at stage S is a thin comb override.
-  loop_entry_t rd_row;
-  assign rd_row = mem_q[idx_q];
-
-  logic hit_q, dir_q;
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      hit_q <= 1'b0;
-      dir_q <= 1'b0;
-    end else begin
-      hit_q <= rd_row.valid && (rd_row.tag == vpc_q) && rd_row.conf[1];
-      dir_q <= (rd_row.conf_cnt < rd_row.trip);
+  // hyp8 P2: per-slot selected-row read and compare stage off P1 registers.
+  // Saturating conf_cnt==8'hFF / trip==0/8'hFF yields to TAGE (prevents 8-bit
+  // wraparound on >255-iter loops from poisoning trip to 0).
+  logic [G6LCCfg.INSTR_PER_FETCH-1:0] hit_q, dir_q;
+  for (genvar i = 0; i < G6LCCfg.INSTR_PER_FETCH; i++) begin : gen_p2
+    loop_entry_t rd_row;
+    logic        trip_valid;
+    assign rd_row = mem_q[idx_q[i]];
+`ifdef G6LC_MUT_BP_LOOP_WRAP_TRIP
+    assign trip_valid = 1'b1;
+`else
+    assign trip_valid = (rd_row.trip != 8'd0) && (rd_row.trip != 8'hFF);
+`endif
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        hit_q[i] <= 1'b0;
+        dir_q[i] <= 1'b0;
+      end else begin
+        hit_q[i] <= rd_row.valid && (rd_row.tag == vpc_q[i]) && rd_row.conf[1] && trip_valid;
+        dir_q[i] <= (rd_row.conf_cnt < rd_row.trip);
+      end
     end
   end
 
-  // Prediction: if tag matches and confident, take while conf_cnt < trip.
-  // Reference policy verbatim — the override owns slot 0 only.
-  always_comb begin
-    pred_o = pred_i;
-    if (hit_q) begin
-      pred_o[0].valid = 1'b1;
-      pred_o[0].taken = dir_q;
+  // Prediction: parallel per-slot column override (no procedural loop billing).
+  for (genvar i = 0; i < G6LCCfg.INSTR_PER_FETCH; i++) begin : gen_pred_o
+`ifdef G6LC_MUT_BP_LOOP_SLOT0_ONLY
+    if (i == 0) begin : gen_p0
+      assign pred_o[0].valid = hit_q[0] ? 1'b1     : pred_i[0].valid;
+      assign pred_o[0].taken = hit_q[0] ? dir_q[0] : pred_i[0].taken;
+    end else begin : gen_pn
+      assign pred_o[i] = pred_i[i];
     end
+`else
+    assign pred_o[i].valid = hit_q[i] ? 1'b1     : pred_i[i].valid;
+    assign pred_o[i].taken = hit_q[i] ? dir_q[i] : pred_i[i].taken;
+`endif
   end
 
   // A140: row-local training (the A135 emitted form, now in the shipped RTL).
@@ -155,7 +179,11 @@ module g6lc_bp_loop
     end
     always_comb begin
       unique case (tr_sel)
+`ifdef G6LC_MUT_BP_LOOP_WRAP_TRIP
         2'd1:    cnt_n = mem_q[r].conf_cnt + 8'd1;
+`else
+        2'd1:    cnt_n = (mem_q[r].conf_cnt == 8'hFF) ? 8'hFF : (mem_q[r].conf_cnt + 8'd1);
+`endif
         2'd2:    cnt_n = '0;
         2'd3:    cnt_n = 8'd1;
         default: cnt_n = mem_q[r].conf_cnt;

@@ -2309,6 +2309,16 @@ module ariane_testharness #(
   // -------------
   // Simulation Helper Functions
   // -------------
+  // Tag each outstanding AR/AW id with its address so R/B errors name the
+  // faulting transaction instead of emitting untagged warnings.
+  logic [AXI_ADDRESS_WIDTH-1:0] ar_addr_by_id [0:(1 << ariane_axi::IdWidth)-1];
+  logic [AXI_ADDRESS_WIDTH-1:0] aw_addr_by_id [0:(1 << ariane_axi::IdWidth)-1];
+  always_ff @(posedge clk_i) begin
+    if (axi_ariane_req.ar_valid && axi_ariane_resp.ar_ready)
+      ar_addr_by_id[axi_ariane_req.ar.id] <= axi_ariane_req.ar.addr;
+    if (axi_ariane_req.aw_valid && axi_ariane_resp.aw_ready)
+      aw_addr_by_id[axi_ariane_req.aw.id] <= axi_ariane_req.aw.addr;
+  end
   // check for response errors
   // +quiet_axi skips the $warning flood (soft-ladder nat/peel I/O).
   always_ff @(posedge clk_i) begin : p_assert
@@ -2316,12 +2326,16 @@ module ariane_testharness #(
       if (axi_ariane_req.r_ready &&
         axi_ariane_resp.r_valid &&
         axi_ariane_resp.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR}) begin
-        $warning("R Response Errored");
+        $warning("R Response Errored id=%0d addr=%h resp=%0d",
+                 axi_ariane_resp.r.id, ar_addr_by_id[axi_ariane_resp.r.id],
+                 axi_ariane_resp.r.resp);
       end
       if (axi_ariane_req.b_ready &&
         axi_ariane_resp.b_valid &&
         axi_ariane_resp.b.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR}) begin
-        $warning("B Response Errored");
+        $warning("B Response Errored id=%0d addr=%h resp=%0d",
+                 axi_ariane_resp.b.id, aw_addr_by_id[axi_ariane_resp.b.id],
+                 axi_ariane_resp.b.resp);
       end
     end
   end

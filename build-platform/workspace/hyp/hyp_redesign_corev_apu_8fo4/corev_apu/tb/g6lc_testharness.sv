@@ -2062,13 +2062,16 @@ module g6lc_testharness #(
   // -------------
   // Simulation Helper Functions
   // -------------
-  // r130: tag each outstanding AR id with its address so an R/B error can
+  // r130: tag each outstanding AR/AW id with its address so an R/B error can
   // name the faulting transaction instead of a bare "Response Errored".
-  // Ids are unique per outstanding xbar transaction here, so last-AR wins.
+  // Ids are unique per outstanding xbar transaction here, so last-AR/AW wins.
   logic [AXI_ADDRESS_WIDTH-1:0] ar_addr_by_id [0:(1 << g6lc_axi::IdWidth)-1];
+  logic [AXI_ADDRESS_WIDTH-1:0] aw_addr_by_id [0:(1 << g6lc_axi::IdWidth)-1];
   always_ff @(posedge clk_i) begin
     if (axi_g6lc_req.ar_valid && axi_g6lc_resp.ar_ready)
       ar_addr_by_id[axi_g6lc_req.ar.id] <= axi_g6lc_req.ar.addr;
+    if (axi_g6lc_req.aw_valid && axi_g6lc_resp.aw_ready)
+      aw_addr_by_id[axi_g6lc_req.aw.id] <= axi_g6lc_req.aw.addr;
   end
   // check for response errors
   // +quiet_axi skips the $warning flood (soft-ladder nat/peel I/O).
@@ -2085,7 +2088,7 @@ module g6lc_testharness #(
         axi_g6lc_resp.b_valid &&
         axi_g6lc_resp.b.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR}) begin
         $warning("B Response Errored id=%0d addr=%h resp=%0d",
-                 axi_g6lc_resp.b.id, ar_addr_by_id[axi_g6lc_resp.b.id],
+                 axi_g6lc_resp.b.id, aw_addr_by_id[axi_g6lc_resp.b.id],
                  axi_g6lc_resp.b.resp);
       end
     end

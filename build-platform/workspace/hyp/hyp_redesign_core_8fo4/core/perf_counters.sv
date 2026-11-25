@@ -526,29 +526,33 @@ always_comb begin : Mux
       end
     end
 
-    //Write
+    //Write (constant-index decoded per hart/counter — eliminates dynamic
+    // addr_i - base + 1 subtractor and dynamic array indexing on generic_counter_d)
     if (we_i) begin
-      if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_COUNTER_3)) && (addr_i < (csr_addr_t'(riscv::CSR_MHPM_COUNTER_3) + csr_addr_t'(MHPMCounterNum))) ) begin
-        if (riscv::XLEN == 32) begin
-          generic_counter_d[csr_hart_i][addr_i-riscv::CSR_MHPM_COUNTER_3+1][31:0] = data_i[31:0];
-        end else begin
-          generic_counter_d[csr_hart_i][addr_i-riscv::CSR_MHPM_COUNTER_3+1] = data_i;
-        end
-      end else if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_COUNTER_3H)) && (addr_i < (csr_addr_t'(riscv::CSR_MHPM_COUNTER_3H) + csr_addr_t'(MHPMCounterNum))) ) begin
-        if (riscv::XLEN == 32) begin
-          generic_counter_d[csr_hart_i][addr_i-riscv::CSR_MHPM_COUNTER_3H+1][63:32] = data_i[31:0];
-        end else begin
-          update_access_exception = 1'b1;
-        end
-      end else if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_EVENT_3)) && (addr_i < csr_addr_t'(riscv::CSR_MHPM_EVENT_3) + csr_addr_t'(MHPMCounterNum)) ) begin
-        // WARL: selector always writable; OF/filter only with Sscofpmf.
-        // Writing 0 to OF clears it (spec); writing 1 is ignored (sticky set).
-        mhpmevent_d[csr_hart_i][addr_i-riscv::CSR_MHPM_EVENT_3+1] = data_i[MHPMEventWidth-1:0];
-        if (G6LCCfg.SscofpmfEn && G6LCCfg.IS_XLEN64) begin
-          if (!data_i[63]) of_d[csr_hart_i][addr_i-riscv::CSR_MHPM_EVENT_3+1] = 1'b0;
-          minh_d[csr_hart_i][addr_i-riscv::CSR_MHPM_EVENT_3+1] = data_i[62];
-          sinh_d[csr_hart_i][addr_i-riscv::CSR_MHPM_EVENT_3+1] = data_i[61];
-          uinh_d[csr_hart_i][addr_i-riscv::CSR_MHPM_EVENT_3+1] = data_i[60];
+      if ((riscv::XLEN != 32) &&
+          (addr_i >= csr_addr_t'(riscv::CSR_MHPM_COUNTER_3H)) &&
+          (addr_i <  (csr_addr_t'(riscv::CSR_MHPM_COUNTER_3H) + csr_addr_t'(MHPMCounterNum)))) begin
+        update_access_exception = 1'b1;
+      end
+      for (int unsigned h = 0; h < NH; h++) begin
+        if (csr_hart_i == HID_W'(h)) begin
+          for (int unsigned i = 1; i <= MHPMCounterNum; i++) begin
+            if (addr_i == csr_addr_t'(riscv::CSR_MHPM_COUNTER_3 + i - 1)) begin
+              if (riscv::XLEN == 32) generic_counter_d[h][i][31:0] = data_i[31:0];
+              else                   generic_counter_d[h][i]       = data_i;
+            end else if ((riscv::XLEN == 32) &&
+                         (addr_i == csr_addr_t'(riscv::CSR_MHPM_COUNTER_3H + i - 1))) begin
+              generic_counter_d[h][i][63:32] = data_i[31:0];
+            end else if (addr_i == csr_addr_t'(riscv::CSR_MHPM_EVENT_3 + i - 1)) begin
+              mhpmevent_d[h][i] = data_i[MHPMEventWidth-1:0];
+              if (G6LCCfg.SscofpmfEn && G6LCCfg.IS_XLEN64) begin
+                if (!data_i[63]) of_d[h][i] = 1'b0;
+                minh_d[h][i] = data_i[62];
+                sinh_d[h][i] = data_i[61];
+                uinh_d[h][i] = data_i[60];
+              end
+            end
+          end
         end
       end
     end

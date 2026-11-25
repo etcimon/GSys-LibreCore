@@ -852,10 +852,23 @@ assign mem_req_o            = core_req_i[0];
     logic aw_may_invalidate;
     assign aw_may_invalidate = core_req_i[aw_winner].aw.cache[1] ||
         (|core_req_i[aw_winner].aw.atop) || core_req_i[aw_winner].aw.lock;
+    // Allow the next AW's 1-cycle snoop-filter lookup (sig_start) to overlap
+    // with the prior AW's W-beat (w_busy_q): aw_grant still waits on !w_busy_q
+    // so AXI W-channel ownership is preserved, while coh_block_ar blocks ARs on
+    // sig_start and throughout sig_pending_q so the snoop-filter superset and
+    // single-port alloc/lookup invariants remain exact. Eliminates the 1-cycle
+    // wbusy bubble on back-to-back single-beat stores (~95.6k cycles in OpenWrt
+    // boot; back-to-back store cadence 3 -> 2 cyc/store).
+`ifdef G6LC_MUT_HUB_SIG_WAIT_WBUSY
     assign coh_block_ar = OOO_SF &&
         (sig_pending_q || (!w_busy_q && |aw_req && !ar_hold_q));
     assign sig_start = OOO_SF && sig_initialized && !sig_pending_q && !ar_hold_q &&
         !w_busy_q && !inv_pend_valid_q && |aw_req && !aw_ot_full;
+`else
+    assign sig_start = OOO_SF && sig_initialized && !sig_pending_q && !ar_hold_q &&
+        !inv_pend_valid_q && |aw_req && !aw_ot_full;
+    assign coh_block_ar = OOO_SF && (sig_pending_q || sig_start);
+`endif
 
     always_comb begin
       // Defaults
@@ -1429,13 +1442,6 @@ assign mem_req_o            = core_req_i[0];
     // ================================================================
     coh_inval_t    inv_req;
     logic [NC-1:0] inv_target;
-    // Freshly generated obligation for the write accepted this cycle.
-    coh_inval_t    inv_new;
-    logic [NC-1:0] inv_new_target;
-    // Write-owned target subset (before the LR-kill union): distinguishes a
-    // write obligation that holds back B from a pure LR-kill, which stamps no
-    // slot.
-    logic [NC-1:0] inv_wr_target;
 
     // r127: the candidate target set of a write by aw_winner depends only on
     // the winner and the filter answer, so it is formed beside the grant
@@ -1520,7 +1526,14 @@ assign mem_req_o            = core_req_i[0];
         inv_ot_d[aw_free_slot].inv_wait   = '0;
         inv_ot_d[aw_free_slot].inv_need   = '0;
         inv_ot_d[aw_free_slot].inv_settle = '0;
-        inv_ot_d[aw_free_slot].inv_owed   = |inv_wr_target;
+        // Fix A118 dangling inv_wr_target: use aw_may_invalidate && |inv_wr_cand
+        // (inv_wr_target was removed by A118, leaving inv_owed permanently 0 and
+        // disabling ACK_AFTER_INVAL across all hyp8 multicore writes!).
+`ifdef G6LC_MUT_HUB_NO_INV_OWED
+        inv_ot_d[aw_free_slot].inv_owed   = 1'b0;
+`else
+        inv_ot_d[aw_free_slot].inv_owed   = aw_may_invalidate && (|inv_wr_cand);
+`endif
       end
       // Retained obligation accepted by the invalidation bus: stamp delivery
       // sequence into its AW slot (inv_owed guard ignores pure LR-kills).
@@ -1551,9 +1564,11 @@ assign mem_req_o            = core_req_i[0];
         .inv_deq_seq_o   (inv_deq_seq)
     );
 
-    assign hub_idle_o = (aw_ot_cnt_q == '0) && (ar_ot_cnt_q == '0) &&
-                        !w_busy_q && !aw_hold_q && !ar_hold_q &&
-                        !inv_pend_valid_q && (inv_enq_seq == inv_deq_seq);
+    // Use synthesized slot_used (ar_ot_cnt_q/aw_ot_cnt_q are translate_off
+    // diagnostics) and require !sig_pending_q so Storamic pause/drain never
+    // certifies idle while an AR/AW slot or snoop-filter lookup is live.
+    assign hub_idle_o = !(|slot_used) && !w_busy_q && !aw_hold_q && !ar_hold_q &&
+                        !sig_pending_q && !inv_pend_valid_q && (inv_enq_seq == inv_deq_seq);
 
     //pragma translate_off
     // N1d/T10g hub stall dump (+smt_stats): birth-stamp AR/AW slots; when a

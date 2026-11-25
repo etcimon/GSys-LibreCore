@@ -453,6 +453,12 @@ module load_store_unit
         .lsu_vaddr_i(mmu_vaddr),
         .lsu_tinst_i(mmu_tinst),
         .lsu_is_store_i(st_translation_req),
+        // Speculative OoO loads probe the staged DTLB for hits (avoiding the
+        // TlbStages>=2 IDLE<->WAIT_SPEC_LOAD replay storm) without ever
+        // launching a PTW walk on a miss (preserves rfix131a-03).
+        .lsu_no_walk_i(G6LCCfg.OoOEn && G6LCCfg.SpeculativeSb &&
+                       !st_translation_req && (lsu_ctrl.fu == LOAD) && lsu_ctrl.valid &&
+                       (lsu_ctrl.trans_id != commit_tran_id_i)),
         .csr_hs_ld_st_inst_o(csr_hs_ld_st_inst_o),
         .lsu_dtlb_hit_o(dtlb_hit),  // send in the same cycle as the request
         .lsu_dtlb_ppn_o(dtlb_ppn),  // send in the same cycle as the request
