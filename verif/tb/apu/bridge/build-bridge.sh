@@ -11,17 +11,17 @@ export CVA6_REPO_DIR="$ROOT"
 export TARGET_CFG="${TARGET_CFG:-g6lc64_stream8}"
 OUT="${APU_BRIDGE_OUT:-/tmp/g6lc-apu-bridge}"
 BR="$ROOT/verif/tb/apu/bridge"
-VERILATOR="${VERILATOR:-verilator}"
-# same pin as run-cva6-venus.sh / run-apu-sys-venus.sh: 5.008
-if [ "$("$VERILATOR" --version 2>/dev/null | cut -d" " -f2)" != "5.008" ]; then
-  for c in /opt/testharness/toolchains/verilator-v5.008-g6lc/bin/verilator \
-           /opt/testharness/toolchains/verilator-v5.008/bin/verilator \
-           /root/verilator-build/bin/verilator; do
-    [ -x "$c" ] && { VERILATOR="$c"; break; }
-  done
-fi
-case "$VERILATOR" in /root/verilator-build/*) export VERILATOR_ROOT=/root/verilator-build ;; esac
+# prod_opt path: the same repo PGO Verilator + shared codegen flags +
+# simulator-PGO wrapper the vgtop/vgsys benches use.  apu_select_verilator
+# resolves the content-addressed toolchain (the remote leaf supplies
+# APU_VERILATOR_HOME) and, with APU_SIM_PGO=1, points VERILATOR at
+# apu-verilator.sh so --build provisions a profile-use image.  This replaces
+# the old stock-verilator -O2 build whose generated makefile defaulted to
+# OPT_FAST=-Os (size-optimised, slow for the CTS/guest hot loops).
+source "$ROOT/verif/tb/apu/local-verilator.sh"
+apu_select_verilator
 mkdir -p "$OUT"
+apu_record_verilator
 
 # generated map — bridge_main.cpp consumes bridge_map.h (never typed)
 CFG_PKG="$ROOT/core/include/${TARGET_CFG}_config_pkg.sv"
@@ -43,14 +43,24 @@ if [ -n "${G6LC_APU_DBG_TRACE:-}" ]; then DBGDEF+=(-DG6LC_APU_DEBUG); fi
 
 build_one() { # name, extra-verilator-args
   local name="$1"; shift
+  local mdir="$OUT/obj_$name"
   t0=$SECONDS
+  mkdir -p "$mdir"
+  # Stage the generated map headers inside this build's -Mdir and point -I
+  # there.  The simulator-PGO request identity canonicalises paths under
+  # -Mdir to @model@/*, so the key stays stable across per-run output dirs;
+  # a plain -I$OUT would embed the unique leaf timestamp and force a full
+  # PGO rebuild on every guest/CTS leaf.  ($OUT keeps its own copies for
+  # bridge_selftest --map and the map.log audit below.)
+  cp "$OUT/bridge_map.h" "$OUT/vn_map.svh" "$mdir/"
   if ! "$VERILATOR" --cc --exe --build --assert -j "${G6LC_BRIDGE_JOBS:-$(nproc)}" \
-      -O2 -CFLAGS "-O2 -I$OUT" --trace-fst \
+      "${APU_VERILATOR_FLAGS[@]}" \
+      -CFLAGS "-I$mdir" --trace-fst \
       $WNO "${VLTS[@]}" "${DBGDEF[@]}" \
       -f "$ROOT/corev_apu/apu/Flist.apu_soc" \
       "$BR/tb_g6lc_apu_bridge.sv" "$BR/bridge_main.cpp" \
       --top-module tb_g6lc_apu_bridge "$@" \
-      -Mdir "$OUT/obj_$name" -o apu_bridge \
+      -Mdir "$mdir" -o apu_bridge \
       > "$OUT/build-$name.log" 2>&1; then
     echo "VERILATOR BUILD FAILED ($name)"
     tail -n 80 "$OUT/build-$name.log"

@@ -50,8 +50,11 @@ def training_plan(root, top, arguments, mdir):
         plan['files'] = [str(tb / 'vn_vectors' / (session + suffix))
                          for suffix in ('.hex', '.exp')]
     elif top == 'tb_g6lc_apu_bridge':
+        # build-bridge.sh stages bridge_map.h/vn_map.svh inside each build's
+        # -Mdir so the PGO request identity canonicalises them to @model@/*
+        # (a plain $OUT path embeds the per-run leaf timestamp -> cache miss).
         plan.update(cases=[['--bench', '2000']], expect=r'^\[bridge\] [0-9.]+ kHz',
-                    files=[str(Path(mdir).parent / name)
+                    files=[str(Path(mdir) / name)
                            for name in ('bridge_map.h', 'vn_map.svh')],
                     coverage='idle bridge only; no guest/shader performance claim')
     elif top == 'tb_g6lc_apu_cva6_venus':
