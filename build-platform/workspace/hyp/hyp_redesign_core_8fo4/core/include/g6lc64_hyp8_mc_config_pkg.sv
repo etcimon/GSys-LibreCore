@@ -300,7 +300,7 @@ L2En: bit'(1),  // hyp8-mc: always on (4-core shared L2/L3)
       L2ByteSize: unsigned'(262144),
       L2SetAssoc: unsigned'(8),
       L2LineWidth: unsigned'(512),
-      L2MshrDepth: unsigned'(2),
+      L2MshrDepth: unsigned'(4),
       L2DataBanks: unsigned'(4),
       L2RoundRobinEn: bit'(1),  // LLC (L2 + L3) round-robin victim: WT data traffic is cacheable here (WtAxiAllocEn)
       NrHarts: unsigned'(G6LCConfigNrHarts),
@@ -369,29 +369,27 @@ L2En: bit'(1),  // hyp8-mc: always on (4-core shared L2/L3)
 
       L2WriteTrackDepth: unsigned'(4),
       L2ReadTrackDepth: unsigned'(4),
-      L2PrefetchEn: bit'(0),
-      // SQL run700-703: L2 already hits ~98%, while L3 is effectively cold
-      // (l3_hit=2 vs ~950-986 misses) because the verified non-inclusive eWT
-      // prefetcher was never enabled. Keep L2 prefetch off (it would duplicate
-      // the high-hit L2 stream) and enable L3-only stride PF. Directed SQL
-      // (mc_l2_write_read, run707) then showed every issued candidate useful
-      // (283/283, zero drops) but only ~14% first-touch coverage. The leaf
-      // spacing sweep then isolated the reason: DISTANCE/MAX_OUT=2 cannot run
-      // ahead of dense demand (0/32 warm-set hits at spacing 0-2). The
-      // corrected handshake-edge leaf shows DISTANCE/MAX_OUT=4 restores only
-      // 18-21/32 installed hits at spacing 0-2 (the earlier 23-24/32 claim
-      // was a testbench handshake artifact), while still merging most demand
-      // onto in-flight fills. DISTANCE=8 adds no consistent benefit because
-      // the shared four-entry MSHR plus one-demand reserve caps the useful
-      // fill pipeline. Bind 4/4 with a two-cycle quiet window pending the
-      // full-chip quiet=0 comparison; the global demand reserve, not the
-      // per-stream cap, remains the MSHR pressure limit.
+      L2PrefetchEn: bit'(1),
+      // Hitmax directed SQL (mc_l2_write_read/mc_l3_stride_scan) confirms
+      // the combined operating point: L2 prefetch with warm-evict allocation,
+      // L2 MSHR depth 4, and independent deep L3 lookahead. Write/read improved
+      // to 355,306 cycles with 82.0% L2 and 48.4% L3 hit conversion; scan
+      // completed in 682,915 cycles versus 693,516 baseline with L2 hit
+      // coverage raised from 0.2% to 28.5% while L3 conditional hit coverage
+      // remained 89.7%. Keep L2 geometry at the validated 4/4/quiet2 point and
+      // use independent L3 8/8/quiet0 lookahead; exact zero requires
+      // L3PfGeometryEn because zero otherwise means inherit.
       L2PfStreams: unsigned'(4),
       L2PfDistance: unsigned'(4),
       L2PfStrideEn: bit'(1),
       L2PfMshrReserve: unsigned'(1),
       L2PfMaxOutstanding: unsigned'(4),
       L2PfQuiet: unsigned'(2),
+      L2PfEvictEn: bit'(1),
+      L3PfGeometryEn: bit'(1),
+      L3PfDistance: unsigned'(8),
+      L3PfMaxOutstanding: unsigned'(8),
+      L3PfQuiet: unsigned'(0),
       L3PrefetchEn: bit'(1),
       SharedTlbDepth: int'(64),
 

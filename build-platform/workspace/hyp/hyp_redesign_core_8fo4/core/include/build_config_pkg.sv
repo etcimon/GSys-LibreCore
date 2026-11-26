@@ -563,6 +563,17 @@ package build_config_pkg;
     cfg.L2PfMaxOutstanding = (G6LCCfg.L2PfMaxOutstanding != 0)
                              ? G6LCCfg.L2PfMaxOutstanding : 1;
     cfg.L2PfQuiet    = (G6LCCfg.L2PfQuiet != 0) ? G6LCCfg.L2PfQuiet : 8;
+    cfg.L2PfEvictEn  = G6LCCfg.L2PfEvictEn;
+    // L3 prefetch lookahead is independent only when requested. Zero-valued
+    // distance/max-outstanding fields inherit the legacy shared geometry;
+    // L3PfGeometryEn makes L3PfQuiet exact so zero is representable there.
+    cfg.L3PfGeometryEn = G6LCCfg.L3PfGeometryEn;
+    cfg.L3PfDistance   = (G6LCCfg.L3PfDistance != 0)
+                         ? G6LCCfg.L3PfDistance : cfg.L2PfDistance;
+    cfg.L3PfMaxOutstanding = (G6LCCfg.L3PfMaxOutstanding != 0)
+                             ? G6LCCfg.L3PfMaxOutstanding : cfg.L2PfMaxOutstanding;
+    cfg.L3PfQuiet      = G6LCCfg.L3PfGeometryEn
+                         ? G6LCCfg.L3PfQuiet : cfg.L2PfQuiet;
     cfg.L3PrefetchEn   = G6LCCfg.L3PrefetchEn;
     // Multi-core snoop-filter / prefetch defaults when left zero
     if (cfg.NrCores > 1 && G6LCCfg.SnoopFilterEn && G6LCCfg.SnoopFilterEntries == 0)

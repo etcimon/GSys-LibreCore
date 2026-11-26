@@ -177,6 +177,19 @@ shaped incremental area is recorded separately with fixed tag/data storage exclu
 Keep the generic MSHR capability intact and coherence/physical/platform gates open.
 See `architecture/l2-l3-cache/README.md` for exact counts and open promotion gates.
 
+### Hyp8 multicore hitmax prefetch operating point (2026-11-26)
+
+Directed SQL evidence now supports the hyp8-mc hitmax operating point: shared-L2
+prefetch enabled at four MSHRs, warm-eviction prefetch allocation, and independent
+L3 lookahead distance/max-outstanding 8 with exact quiet 0. It improves both
+`mc_l2_write_read` (355,306 vs 369,099 cycles; combined pre-DRAM hit 94.3% vs
+82.4%) and the 512 KiB scan (682,915 vs 693,516 cycles; L2 hit 28.5% vs 0.2%).
+The scan still leaves L3 hit ratio below baseline (89.7% conditional vs 94.5%)
+because hit-based retraining floods L3 probes; strict no-redundant-rearm and
+cross-page continuation remain active witness work, not promoted policy. See
+`architecture/l2-l3-cache/README.md` and the rfix131a worklog before changing
+prefetch geometry or eviction policy.
+
 ## 5. Feature-addition playbook
 Choose the route by `NOCType`. For an AXI L2, add the L2 module (a separate IP) in `corev_apu/`,
 wire it between the core AXI master and the memory `corev_apu/axi_mem_if/`, and preserve

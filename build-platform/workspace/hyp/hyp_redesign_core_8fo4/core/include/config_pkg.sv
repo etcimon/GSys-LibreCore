@@ -809,8 +809,17 @@ package config_pkg;
     int unsigned L2PfMaxOutstanding;  // armed candidates per stream (0→1)
     int unsigned L2PfQuiet;           // no PF offer within N cycles of a
                                       // demand miss commit (0→8)
-    bit          L3PrefetchEn;        // same engine at the L3 level; shares
-                                      // the L2Pf* geometry fields (default 0)
+    bit          L2PfEvictEn;         // allow PF to replace valid non-pending
+                                      // L2 ways; legal only below a
+                                      // non-inclusive L3
+    bit          L3PfGeometryEn;      // use independent L3 timing geometry;
+                                      // 0 = inherit the L2Pf timing fields
+    int unsigned L3PfDistance;        // L3 look-ahead in lines (0→inherit)
+    int unsigned L3PfMaxOutstanding;  // L3 armed candidates/stream (0→inherit)
+    int unsigned L3PfQuiet;           // exact L3 quiet cycles when
+                                      // L3PfGeometryEn=1 (0 is aggressive)
+    bit          L3PrefetchEn;        // same engine at the L3 level; uses
+                                      // L3Pf* geometry when nonzero/enabled
     // Xg6lcai AI matrix plane (off in every package but g6lc64_ai)
     ai_cfg_t     AiCfg;
     // Storamic reduced-ball RAM/flash subsystem (default off)
@@ -1004,6 +1013,11 @@ package config_pkg;
     int unsigned L2PfMshrReserve;
     int unsigned L2PfMaxOutstanding;
     int unsigned L2PfQuiet;
+    bit          L2PfEvictEn;
+    bit          L3PfGeometryEn;
+    int unsigned L3PfDistance;
+    int unsigned L3PfMaxOutstanding;
+    int unsigned L3PfQuiet;
     bit          L3PrefetchEn;
     bit          ServerPrefetchEn;
     int unsigned ServerPfStreams;
@@ -1476,7 +1490,12 @@ package config_pkg;
     // T10b/N3: a live prefetcher must be allowed at least one armed
     // candidate per stream (build_config defaults the field to 1).
     assert (!(Cfg.L2PrefetchEn && Cfg.L2PfMaxOutstanding == 0));
-    assert (!(Cfg.L3PrefetchEn && Cfg.L2PfMaxOutstanding == 0));
+    assert (!(Cfg.L3PrefetchEn && Cfg.L3PfMaxOutstanding == 0 &&
+              Cfg.L2PfMaxOutstanding == 0));
+    // Warm prefetch eviction is safe in the hyp memory hierarchy only when a
+    // non-inclusive L3 is present; otherwise the L2 victim notification is an
+    // inclusion contract and prefetch may not bypass it.
+    assert (!(Cfg.L2PfEvictEn && !(Cfg.L3En && !Cfg.L3InclusiveEn)));
 
     // --- Xg6lcai AI matrix plane (architecture/ai-matrix/isa-encoding.md) ---
     // Seam exclusivity. CVXIF and the accelerator port remain mutually

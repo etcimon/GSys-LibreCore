@@ -248,6 +248,11 @@ localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
       L2PfMshrReserve: unsigned'(0),
       L2PfMaxOutstanding: unsigned'(0),
       L2PfQuiet: unsigned'(0),
+      L2PfEvictEn: bit'(0),
+      L3PfGeometryEn: bit'(0),
+      L3PfDistance: unsigned'(0),
+      L3PfMaxOutstanding: unsigned'(0),
+      L3PfQuiet: unsigned'(0),
       L3PrefetchEn: bit'(0),
       SharedTlbDepth: int'(64),
 

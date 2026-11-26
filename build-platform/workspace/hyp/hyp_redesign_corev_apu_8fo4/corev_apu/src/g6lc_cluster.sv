@@ -657,6 +657,7 @@ module g6lc_cluster
         .PF_MSHR_RESERVE(G6LCCfg.L2PfMshrReserve != 0 ? G6LCCfg.L2PfMshrReserve : 32'd1),
         .PF_MAX_OUT     (G6LCCfg.L2PfMaxOutstanding != 0 ? G6LCCfg.L2PfMaxOutstanding : 32'd1),
         .PF_QUIET       (G6LCCfg.L2PfQuiet != 0 ? G6LCCfg.L2PfQuiet : 32'd8),
+        .PF_EVICT_OK    (G6LCCfg.L2PfEvictEn && G6LCCfg.L3En && !G6LCCfg.L3InclusiveEn),
         .AXI_ADDR_WIDTH (AXI_ADDR_WIDTH),
         .AXI_DATA_WIDTH (AXI_DATA_WIDTH),
         .AXI_ID_WIDTH   (AXI_ID_WIDTH),
@@ -744,11 +745,14 @@ module g6lc_cluster
         // L3PrefetchEn may be enabled independently of L2PrefetchEn.
         .PF_EN          (G6LCCfg.L3PrefetchEn),
         .PF_STREAMS     (G6LCCfg.L2PfStreams != 0 ? G6LCCfg.L2PfStreams : 32'd4),
-        .PF_DISTANCE    (G6LCCfg.L2PfDistance != 0 ? G6LCCfg.L2PfDistance : 32'd2),
+        .PF_DISTANCE    (G6LCCfg.L3PfDistance != 0 ? G6LCCfg.L3PfDistance :
+                          (G6LCCfg.L2PfDistance != 0 ? G6LCCfg.L2PfDistance : 32'd2)),
         .PF_STRIDE      (G6LCCfg.L2PfStrideEn),
         .PF_MSHR_RESERVE(G6LCCfg.L2PfMshrReserve != 0 ? G6LCCfg.L2PfMshrReserve : 32'd1),
-        .PF_MAX_OUT     (G6LCCfg.L2PfMaxOutstanding != 0 ? G6LCCfg.L2PfMaxOutstanding : 32'd1),
-        .PF_QUIET       (G6LCCfg.L2PfQuiet != 0 ? G6LCCfg.L2PfQuiet : 32'd8),
+        .PF_MAX_OUT     (G6LCCfg.L3PfMaxOutstanding != 0 ? G6LCCfg.L3PfMaxOutstanding :
+                          (G6LCCfg.L2PfMaxOutstanding != 0 ? G6LCCfg.L2PfMaxOutstanding : 32'd1)),
+        .PF_QUIET       (G6LCCfg.L3PfGeometryEn ? G6LCCfg.L3PfQuiet :
+                          (G6LCCfg.L2PfQuiet != 0 ? G6LCCfg.L2PfQuiet : 32'd8)),
         .PF_EVICT_OK    (!G6LCCfg.L3InclusiveEn),
         .AXI_ADDR_WIDTH (AXI_ADDR_WIDTH),
         .AXI_DATA_WIDTH (AXI_DATA_WIDTH),

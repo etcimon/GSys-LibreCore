@@ -578,6 +578,17 @@ package build_config_pkg;
     cfg.L2PfMaxOutstanding = (CVA6Cfg.L2PfMaxOutstanding != 0)
                              ? CVA6Cfg.L2PfMaxOutstanding : 1;
     cfg.L2PfQuiet    = (CVA6Cfg.L2PfQuiet != 0) ? CVA6Cfg.L2PfQuiet : 8;
+    cfg.L2PfEvictEn  = CVA6Cfg.L2PfEvictEn;
+    // L3 prefetch lookahead is independent only when requested. Zero-valued
+    // distance/max-outstanding fields inherit the legacy shared geometry;
+    // L3PfGeometryEn makes L3PfQuiet exact so zero is representable there.
+    cfg.L3PfGeometryEn = CVA6Cfg.L3PfGeometryEn;
+    cfg.L3PfDistance   = (CVA6Cfg.L3PfDistance != 0)
+                         ? CVA6Cfg.L3PfDistance : cfg.L2PfDistance;
+    cfg.L3PfMaxOutstanding = (CVA6Cfg.L3PfMaxOutstanding != 0)
+                             ? CVA6Cfg.L3PfMaxOutstanding : cfg.L2PfMaxOutstanding;
+    cfg.L3PfQuiet      = CVA6Cfg.L3PfGeometryEn
+                         ? CVA6Cfg.L3PfQuiet : cfg.L2PfQuiet;
     cfg.L3PrefetchEn   = CVA6Cfg.L3PrefetchEn;
 `ifdef G6LC_STORAMIC_L3
     cfg.WtAxiAllocEn    = 1'b1;

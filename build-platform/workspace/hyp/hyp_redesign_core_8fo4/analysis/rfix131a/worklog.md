@@ -10345,3 +10345,251 @@ A copied-closure witness `hyp8-witness-l3d8q0xpgqr-fsarb` was therefore launched
 ### 2026-11-26 - same-ID arbitration leaf status
 
 The corrected positive leaf `hyp8-l2arbfix-directed-t10` passes with `L2ARB_RC 0` and `[L2ARB] RESULT pass responses id0=2 id1=1`, confirming that the arbitration-fixed L2 drains both the same-id fill serve and the tracked bypass response. The corresponding baseline negative control did **not** fire: it also passed. Inspection shows the leaf memory model still serializes all read bursts, and the fill engine has priority on the master AR channel, so the bypasses cannot become tracked responses ahead of fill completion in the leaf. The negative-control miss is therefore a memory-model limitation rather than evidence against the RTL fix. The system-level fsarb scan remains the decisive positive evidence because it passes the former fullset scan deadlock region.
+
+### 2026-11-26 - combined hitmax witness launched
+
+The direct hit-ratio-maximization witness `hyp8-witness-hitmax-l2pfevict-l3d8q0` is now building. Unlike the isolated controls, it combines the two mechanisms that target opposite sides of the fsarb scan trade-off: shared-L2 warm-evict prefetch allocation (`PF_EVICT_OK=1` in the witness closure) for L2 hit conversion in the capacity-exceeding scan, and L3-only distance-8/max-outstanding-8/quiet-0 lookahead for first-touch L3 coverage. It retains L2 prefetching, `L2MshrDepth=4`, and the committed bypass-R arbitration fix; it does not reintroduce the performance-negative provenance hint or depend on fullset-only suppression.
+
+Remote closure inspection confirmed the exact experimental geometry: L2 `PF_DISTANCE/MAX_OUT/QUIET` remain the shared 4/4/2 operating point, L2 `PF_EVICT_OK` is forced on only in the copied cluster, and the L3 instance is hard-forced to 8/8/0 in that same witness copy. The config copy has `L2PrefetchEn=1` and `L2MshrDepth=4`. Directed tag `mc-directed-hitmax-t1` is armed for boot, scan, and write/read with SQL ingestion.
+
+The architectural hypothesis is stronger than simple independent tuning. In this hierarchy, L2 prefetch fill requests are also the L3 prefetcher's training input. Invalid-way-only L2 prefetch allocation suppresses most of those requests once the 256 KiB L2 fills in the 512 KiB scan, so full-set suppression can reduce local probe cost while indirectly starving the L3 stream. Warm-evict allocation should restore that downstream training while also converting more demand accesses into L2 hits. The hitmax result therefore tests cascade coordination rather than merely summing two independent knobs.
+
+Operational scheduling update: the isolated `l3d8q0` and warm-evict builds were temporarily SIGSTOPed after the combined hitmax witness entered its C++ compile phase, so the combined implementation candidate gets the remote CPU first. They remain intact and resumable for attribution evidence. The hitmax make step was restarted manually at `-j10` with the same generated makefile and the required `VPATH=$VERILATOR_ROOT/include:$ROOT` environment; killing the original `-j4` make does not invalidate completed object files because compilation is incremental. The directed and ingestion watchers key only off `output/model/Variane_testharness`, so manual make completion is sufficient.
+
+Two promotion-path artifacts are prepared but not applied or launched: `.devin-tmp/prepare_hitmax_promotion.py` implements the proposed config-gated production plumbing in scratch form (`L2PfEvictEn`, independent L3 lookahead geometry with exact quiet=0 support, legality assertions, and cluster hookup), and `.devin-tmp/prepare_launch_witness_hitmaxm8.py` is a follow-on witness that raises `L3MshrDepth` to 8. The MSHR8 follow-on is motivated by the existing L3 probe starvation evidence: prefetch probes retry rather than drop under the reserve, so `probebusy/wait` can represent serialization behind the small four-entry L3 MSHR rather than lack of demand for prefetching.
+
+SQL stall-census comparison at equal completed scan work gives a concrete cycle-cost signature for fsarb versus XPGQR: hart0 `inflight ld` rises from 94,631 to 202,222 cycles (+107,591), while `notissued ld` rises from 43,009 to 96,488 (+53,479). Dependent `notissued alu` falls correspondingly (345,587 to 243,892), confirming that the ALU class is mostly downstream of memory rather than an independent bottleneck. Thus the scan regression is still fundamentally memory-service latency/serialization; hitmax must be judged by whether warm-evict L2 hits and deep L3 lookahead collapse those load-inflight cycles, not merely by whether local prefetch issue counts increase.
+
+Follow-on pipelining: `hyp8-witness-hitmaxm8-l2pfevict-l3d8q0` was launched while the hitmax binary compiles. It is identical to hitmax except `L3MshrDepth=8`, directly testing whether the four-entry L3 MSHR/reserve is the probe-serialization bottleneck. Directed tag `mc-directed-hitmaxm8-t1` and SQL ingestion are armed. A local resume watcher will automatically SIGCONT the paused isolated l3d8q0/warm-evict/early-serve builds once the hitmax binary appears, preserving attribution evidence without consuming compile CPU ahead of the combined candidate.
+
+
+### Hit-ratio opportunity analysis and redundant-rearm leaf evidence
+
+The scan hit-ratio budget is now explicit. The L3 footprint (512 KiB) fits in the 1 MiB L3, so pass 2 can in principle be entirely L3-resident; pass-1 misses are therefore the entire L3 hit-ratio gap. XPGQR already converts most pass-1 lines into prefetch hits (`l3_hit/miss=15485/904`, `l3_pf_useful=7292`), leaving about 5.5% first-touch overhead. The fsarb scan's 61.0% L3 hit ratio means its pass-1 prefetch conversion collapsed even though pass-2 residency should still contribute roughly half the total hits. For the shared L2 the 512 KiB footprint exceeds capacity, but capacity is not a fundamental prefetch-hit bound: sequential lines are distributed across 512 sets, so a line prefetched only a few lines before use faces no same-set reuse pressure before that use. The binding constraints are therefore lookahead/timeliness, fill/probe serialization, and allocation permission rather than the nominal 256 KiB capacity.
+
+A new copied-closure leaf matrix (`hyp8-l3pf-norearm-geom-t1`) isolated the stream engine's redundant full-window rearm behavior. With deep lookahead `distance/maxout=8/8`, quiet 0, and MSHR depth 4, the baseline rearm engine produced only 15/96, 26/96, and 84/96 installed hits at demand spacings 0/2/8 with 130/113/94 permanent drops. The experimental no-redundant-rearm engine produced **59/96, 70/96, and 82/96 hits with zero drops** in the same configuration. At MSHR depth 8 it also eliminated drops (57/0/0 -> 0/0/0), with spacing-0 hits improving 15->30 and spacing-2 unchanged at 30. This is strong mechanism evidence that the current steady-state full-window rearm amplifies overlapping candidates exactly when admission is busy; suppressing redundant rearms is therefore a prime hit-ratio optimization candidate.
+
+Caveat: the existing xpage leaf memory accepts only one outstanding read burst, so its MSHR-depth comparison is not representative of the pipelined system DRAM backend. The depth-4-vs-8 difference in that leaf is useful for probe-duplication mechanism analysis but not for system MSHR sizing. A pipelined-memory leaf has been prepared to separate those effects. No no-rearm RTL is canonical yet; `.devin-tmp/g6lc_l2_pf.norearm.sv` and `.devin-tmp/prepare_launch_witness_hitmaxnr.py` are witness-only preparation artifacts.
+
+## 2026-11-26 — pipelined-memory L3 prefetch geometry evidence
+
+The corrected `tb_g6lc_l3_pf_pipe_hyp8` leaf matrix (`hyp8-l3pf-pipegeom-t2`) now models pipelined read return rather than the earlier serialized memory model.  Results:
+
+- Production geometry `d4o4m4q2` is unchanged by redundant-rearm selection and reaches only `5/15/88` demand demand hits at spacing `0/2/8`; the dense-spacing lookahead failure is geometric, not a leaf artifact.
+- At L3 MSHR depth 4, deep `d8o8q0` lookahead with the canonical redundant rearm collapses under dense spacing (`15/34` hits at spacing `0/2`) and drops 92-133 prefetches.  The frontier-only no-redundant-rearm variant reaches `64/71/82` hits with zero drops at spacing `0/2/8`.
+- At L3 MSHR depth 8 in the pipelined leaf, redundant rearm no longer drops (`pf_drp=0`) and rearm/no-rearm are identical (`16/47/84` hits).  This confirms the mechanism: redundant steady-state rearm only matters when admission backpressure leaves multiple frontier candidates pending; additional MSHR capacity hides the duplicate traffic in the leaf.
+- No-rearm is therefore the lower-hardware optimization candidate: it avoids duplicate probes rather than hiding them with a deeper MSHR.  It must still be validated at system level because hit conversion, downstream bandwidth, and coherence interactions are not captured by the leaf.
+
+Hitmax write/read is progressing but much more slowly than prior controls; no final counter row is available yet.  Early retirement is ahead of fsarb (`47193` versus `44947` at 200k), but wall-clock simulation throughput is poor, so the run is being watched for either completion or a true forward-progress failure.
+
+## 2026-11-26 — hitmax write/read pass and strict-no-rearm witness
+
+The combined hitmax witness (`L2PrefetchEn=1`, `L2MshrDepth=4`, warm-evict L2 prefetch allocation, bypass-R arbitration fix, L3 prefetch geometry distance8/maxout8/quiet0) completed `mc_l2_write_read` in **355,306 cycles**.  Comparison:
+
+| variant | write/read cycles | L2 hit % | L3 hit % | combined pre-DRAM hit % |
+|---|---:|---:|---:|---:|
+| XPGQR baseline | 369,099 | 74.7 | 30.5 | 82.4 |
+| fsarb | 363,459 | 78.8 | 28.0 | 85.9 |
+| hitmax | **355,306** | **82.0** | **48.4** | **94.4** |
+
+Hitmax counters: `l2_hit/miss=6651/1458`, `l2_pf_issue/useful/drop=695/797/14`, `l3_hit/miss=993/1058`, `l3_pf_issue/useful/drop=1113/1113/389`, `l3_pf_usehit/usemerge=993/120`, `l2_mshr_full=26`.  This is the first evidence that warm-evict allocation plus hit-based stream retraining can raise both local L2 hit conversion and downstream L3 prefetch usefulness at once.  The L3 probe remains highly contended (`wait=10429`, `probebusy=8374`, `noport=2055`), so scan evidence is still decisive.
+
+Scan has started; the 50k checkpoint is the pass-0 store phase and is identical across variants, so it is not yet evidence.
+
+The strict no-redundant-rearm hitmax witness is now launched as `hyp8-witness-hitmaxnr-l2pfevict-l3d8q0` / `mc-directed-hitmaxnr-t1`.  Unlike canonical partial no-rearm, it never resets an undrained confirmed burst on hit retraining; it only arms the full window on initial confirmation and one frontier candidate after the prior window drains.  This exactly matches the successful leaf `G6LC_MUT_PF_NO_REDUNDANT_REARM` experiment.  The higher-hardware hitmaxm8 compile is paused with objects intact so this lower-cost witness gets CPU first.
+
+### Deep-geometry pipelined-leaf follow-up
+
+A strict-no-redundant-rearm geometry sweep at memory latency 4 shows:
+
+- `PF_MAX_OUT`, not `PF_DISTANCE` alone, is the effective lookahead cap: `d8o4` exactly matches `d4o4` (`5/15/88` hits at spacing `0/2/8`).
+- The best dense-spacing point is `d8o8m4`: `64/71/82` hits.  `d12o12m4` falls to `55/59/76`; `d16o16m4` falls further to `43/48/69`.  Excessive lookahead loses more at page boundaries/queueing than it gains in latency coverage.
+- L3 MSHR depth 8 does not rescue deep lookahead (`d16o16m8`: `47/53/72`), reinforcing that distance/window shape rather than raw MSHR capacity is the first-order constraint once strict no-rearm removes duplicate traffic.
+- Quiet 0 and quiet 2 are identical for `d8o8m4` in this leaf because hit retraining does not reload the demand-miss quiet window.
+
+Action: prepared `hitmaxnrd8` (strict no-rearm, warm-evict L2 prefetch, **L2 distance8/maxout8**, independent L3 distance8/maxout8/quiet0) as the next hit-ratio witness.  It keeps L2 quiet at the production value 2 because the leaf shows no quiet sensitivity; this minimizes the configuration delta.
+
+
+## 2026-11-26 - hitmax write/read service-stall attribution and scan checkpoint
+
+SQL census for the completed hitmax write/read run confirms that the cycle gain is memory-service improvement rather than a scoreboard artifact. Final hart0 core census:
+
+| variant | cycles | `inflight ld` | `notissued ld` |
+|---|---:|---:|---:|
+| XPGQR baseline | 369,085 | 73,659 | 29,741 |
+| fsarb | 363,445 | 74,316 | 27,100 |
+| hitmax | **355,292** | **67,738** | **24,560** |
+
+Thus hitmax removes about 5.9k load-inflight cycles and 5.2k load-issue-blocked cycles versus baseline. This matches the hit-ratio evidence (combined pre-DRAM hit ratio 94.3%, DRAM misses reduced to 465) and confirms that the write/read gain is a real memory-service improvement.
+
+At the scan 300k checkpoint hitmax is still in pass 1 but is materially better than fsarb:
+
+| variant | hart0 retired @300k |
+|---|---:|
+| XPGQR baseline | 57,420 |
+| hitmax | **55,664** |
+| fsarb | 54,254 |
+
+The hitmax deficit versus baseline is therefore about 1.76k retired instructions at equal cycles, versus fsarb's 3.17k. Pass-2 behavior remains decisive: if warm-evict L2 hit conversion and deep L3 lookahead reduce pass-2 service time enough, the small pass-1 deficit can still be recovered.
+
+## 2026-11-26 - cross-page-aware strict rearm probe
+
+A leaf-only experiment made strict no-redundant-rearm arm the full candidate window on a confirmed cross-page continuation, reasoning that candidates in the new page are not redundant even when the previous page window is undrained. The pipelined geometry results were unchanged (`d8o8m4q0`: 64/71/82 hits at spacing 0/2/8), so the exception neither helped nor hurt the measured leaf matrix. The persistent xpage-oracle `rc=-6` is therefore not explained by that specific rearm exception. The active hitmaxnr/hitmaxnrd8 witnesses intentionally remain the original strict-no-rearm experiment, so their system results should be interpreted as the cost/benefit of duplicate suppression including any cross-page frontier loss.
+
+
+## 2026-11-26 - cross-page priority is the real strict-rearm bug
+
+Further leaf isolation showed that the first cross-page-aware experiment was incomplete: the steady-state frontier-only branch was tested before the cross-page exception, so a drained confirmed stream still armed only `+PEND_CAP` even when the training event was the first miss in the successor page. Widening the cross-page gap test alone had no effect. Giving cross-page continuation priority over the frontier-only branch is the real functional fix.
+
+With that priority correction, strict no-redundant-rearm `d8o8m4q0` passes the xpage oracle at spacing 8: **87/96 hits, 7/7 early successor-page hits, zero drops**, versus 82/96 hits and 0 early hits before the correction. The spacing-0 point remains dense-timing limited (59/96, oracle still failing), so cross-page priority is not a universal free win; it increases early successor-page traffic exactly when demand spacing is dense. Nevertheless it is the correct architectural interpretation of strict no-rearm: candidates in a newly confirmed successor page are not redundant copies of the prior page window.
+
+The already building hitmaxnr/hitmaxnrd8 system witnesses do **not** contain this priority correction; they measure the original strict-no-rearm experiment. A positive system result would therefore be conservative with respect to cross-page hit conversion, while a negative result must not be used to reject the corrected variant without isolation.
+
+
+## 2026-11-26 - half-window cross-page arm compromise
+
+A follow-on leaf experiment armed only half of the deep window (4 of 8 candidates) on cross-page continuation. Results for strict no-rearm `d8o8m4q0`:
+
+| variant | spacing 0 | spacing 2 | spacing 8 | xpage oracle |
+|---|---:|---:|---:|---|
+| original strict no-rearm | 64/96 | 71/96 | 82/96 | fails |
+| full-window cross-page arm | 59/96 | 67/96 | **87/96** | passes at spacing 8 |
+| half-window cross-page arm | **63/96** | **70/96** | 85/96 | passes at spacing 8 |
+
+The half-window variant therefore preserves nearly all dense-spacing performance while recovering most cross-page hit conversion. This is a promising low-hardware compromise, but it is still leaf evidence only. It may leave a small coverage hole after the partial cross-page window drains; system-level scan evidence is required before considering it canonical. Witness-only files `.devin-tmp/g6lc_l2_pf.norearmx.sv` (full-window priority) and `.devin-tmp/g6lc_l2_pf.norearmx4.sv` (half-window compromise) are prepared, with a not-yet-launched `hitmaxnrx4` launcher.
+
+
+## 2026-11-26 - hitmax pass-2 early rate evidence
+
+The hitmax scan remains alive and has crossed into pass 2. Exact trace evidence places the pass-1/pass-2 transition at cycle **435,452** (`0x8000005c` at 435,451, first pass-2 loop PC `0x80000060` at 435,452). Transition comparisons:
+
+| variant | approximate pass-2 start cycle |
+|---|---:|
+| XPGQR baseline | ~420k |
+| hitmax | **435,452** |
+| fsarb | ~476k |
+
+Thus hitmax's pass-1 penalty versus baseline is only about 15k cycles, while it removes about 41k cycles of fsarb's pass-1 damage. At the 450k checkpoint hitmax has retired **76,157** instructions versus baseline 79,111 and fsarb 71,405. Because only about 14.5k cycles of that checkpoint interval are in pass 2, the early hitmax pass-2 rate is approximately **8.2k retired instructions per 50k cycles**, versus the baseline's roughly 7.3k/50k service rate. This is intermediate but important evidence that warm-evict L2 hit conversion can reduce pass-2 service time rather than merely preserving baseline behavior. The 500k checkpoint is the first nearly pure pass-2 rate measurement.
+
+
+## 2026-11-26 - exact early pass-2 trace-rate comparison
+
+Counting retired-instruction trace rows over the identical absolute cycle window 435,452-460,000 gives:
+
+| variant | retired rows in window | normalized rate |
+|---|---:|---:|
+| hitmax | **4,011** | **~8.17k / 50k cycles** |
+| XPGQR baseline | 3,595 | ~7.32k / 50k cycles |
+
+Both variants are in pass 2 over this window. This is direct early evidence that hitmax improves pass-2 service rate by roughly 12%, not just hit counters. If sustained, the rate advantage is large enough to recover hitmax's ~15k-cycle pass-1 deficit and potentially beat the 693,516-cycle baseline despite starting pass 2 later. Final scan completion and hit counters remain the gate.
+
+
+## 2026-11-26 - sustained hitmax pass-2 rate and promotion dry-run
+
+The pass-2 rate advantage is sustained rather than a transition artifact. In the pure pass-2 460k-470k window, hitmax retires **1,651** instructions versus baseline **1,438** in the same absolute window (~8.25k vs ~7.19k per 50k cycles). Hitmax had completed 5,662 pass-2 retired rows by 470k; if that rate is sustained, projected scan completion is roughly 684k cycles, slightly ahead of the 693,516-cycle baseline. This remains a projection, not a final verdict.
+
+The production promotion script `.devin-tmp/prepare_hitmax_promotion.py` was improved and dry-run validated in an isolated scratch copy:
+
+- independent L3 geometry inheritance now falls back to the effective L2 geometry rather than the module default;
+- exact L3 quiet=0 is representable only when `L3PfGeometryEn=1`;
+- all concrete target config literals receive disabled default values, as required by SystemVerilog assignment-pattern completeness;
+- the hyp8-mc operating point alone is overridden to `L2PrefetchEn=1`, `L2MshrDepth=4`, `L2PfEvictEn=1`, and L3 geometry 8/8/0.
+
+The dry run completed rc=0 and patched 38 physical target config literals in the scratch copy. This does not promote anything; final scan hit ratios and completion verdict remain the gate.
+
+
+## 2026-11-26 - hitmax 500k scan checkpoint
+
+At the first nearly pure pass-2 checkpoint:
+
+| variant | hart0 retired @500k |
+|---|---:|
+| XPGQR baseline | 86,447 |
+| hitmax | **84,352** |
+| fsarb | 78,056 |
+
+Hitmax's deficit versus baseline shrank from 2,954 instructions at 450k to **2,095** at 500k. Its 450k-500k increment is **8,195** retired instructions versus baseline 7,336, confirming the roughly 12% pass-2 service-rate advantage in the standard progress telemetry rather than only in manual trace counting. If sustained, hitmax catches baseline around the 600k checkpoint and can finish slightly ahead despite the pass-1 penalty. Final completion and hit counters remain outstanding.
+
+
+## 2026-11-26 - hit-gated watermark leaf compromise
+
+A contiguous watermark arm experiment was leaf-tested as a possible hit-ratio improvement over frontier-only strict no-rearm. The pure watermark closes every lookahead hole without duplicate candidates and reaches **91/96 installed hits at spacing 8** (versus 82-87 for strict/no-rearm cross-page variants), but at dense spacing 0/2 it produces **0/96 installed hits**: every demand merges onto an in-flight fill because the always-full prefetch window consumes the memory pipeline. This reproduces the earlier full-burst dense-stream failure mode and is not a viable system candidate.
+
+A hit-gated hybrid was then tested. It uses a half-window cross-page arm, extends the contiguous watermark only on installed-hit retraining (`train_i && !train_miss_i`), and falls back to frontier-only arming on demand-miss training. Results at `d8o8m4q0` are:
+
+| variant | spacing0 hits/cycles | spacing2 hits/cycles | spacing8 hits/cycles |
+|---|---:|---:|---:|
+| strict no-rearm pipeline leaf | 64/926 | 71/964 | 82/1444 |
+| pure watermark | 0/825 | 0/835 | 91/1318 |
+| hit-gated hybrid | 48/895 | 64/896 | **91/1318** |
+
+The hybrid preserves the sparse-spacing hit-ratio maximum and improves dense-spacing cycles, but its dense hit conversion remains below strict no-rearm. It is therefore a witness candidate, not a promotion. `.devin-tmp/prepare_launch_witness_hitmaxwm.py` is prepared but not launched and now points at the hybrid variant.
+
+At the hitmax scan 600k checkpoint, hitmax has nearly caught baseline: **100,897** retired versus baseline **101,016**. Its 550k-600k increment is **8,341** versus baseline 7,269, so the roughly 12-15% pass-2 service-rate advantage continues. Final completion and counters remain outstanding.
+
+
+## 2026-11-26 - hitmax 650k scan crossover
+
+Hitmax has now overtaken the baseline in fixed-work scan progress: at cycle 650,000 it has retired **109,237** hart0 instructions versus baseline **108,347**. The scan has not yet completed, so final cycles/counters remain the gate, but this is direct evidence that warm-evict L2 hit conversion plus deep L3 lookahead more than recovers the pass-1 prefetch cost. At 658k the hitmax scan is still active and no final `[mc_cache]` line has been emitted.
+
+
+## 2026-11-26 - hitmax write/read L3 drop-cause attribution
+
+The completed hitmax write/read SQL row shows that permanent L3 prefetch drops are **not** MSHR- or way-capacity caused: `l3_pf_drop=389` decomposes into `dtag=213`, `dinflt=176`, `dmshr=0`, `dway=0`, and `dwtrk=0`. Thus hitmaxm8 is not expected to improve hit ratio by reducing permanent drop classes; at most it can reduce serialization latency. The much larger inefficiency is repeated probe traffic: `l3_pf_cand=11931` for only `l3_pf_issue=1113`, with `wait=10429` and `probebusy=8374`. This strengthens strict no-redundant-rearm/watermark stream-window control as the primary next hit-ratio/cycle optimization: reduce duplicate candidate re-probing while preserving useful lookahead.
+
+
+## 2026-11-26 - hitmax scan final pass
+
+`mc-directed-hitmax-t1` scan completed as SQL run **849/pass/682,915 cycles**, beating the XPGQR baseline's **693,516** by **10,601 cycles** and the fsarb witness's **750,687** by **67,772 cycles**. Final scan counters:
+
+| variant | cycles | L2 hit % | L3 hit % of L2 misses | combined pre-DRAM hit % | DRAM miss % |
+|---|---:|---:|---:|---:|---:|
+| XPGQR baseline | 693,516 | 0.2 | 94.5 | 94.5 | 5.5 |
+| fsarb | 750,687 | 4.0 | 63.5 | 64.9 | 38.9 |
+| hitmax | **682,915** | **28.5** | **89.7** | **92.6** | **30.8** |
+
+Hitmax therefore does not maximize combined pre-DRAM coverage in scan — baseline remains higher there — but it transforms the latency distribution: L2 hit coverage rises from 0.2% to 28.5% while L3 conditional hit coverage remains high at 89.7%. This is sufficient system evidence that warm-evict L2 prefetch plus deep L3 lookahead is a real cycle and hit-coverage improvement, not merely a write/read artifact.
+
+The remaining scan bottleneck is explicit in SQL: `l3_pf_cand=39,509` for only `l3_pf_issue=3,549`, with `wait=34,607` and `probebusy=27,989`. Drops are `dtag=788` and `dinflt=565`, with zero `dmshr/dway/dwtrk`. Thus L3 MSHR/way capacity is not the primary limit; duplicate stream-window candidate re-probing is. This is exactly the deviation hitmaxnr/hitmaxnrd8 and the hit-gated watermark hybrid are intended to solve next.
+
+## Hitmax canonical promotion validation snapshot (2026-11-26 18:42Z)
+
+The scan matrix is now complete enough to promote the existing hitmax operating
+point while continuing the stream-engine investigation:
+
+- `mc-directed-hitmax-t1` scan row 849: pass, 682,915 cycles.
+- Baseline row 767: pass, 693,516 cycles.
+- Hitmax scan counters: `l2_hit/miss=4672/11744`,
+  `l3_hit/miss=10531/5057`, `l2_pf_issue/useful/drop=4125/4148/221`,
+  `l3_pf_issue/useful/drop=3549/3899/1353`,
+  `l3_pf_cand/wait/noport/probebusy=39509/34607/6618/27989`.
+- On 16,384 scan line touches this is L2 hit coverage 28.5%, conditional L3 hit
+  coverage 89.7%, and combined pre-DRAM coverage 92.6%. Baseline remains higher
+  in raw/conditional L3 hit coverage (94.5%) but is slower because almost all of
+  its service is L3-latency rather than L2-latency. Thus hitmax is a real system
+  win, not yet hit-ratio maximal.
+- The amplification ratio remains the primary correctness/performance target:
+  39,509 candidates for 3,549 L3 prefetch issues. Since canonical RTL already
+  had only partial frontier arming, the witness delta is specifically the
+  undrained-window no-redundant-rearm rule, not a wholly new stream engine.
+
+Canonical promotion is staged but not yet committed:
+
+- `L2PfEvictEn`, `L3PfGeometryEn`, `L3PfDistance`, `L3PfMaxOutstanding`, and
+  `L3PfQuiet` are added to both config trees and derived config plumbing.
+- `L2PfEvictEn` is illegal without a non-inclusive L3.
+- Zero L3 distance/max-outstanding inherit effective L2 geometry;
+  `L3PfGeometryEn` makes exact quiet zero representable.
+- All concrete target literals receive disabled defaults; only hyp8-mc selects
+  hitmax (`L2PfEvictEn=1`, L3 geometry 8/8/0).
+- Shared-L2 warm eviction is gated by `L2PfEvictEn && L3En && !L3InclusiveEn`.
+- `architecture/l2-l3-cache/README.md` and
+  `agents/guides/AGENTS-l2l3-cache.md` now document the operating point and the
+  remaining L3-hit/candidate-amplification caveat.
+- Static consistency validation passes. Copied-closure full-cluster Verilator
+  lint (`hyp8-hitmax-promolint`) passes: rc=0, zero errors, 1,453 log lines.
+  The first 240 s wrapper timed out because full-cluster lint is slow; the
+  relaunched 900 s run completed cleanly.
+- `git diff --check` reports CR characters as trailing whitespace in the
+  already-CRLF hyp-copy files. A byte-level scan of added lines found no actual
+  trailing spaces; canonical LF files remain LF.

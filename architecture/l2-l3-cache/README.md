@@ -1067,6 +1067,22 @@ Record of decision and evidence: `core/ooo/AGENTS-ooo-plan.md` T9h.
   lint/synth `check -assert` green on defaults/int2/int2_l3; FO4 `g6lc_l2_top`
   30.5 <= 32.
 
+  **Hyp8 multicore hitmax operating point (2026-11-26).** The multicore
+  hierarchy has a separately config-gated operating point in
+  `g6lc64_hyp8_mc_config_pkg`: shared-L2 prefetch enabled with four MSHRs,
+  warm-eviction prefetch allocation (`L2PfEvictEn`), and independent L3
+  lookahead (`L3PfGeometryEn`, distance/max-outstanding 8, exact quiet 0).
+  `L2PfEvictEn` is legal only with a non-inclusive L3 because it uses the
+  existing warm-victim notification path. Directed SQL evidence at this point:
+  write/read 355,306 cycles versus 369,099 for the prefetch-off depth control
+  (L2 hit 82.0%, L3 hit 48.4%, combined pre-DRAM hit 94.3%), and the 512 KiB
+  scan 682,915 cycles versus 693,516 (L2 hit 28.5% versus 0.2%, conditional
+  L3 hit 89.7% versus 94.5%). Thus hitmax is a system-level win but not yet
+  hit-ratio maximal on scan: repeated prefetch-hit retraining still floods
+  L3 tag probes (`l3_pf_cand` 39,509 for only 3,549 issues) and leaves
+  cross-page/intermediate-window coverage unresolved. Other targets keep the
+  new fields disabled and unchanged.
+
 ## Default-off replacement experiment (2026-09-14)
 
 `L2RoundRobinEn` flows through both config structs, `build_config`, and
