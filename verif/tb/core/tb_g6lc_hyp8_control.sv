@@ -4304,6 +4304,7 @@ module tb_g6lc_hyp8_dcache;
     logic                            kill_req;
     logic                            tag_valid;
     logic [7:0]                      cbo_op;
+    logic [2:0]                      data_prot;
   } dcache_req_i_t;
   typedef struct packed {
     logic                                 data_gnt;
@@ -4328,6 +4329,7 @@ module tb_g6lc_hyp8_dcache;
     logic                                  nc;
     logic [C.MEM_TID_WIDTH-1:0]            tid;
     amo_t                                  amo_op;
+    logic [2:0]                            data_prot;
   } dcache_req_t;
   typedef struct packed {
     dcache_in_t                            rtype;
