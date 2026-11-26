@@ -83,7 +83,9 @@ def parse_cache_counters(text):
     # l3_pf_cand/l3_pf_wait/l3_pf_noport/l3_pf_probebusy starvation levels,
     # the one-hot l3_pf_dtag/l3_pf_dinflt/l3_pf_dwtrk/l3_pf_dway/l3_pf_dmshr
     # drop-cause pulses, the l3_pf_usehit/l3_pf_usemerge useful split, and
-    # the l2_mshr_full occupied-cycle level and the l3_pf_quietblk suppression level.
+    # the l2_mshr_full occupied-cycle level, the l3_pf_quietblk suppression level,
+    # and the matching one-hot l2_pf_* drop-cause pulses. The optional
+    # l2_pf_fullskip level counts full-set candidates consumed before probing.
     match = re.search(r'\*\*\* \[mc_cache\] l2_hit=(\d+) l2_miss=(\d+) l2_bypass=(\d+)'
                       r' l3_hit=(\d+) l3_miss=(\d+)'
                       r'(?: l2_selfinv=(\d+) l3_selfinv=(\d+))?'
@@ -106,10 +108,14 @@ def parse_cache_counters(text):
                       r' l3_pf_dmshr=(\d+))?'
                       r'(?: l3_pf_usehit=(\d+) l3_pf_usemerge=(\d+))?'
                       r'(?: l2_mshr_full=(\d+))?'
-                      r'(?: l3_pf_quietblk=(\d+))?', text)
+                      r'(?: l3_pf_quietblk=(\d+))?'
+                      r'(?: l2_pf_dtag=(\d+) l2_pf_dinflt=(\d+)'
+                      r' l2_pf_dwtrk=(\d+) l2_pf_dway=(\d+)'
+                      r' l2_pf_dmshr=(\d+))?'
+                      r'(?: l2_pf_fullskip=(\d+))?', text)
     if not match:
         return None
-    return {'l2_hit': int(match.group(1)), 'l2_miss': int(match.group(2)),
+    out = {'l2_hit': int(match.group(1)), 'l2_miss': int(match.group(2)),
             'l2_bypass': int(match.group(3)), 'l3_hit': int(match.group(4)),
             'l3_miss': int(match.group(5)),
             'l2_selfinv': int(match.group(6)) if match.group(6) else None,
@@ -146,7 +152,22 @@ def parse_cache_counters(text):
             'l3_pf_usehit': int(match.group(37)) if match.group(37) else None,
             'l3_pf_usemerge': int(match.group(38)) if match.group(38) else None,
             'l2_mshr_full': int(match.group(39)) if match.group(39) else None,
-            'l3_pf_quietblk': int(match.group(40)) if match.group(40) else None}
+            'l3_pf_quietblk': int(match.group(40)) if match.group(40) else None,
+            'l2_pf_dtag': int(match.group(41)) if match.group(41) else None,
+            'l2_pf_dinflt': int(match.group(42)) if match.group(42) else None,
+            'l2_pf_dwtrk': int(match.group(43)) if match.group(43) else None,
+            'l2_pf_dway': int(match.group(44)) if match.group(44) else None,
+            'l2_pf_dmshr': int(match.group(45)) if match.group(45) else None,
+            'l2_pf_fullskip': int(match.group(46)) if match.group(46) else None}
+    occ = re.search(r'\*\*\* \[mc_l2mshr\] occ0=(\d+) occ1=(\d+) occ2=(\d+)'
+                    r' occ3p=(\d+) full=(\d+)', text)
+    if occ:
+        out.update({'l2_mshr_occ0': int(occ.group(1)),
+                    'l2_mshr_occ1': int(occ.group(2)),
+                    'l2_mshr_occ2': int(occ.group(3)),
+                    'l2_mshr_occ3p': int(occ.group(4)),
+                    'l2_mshr_occ_full': int(occ.group(5))})
+    return out
 
 
 def parse_hub_counters(text):

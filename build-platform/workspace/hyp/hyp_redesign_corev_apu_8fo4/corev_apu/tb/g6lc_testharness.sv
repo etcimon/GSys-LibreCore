@@ -2500,6 +2500,8 @@ module g6lc_testharness #(
                    mc_cnt_hub_aw_hold_slot, mc_cnt_hub_aw_hold_other;
   // T9h/M5: L2/L3 prefetcher pulses.
   int unsigned mc_cnt_l2_pf_issue, mc_cnt_l2_pf_useful, mc_cnt_l2_pf_drop;
+  int unsigned mc_cnt_l2_pf_dtag, mc_cnt_l2_pf_dinflt, mc_cnt_l2_pf_dwtrk,
+               mc_cnt_l2_pf_dway, mc_cnt_l2_pf_dmshr;
   int unsigned mc_cnt_l3_pf_issue, mc_cnt_l3_pf_useful, mc_cnt_l3_pf_drop;
   int unsigned mc_cnt_l3_pf_cand, mc_cnt_l3_pf_wait, mc_cnt_l3_pf_noport, mc_cnt_l3_pf_probebusy, mc_cnt_l3_pf_quietblk;
   int unsigned mc_cnt_l3_pf_usehit, mc_cnt_l3_pf_usemerge;
@@ -2509,6 +2511,7 @@ module g6lc_testharness #(
   // MSHR_DEPTH=2 this directly measures lost demand/prefetch memory-level
   // parallelism; it is a level, unlike the fill hit/miss event pulses.
   int unsigned mc_cnt_l2_mshr_full;
+  int unsigned mc_cnt_l2_mshr_occ0, mc_cnt_l2_mshr_occ1, mc_cnt_l2_mshr_occ2, mc_cnt_l2_mshr_occ3p;
   // T26: hub_aw_hold_other split by blocker (sim-only hierarchical reads of the
   // hub's gen_cluster state): raw W-owner queue occupancy (wbusy), actual
   // W-owner FIFO full admission backpressure (wqfull), snoop-signature wait,
@@ -2521,12 +2524,15 @@ module g6lc_testharness #(
         mc_hub_aw_inv_obs, mc_hub_aw_mem_obs, mc_hub_aw_rr_obs,
         mc_hub_aw_fire_obs, mc_hub_ar_fire_obs, mc_hub_aw_anyheld;
   logic mc_l2_pf_issue_obs, mc_l2_pf_useful_obs, mc_l2_pf_drop_obs;
+  logic mc_l2_pf_dtag_obs, mc_l2_pf_dinflt_obs, mc_l2_pf_dwtrk_obs,
+        mc_l2_pf_dway_obs, mc_l2_pf_dmshr_obs;
   logic mc_l3_pf_issue_obs, mc_l3_pf_useful_obs, mc_l3_pf_drop_obs;
   logic mc_l3_pf_cand_obs, mc_l3_pf_wait_obs, mc_l3_pf_noport_obs, mc_l3_pf_probebusy_obs, mc_l3_pf_quietblk_obs;
   logic mc_l3_pf_dtag_obs, mc_l3_pf_dinflt_obs, mc_l3_pf_dwtrk_obs,
         mc_l3_pf_dway_obs, mc_l3_pf_dmshr_obs;
   logic mc_l2_hit_obs, mc_l2_bypass_obs, mc_l2_selfinv_obs, mc_l3_selfinv_obs,
         mc_l2_mshr_full_obs,
+        mc_l2_mshr_occ0_obs, mc_l2_mshr_occ1_obs, mc_l2_mshr_occ2_obs, mc_l2_mshr_occ3p_obs,
         mc_l2_wupd_obs, mc_l3_wupd_obs,
         mc_l2_wtrk_full_obs, mc_l2_line_hold_obs, mc_l2_posted_obs,
         mc_l2_rdtrk_obs,
@@ -2537,6 +2543,10 @@ module g6lc_testharness #(
     assign mc_l2_hit_obs    = i_cluster.gen_l2.i_l2.l2_hit_o;
     assign mc_l2_bypass_obs = i_cluster.gen_l2.i_l2.l2_bypass_o;
     assign mc_l2_mshr_full_obs = i_cluster.gen_l2.i_l2.l2_mshr_full_o;
+    assign mc_l2_mshr_occ0_obs = (i_cluster.gen_l2.i_l2.gen_l2.fifo_cnt_q == 0);
+    assign mc_l2_mshr_occ1_obs = (i_cluster.gen_l2.i_l2.gen_l2.fifo_cnt_q == 1);
+    assign mc_l2_mshr_occ2_obs = (i_cluster.gen_l2.i_l2.gen_l2.fifo_cnt_q == 2);
+    assign mc_l2_mshr_occ3p_obs = (i_cluster.gen_l2.i_l2.gen_l2.fifo_cnt_q >= 3);
     // l2_selfinv_hit_o: inval-match (WT write self-inval or L3 back-inval)
     // actually cleared a live line — "lines purged by writes".
     assign mc_l2_selfinv_obs = i_cluster.gen_l2.i_l2.l2_selfinv_hit_o;
@@ -2555,10 +2565,36 @@ module g6lc_testharness #(
     assign mc_l2_pf_issue_obs  = i_cluster.gen_l2.i_l2.l2_pf_issue_o;
     assign mc_l2_pf_useful_obs = i_cluster.gen_l2.i_l2.l2_pf_useful_o;
     assign mc_l2_pf_drop_obs   = i_cluster.gen_l2.i_l2.l2_pf_drop_o;
+    // Same one-hot drop-cause census as the L3 instance. This separates
+    // benign demand/in-flight duplication from the capacity/no-way drops
+    // expected in the non-PF_EVICT_OK shared L2.
+    assign mc_l2_pf_dtag_obs   = mc_l2_pf_drop_obs &&
+                                 i_cluster.gen_l2.i_l2.gen_l2.tag_hit;
+    assign mc_l2_pf_dinflt_obs = mc_l2_pf_drop_obs &&
+                                 !i_cluster.gen_l2.i_l2.gen_l2.tag_hit &&
+                                 i_cluster.gen_l2.i_l2.gen_l2.mshr_lookup_hit;
+    assign mc_l2_pf_dwtrk_obs  = mc_l2_pf_drop_obs &&
+                                 !i_cluster.gen_l2.i_l2.gen_l2.tag_hit &&
+                                 !i_cluster.gen_l2.i_l2.gen_l2.mshr_lookup_hit &&
+                                 i_cluster.gen_l2.i_l2.gen_l2.wtrk_line0_match;
+    assign mc_l2_pf_dway_obs   = mc_l2_pf_drop_obs &&
+                                 !i_cluster.gen_l2.i_l2.gen_l2.tag_hit &&
+                                 !i_cluster.gen_l2.i_l2.gen_l2.mshr_lookup_hit &&
+                                 !i_cluster.gen_l2.i_l2.gen_l2.wtrk_line0_match &&
+                                 !i_cluster.gen_l2.i_l2.gen_l2.pf_way_ok;
+    assign mc_l2_pf_dmshr_obs  = mc_l2_pf_drop_obs &&
+                                 !i_cluster.gen_l2.i_l2.gen_l2.tag_hit &&
+                                 !i_cluster.gen_l2.i_l2.gen_l2.mshr_lookup_hit &&
+                                 !i_cluster.gen_l2.i_l2.gen_l2.wtrk_line0_match &&
+                                 i_cluster.gen_l2.i_l2.gen_l2.pf_way_ok;
   end else begin : gen_mc_cache_nol2
     assign mc_l2_hit_obs    = 1'b0;
     assign mc_l2_bypass_obs = 1'b0;
     assign mc_l2_mshr_full_obs = 1'b0;
+    assign mc_l2_mshr_occ0_obs = 1'b0;
+    assign mc_l2_mshr_occ1_obs = 1'b0;
+    assign mc_l2_mshr_occ2_obs = 1'b0;
+    assign mc_l2_mshr_occ3p_obs = 1'b0;
     assign mc_l2_selfinv_obs = 1'b0;
     assign mc_l2_wupd_obs = 1'b0;
     assign mc_l2_wtrk_full_obs = 1'b0;
@@ -2571,6 +2607,11 @@ module g6lc_testharness #(
     assign mc_l2_pf_issue_obs = 1'b0;
     assign mc_l2_pf_useful_obs = 1'b0;
     assign mc_l2_pf_drop_obs = 1'b0;
+    assign mc_l2_pf_dtag_obs = 1'b0;
+    assign mc_l2_pf_dinflt_obs = 1'b0;
+    assign mc_l2_pf_dwtrk_obs = 1'b0;
+    assign mc_l2_pf_dway_obs = 1'b0;
+    assign mc_l2_pf_dmshr_obs = 1'b0;
   end
   // R2 same-core share: the L2 sees hub slot ids, so the core attribution
   // lives at the hub (gen_hub exists iff NrCores > 1 — IDENTITY_FAST=1).
@@ -2703,6 +2744,10 @@ module g6lc_testharness #(
       mc_cnt_l2_miss   <= mc_cnt_l2_miss   + mc_l2_miss;
       mc_cnt_l2_bypass <= mc_cnt_l2_bypass + mc_l2_bypass_obs;
       mc_cnt_l2_mshr_full <= mc_cnt_l2_mshr_full + mc_l2_mshr_full_obs;
+      mc_cnt_l2_mshr_occ0 <= mc_cnt_l2_mshr_occ0 + mc_l2_mshr_occ0_obs;
+      mc_cnt_l2_mshr_occ1 <= mc_cnt_l2_mshr_occ1 + mc_l2_mshr_occ1_obs;
+      mc_cnt_l2_mshr_occ2 <= mc_cnt_l2_mshr_occ2 + mc_l2_mshr_occ2_obs;
+      mc_cnt_l2_mshr_occ3p <= mc_cnt_l2_mshr_occ3p + mc_l2_mshr_occ3p_obs;
       mc_cnt_l3_hit    <= mc_cnt_l3_hit    + mc_l3_hit;
       mc_cnt_l3_miss   <= mc_cnt_l3_miss   + mc_l3_miss;
       mc_cnt_l2_selfinv <= mc_cnt_l2_selfinv + mc_l2_selfinv_obs;
@@ -2731,6 +2776,11 @@ module g6lc_testharness #(
       mc_cnt_l2_pf_issue <= mc_cnt_l2_pf_issue + mc_l2_pf_issue_obs;
       mc_cnt_l2_pf_useful <= mc_cnt_l2_pf_useful + mc_l2_pf_useful_obs;
       mc_cnt_l2_pf_drop <= mc_cnt_l2_pf_drop + mc_l2_pf_drop_obs;
+      mc_cnt_l2_pf_dtag <= mc_cnt_l2_pf_dtag + mc_l2_pf_dtag_obs;
+      mc_cnt_l2_pf_dinflt <= mc_cnt_l2_pf_dinflt + mc_l2_pf_dinflt_obs;
+      mc_cnt_l2_pf_dwtrk <= mc_cnt_l2_pf_dwtrk + mc_l2_pf_dwtrk_obs;
+      mc_cnt_l2_pf_dway <= mc_cnt_l2_pf_dway + mc_l2_pf_dway_obs;
+      mc_cnt_l2_pf_dmshr <= mc_cnt_l2_pf_dmshr + mc_l2_pf_dmshr_obs;
       mc_cnt_l3_pf_issue <= mc_cnt_l3_pf_issue + mc_l3_pf_issue_obs;
       mc_cnt_l3_pf_useful <= mc_cnt_l3_pf_useful + mc_l3_pf_useful_obs;
       if (mc_l3_pf_useful_obs && mc_l3_hit)
@@ -2753,6 +2803,10 @@ module g6lc_testharness #(
       mc_cnt_l2_miss   <= '0;
       mc_cnt_l2_bypass <= '0;
       mc_cnt_l2_mshr_full <= '0;
+      mc_cnt_l2_mshr_occ0 <= '0;
+      mc_cnt_l2_mshr_occ1 <= '0;
+      mc_cnt_l2_mshr_occ2 <= '0;
+      mc_cnt_l2_mshr_occ3p <= '0;
       mc_cnt_l3_hit    <= '0;
       mc_cnt_l3_miss   <= '0;
       mc_cnt_l2_selfinv <= '0;
@@ -2776,6 +2830,11 @@ module g6lc_testharness #(
       mc_cnt_l2_pf_issue <= '0;
       mc_cnt_l2_pf_useful <= '0;
       mc_cnt_l2_pf_drop <= '0;
+      mc_cnt_l2_pf_dtag <= '0;
+      mc_cnt_l2_pf_dinflt <= '0;
+      mc_cnt_l2_pf_dwtrk <= '0;
+      mc_cnt_l2_pf_dway <= '0;
+      mc_cnt_l2_pf_dmshr <= '0;
       mc_cnt_l3_pf_issue <= '0;
       mc_cnt_l3_pf_useful <= '0;
       mc_cnt_l3_pf_usehit <= '0;
@@ -2965,7 +3024,7 @@ module g6lc_testharness #(
                c, mc_gap_max[c], MC_GAP_LIMIT, mc_last_wfi[c]);
     if (mc_any_hung)
       $display("*** [mc_verdict] FAIL: a core ran and then stopped retiring (exit code 126)");
-    $display("*** [mc_cache] l2_hit=%0d l2_miss=%0d l2_bypass=%0d l3_hit=%0d l3_miss=%0d l2_selfinv=%0d l3_selfinv=%0d l2_wupd=%0d l3_wupd=%0d l2_wtrk_full=%0d l2_line_hold=%0d l2_posted=%0d l2_rdtrk=%0d l2_hold_r1=%0d l2_hold_r1_wu=%0d l2_hold_r2=%0d hub_aw_sc_collide=%0d hub_ar_hold=%0d hub_aw_hold_slot=%0d hub_aw_hold_other=%0d dram_latency=%0d l2_pf_issue=%0d l2_pf_useful=%0d l2_pf_drop=%0d l3_pf_issue=%0d l3_pf_useful=%0d l3_pf_drop=%0d l3_pf_cand=%0d l3_pf_wait=%0d l3_pf_noport=%0d l3_pf_probebusy=%0d l3_pf_dtag=%0d l3_pf_dinflt=%0d l3_pf_dwtrk=%0d l3_pf_dway=%0d l3_pf_dmshr=%0d l3_pf_usehit=%0d l3_pf_usemerge=%0d l2_mshr_full=%0d l3_pf_quietblk=%0d",
+    $display("*** [mc_cache] l2_hit=%0d l2_miss=%0d l2_bypass=%0d l3_hit=%0d l3_miss=%0d l2_selfinv=%0d l3_selfinv=%0d l2_wupd=%0d l3_wupd=%0d l2_wtrk_full=%0d l2_line_hold=%0d l2_posted=%0d l2_rdtrk=%0d l2_hold_r1=%0d l2_hold_r1_wu=%0d l2_hold_r2=%0d hub_aw_sc_collide=%0d hub_ar_hold=%0d hub_aw_hold_slot=%0d hub_aw_hold_other=%0d dram_latency=%0d l2_pf_issue=%0d l2_pf_useful=%0d l2_pf_drop=%0d l3_pf_issue=%0d l3_pf_useful=%0d l3_pf_drop=%0d l3_pf_cand=%0d l3_pf_wait=%0d l3_pf_noport=%0d l3_pf_probebusy=%0d l3_pf_dtag=%0d l3_pf_dinflt=%0d l3_pf_dwtrk=%0d l3_pf_dway=%0d l3_pf_dmshr=%0d l3_pf_usehit=%0d l3_pf_usemerge=%0d l2_mshr_full=%0d l3_pf_quietblk=%0d l2_pf_dtag=%0d l2_pf_dinflt=%0d l2_pf_dwtrk=%0d l2_pf_dway=%0d l2_pf_dmshr=%0d",
              mc_cnt_l2_hit, mc_cnt_l2_miss, mc_cnt_l2_bypass, mc_cnt_l3_hit, mc_cnt_l3_miss,
              mc_cnt_l2_selfinv, mc_cnt_l3_selfinv, mc_cnt_l2_wupd, mc_cnt_l3_wupd,
              mc_cnt_l2_wtrk_full, mc_cnt_l2_line_hold, mc_cnt_l2_posted,
@@ -2977,7 +3036,12 @@ module g6lc_testharness #(
              mc_cnt_l3_pf_cand, mc_cnt_l3_pf_wait, mc_cnt_l3_pf_noport, mc_cnt_l3_pf_probebusy,
              mc_cnt_l3_pf_dtag, mc_cnt_l3_pf_dinflt, mc_cnt_l3_pf_dwtrk,
              mc_cnt_l3_pf_dway, mc_cnt_l3_pf_dmshr,
-             mc_cnt_l3_pf_usehit, mc_cnt_l3_pf_usemerge, mc_cnt_l2_mshr_full, mc_cnt_l3_pf_quietblk);
+             mc_cnt_l3_pf_usehit, mc_cnt_l3_pf_usemerge, mc_cnt_l2_mshr_full, mc_cnt_l3_pf_quietblk,
+             mc_cnt_l2_pf_dtag, mc_cnt_l2_pf_dinflt, mc_cnt_l2_pf_dwtrk,
+             mc_cnt_l2_pf_dway, mc_cnt_l2_pf_dmshr);
+    $display("*** [mc_l2mshr] occ0=%0d occ1=%0d occ2=%0d occ3p=%0d full=%0d",
+             mc_cnt_l2_mshr_occ0, mc_cnt_l2_mshr_occ1, mc_cnt_l2_mshr_occ2,
+             mc_cnt_l2_mshr_occ3p, mc_cnt_l2_mshr_full);
     $display("*** [mc_hub] aw_fire=%0d ar_fire=%0d aw_hold_other split: wbusy=%0d wqfull=%0d sigwait=%0d inv_adm=%0d mem_nready=%0d rr_loss=%0d",
              mc_cnt_hub_aw_fire, mc_cnt_hub_ar_fire, mc_cnt_hub_aw_wbusy, mc_cnt_hub_aw_wqfull,
              mc_cnt_hub_aw_sigwait, mc_cnt_hub_aw_inv, mc_cnt_hub_aw_mem, mc_cnt_hub_aw_rr);

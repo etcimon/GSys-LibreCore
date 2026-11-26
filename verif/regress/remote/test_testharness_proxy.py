@@ -1791,7 +1791,9 @@ class McCacheCounterParseTests(unittest.TestCase):
                 ' l3_pf_cand=37 l3_pf_wait=41 l3_pf_noport=43 l3_pf_probebusy=47'
                 ' l3_pf_dtag=53 l3_pf_dinflt=59 l3_pf_dwtrk=61'
                 ' l3_pf_dway=67 l3_pf_dmshr=71'
-                ' l3_pf_usehit=73 l3_pf_usemerge=79 l2_mshr_full=83 l3_pf_quietblk=89\n')
+                ' l3_pf_usehit=73 l3_pf_usemerge=79 l2_mshr_full=83 l3_pf_quietblk=89'
+                ' l2_pf_dtag=97 l2_pf_dinflt=101 l2_pf_dwtrk=103'
+                ' l2_pf_dway=107 l2_pf_dmshr=109 l2_pf_fullskip=113\n')
         parsed = parse_cache_counters(line)
         self.assertEqual(parsed['l2_pf_issue'], 13)
         self.assertEqual(parsed['l2_pf_useful'], 17)
@@ -1812,6 +1814,23 @@ class McCacheCounterParseTests(unittest.TestCase):
         self.assertEqual(parsed['l3_pf_usemerge'], 79)
         self.assertEqual(parsed['l2_mshr_full'], 83)
         self.assertEqual(parsed['l3_pf_quietblk'], 89)
+        self.assertEqual(parsed['l2_pf_dtag'], 97)
+        self.assertEqual(parsed['l2_pf_dinflt'], 101)
+        self.assertEqual(parsed['l2_pf_dwtrk'], 103)
+        self.assertEqual(parsed['l2_pf_dway'], 107)
+        self.assertEqual(parsed['l2_pf_dmshr'], 109)
+        self.assertEqual(parsed['l2_pf_fullskip'], 113)
+        self.assertNotIn('l2_mshr_occ0', parsed)
+
+    def test_mc_runner_parser_l2_mshr_occupancy(self):
+        from run_mc_int2_review import parse_cache_counters
+        line = (self.LINE + '*** [mc_l2mshr] occ0=101 occ1=103 occ2=107 occ3p=109 full=113\n')
+        parsed = parse_cache_counters(line)
+        self.assertEqual(parsed['l2_mshr_occ0'], 101)
+        self.assertEqual(parsed['l2_mshr_occ1'], 103)
+        self.assertEqual(parsed['l2_mshr_occ2'], 107)
+        self.assertEqual(parsed['l2_mshr_occ3p'], 109)
+        self.assertEqual(parsed['l2_mshr_occ_full'], 113)
 
     def test_mc_runner_parser_mc_hub_split(self):
         from run_mc_int2_review import parse_hub_counters

@@ -784,9 +784,10 @@ module g6lc_l2_top
                        (state_q == S_IDLE && mst_resp_i.r_valid &&
                         !mst_r_ot_q && !is_fill_beat && !rdtrk_head_match);
   assign fsm_wants_r = (state_q == S_HIT_WAIT) || (state_q == S_SERVE_POP) ||
-                       (serve_pend && ((state_q == S_IDLE) ||
-                                       (state_q == S_TAG) ||
-                                       (state_q == S_BYPASS_AR)));
+                       (serve_pend && !rdtrk_probe_match[1] &&
+                        ((state_q == S_IDLE) ||
+                         (state_q == S_TAG) ||
+                         ((state_q == S_BYPASS_AR) && (|mshr_id_match))));
   assign rdtrk_grant = r_rdtrk_active_q ? rdtrk_wants
                        : (rdtrk_wants && !fsm_in_r &&
                           (r_turn_q || !fsm_wants_r));
