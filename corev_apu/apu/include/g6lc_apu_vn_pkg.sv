@@ -853,7 +853,7 @@ package g6lc_apu_vn_pkg;
     48'h0AFF00000001, // FLAGS a=255 b=0x1 vulkanMemoryModelAvailabilityVisibilityChains
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderOutputViewportIndex
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderOutputLayer
-    48'h0AFF00000001, // FLAGS a=255 b=0x1 subgroupBroadcastDynamicId
+    48'h0AFF00000000, // FLAGS a=255 b=0x0 subgroupBroadcastDynamicId
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h0AFF00000001, // FLAGS a=255 b=0x1 robustImageAccess
     48'h0AFF00000000, // FLAGS a=255 b=0x0 inlineUniformBlock
@@ -5903,7 +5903,7 @@ package g6lc_apu_vn_pkg;
     32'h00000000, 32'h00000001, 32'h00000001, 32'h00000001,
     32'h00000001, 32'h00000000, 32'h00000000, 32'h00000001,
     32'h00000001, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000001, 32'h00000000,
+    32'h00000001, 32'h00000000, 32'h00000001, 32'h00000000,
     32'h00000001, 32'h00000001, 32'h00000001, 32'h00000001,
     32'h00000001, 32'h00000001, 32'h00000001, 32'h00000000,
     32'h00000001, 32'h00000001, 32'h00000000, 32'h00000001,

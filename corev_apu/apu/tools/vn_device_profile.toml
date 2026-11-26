@@ -99,6 +99,7 @@ shaderDemoteToHelperInvocation = true
 shaderTerminateInvocation = true
 subgroupSizeControl = true
 computeFullSubgroups = true
+subgroupBroadcastDynamicId = true
 synchronization2 = true
 shaderZeroInitializeWorkgroupMemory = true
 dynamicRendering = true
