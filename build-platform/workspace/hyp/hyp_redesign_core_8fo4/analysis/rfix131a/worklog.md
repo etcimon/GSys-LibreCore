@@ -9878,3 +9878,226 @@ Scanned all 284 modules via `sv-timing analyze --all-modules --target-mhz 5000 -
 - `hyp8-wfifo-t2` (hyp mirror): `HUB_BC_PASS count=25`, `HUB_OOO_PASS`, `HUB_B2B_OVERLAP cyc=34`, all prior mutants caught, new `G6LC_MUT_HUB_SINGLE_W_OWNER` caught by `HUB_WFIFO_AW_OVERLAP`, plus `COH_L2_0_7_PASS` and `COH_L3_0_7_PASS` (`COH_HUB_OVERLAP_REMOTE_PASS`, rc=0).
 - `hyp8-wfifo-main-t1` (same closure with main `corev_apu/coherence/g6lc_coherence_hub.sv` substituted): hub positive regressions passed (`HUB_BC_PASS count=25`, `HUB_OOO_PASS`, including scenario 29) before the runner reached a pre-existing main/hyp mutant-coverage mismatch for `G6LC_MUT_HUB_NO_INV_OWED`; the W FIFO RTL and scenario themselves compile and pass in both trees.
 - Note: isolated remote leaf evidence verifies the modified hub/mutation in isolation and does not waive repository-level aggregate verification gates (`./build.sh verify`).
+
+
+## 2026-11-26 — Directed L3 prefetch evidence: useful but under-covered; bind leaf-verified 2/2 operating point
+
+### 1. Directed SQL/log evidence (`mc-directed-l3pf-r704fix`, current run707)
+
+- `mc_boot_sanity`: pass in 525 cycles.
+- `mc_l2_write_read`: pass in **372,480 cycles** versus the nearest prior directed reference run601 at **375,932 cycles** (-3,452 cycles, about -0.9%).
+- Cache/hub counters moved exactly in the intended direction but with low coverage: `l3_hit=283`, `l3_miss=1,768`, `l3_pf_issue=283`, `l3_pf_useful=283`, `l3_pf_drop=0`; run601 had `l3_hit=0`, `l3_miss=2,051`, and zero PF activity. L2 behavior stayed essentially unchanged (`l2_hit=6,040` vs 6,047; `l2_miss=2,051` both).
+- The same run still shows the single-outstanding WT D$ read miss as the dominant serialized memory exposure: `dc_req=220,409` versus only `dc_gnt=8,192` completed load grants, with the scalar WT MSHR occupied for 166,638 cycles. This is not a PF regression; it is the demand bottleneck that prefetching must hide.
+- Interpretation: the non-inclusive eWT L3 prefetch mechanism is functionally correct and perfectly selective in this workload (283/283 useful, zero drops), but the conservative system binding (`PF_DISTANCE=2` with `PF_MAX_OUT=1`, `PF_QUIET=8`) prevents the already-designed two-line lookahead from operating. `PEND_CAP=min(MAX_OUT,PF_DISTANCE)` flattened the distance to one, and the long quiet window rearmed after nearly every demand training event.
+
+### 2. Minimal configuration change
+
+- `build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/include/g6lc64_hyp8_mc_config_pkg.sv` now binds the exact operating point already covered by the isolated warm-set eWT leaf `verif/tb/l2/tb_g6lc_l3_pf_ewt_hyp8.sv`: `L2PfMaxOutstanding=2` and `L2PfQuiet=2` (with `L2PfDistance=2`, four streams, and one demand MSHR reserve unchanged).
+- No RTL logic was changed for this step; the leaf was already written for `PF_MAX_OUT=2/PF_QUIET=2` and previously passed with 28/32 warm-stream hits and zero redundant drops.
+- Remote A/B builds launched: `hyp8-witness-l3pf-wfifo` (PF 1/8 plus W-owner FIFO) and `hyp8-witness-l3pf2` (PF 2/2 without W FIFO) for directed comparison before combining further changes.
+- Note: directed evidence is workload-specific and isolated remote build/leaf evidence does not waive repository-level aggregate verification gates (`./build.sh verify`).
+
+
+## 2026-11-26 — L3 prefetch lookahead root cause: dense demand outruns distance-2
+
+### 1. Isolated spacing sweep (`hyp8-l3pf-spacing-t1/t2`)
+
+- Reused the warm-set non-inclusive eWT L3 leaf and made demand spacing a runtime plusarg. At the former leaf/system point `DISTANCE=2, MAX_OUT=2, QUIET=2`, dense demand never formed an installed-line hit: spacing 0 and spacing 2 both produced **0/32 L3 hits** despite 29 issued candidates. Spacing 8 recovered to **28/32**.
+- The spacing sweep isolated the missing lookahead rather than training or residency: `DISTANCE=4, MAX_OUT=2` remained **0/32** at spacing 0-2, while `DISTANCE=4, MAX_OUT=4` reached **23/32 at spacing 0**, **24/32 at spacing 2**, and **27/32 at spacing 8**. `DISTANCE=8, MAX_OUT=4` did not improve further because the four-entry L3 MSHR with one demand reserve caps the useful fill pipeline.
+- `QUIET=8` still suppressed dense-demand prefetching even at `DISTANCE/MAX_OUT=4/4` (**0/32** at spacing 0-2), confirming that the shorter quiet window is necessary but not sufficient.
+
+### 2. Canonical leaf verification at the uplifted point (`hyp8-l3pf-ewt-d4m4-t1`)
+
+- Positive at `DISTANCE=4, MAX_OUT=4, QUIET=2`: `L3_WARM_STREAM hits=26/32 (81.2%) pf_iss=30 pf_use=26 pf_drp=2`, `PASS tb_g6lc_l3_pf_ewt_hyp8`.
+- Mutant coverage remained discriminatory: warm-evict mutation gave `hits=0/32, pf_iss=0, pf_drp=32`; hit-retrain mutation gave `hits=12/32`; redundant-rearm mutation gave `pf_drp=84`. Suite token `L3_PF_EWT_REMOTE_LEAF_PASS`.
+- Consequently the hyp8-mc binding now uses `L2PfDistance=4` and `L2PfMaxOutstanding=4` with `L2PfQuiet=2`. This is a configuration-only uplift of the already verified engine; no prefetch RTL edit was needed. Isolated leaf evidence does not waive repository-level aggregate verification gates (`./build.sh verify`).
+
+
+## 2026-11-26 — L3 prefetch MSHR/quiet leaf sweep and useful-accounting deviation
+
+### 1. Dense-stream leaf sweep (`hyp8-l3pf-mshr-cyc-t1`, isolated warmup rechecked in `hyp8-l3pf-mshr-iso-t1`)
+
+- The spacing leaf was extended with stream completion-cycle measurement and MSHR/reserve sweep. The warmup was also tightened so each warmup line uses a distinct 4 KiB page; results were unchanged, so the dense-stream behavior is not warmup-stream contamination.
+- At the previous `MSHR=4/reserve=1, distance/maxout=2/2` point, spacing 0/2 completed in 313/317 cycles with **0/32 installed-line hits** but 42/56 `pf_useful` pulses: demand was merging onto still-in-flight prefetch fills rather than hitting installed lines.
+- At `MSHR=4/reserve=1, distance/maxout=4/4`, installed-line hits rose to **23-24/32** at spacing 0/2, but leaf completion cycles increased to 337/380 in the leaf's serialized single-outstanding memory model. This does not by itself imply a system regression — the leaf memory model has no realistic multilevel/coherence latency and serializes all fill bandwidth — but it means hit rate alone is insufficient and the full-cluster SQL cycle comparison is mandatory.
+- Deeper MSHR results were mixed, not a clear configuration win: `MSHR=6/reserve=2, distance/maxout=4/4` reached 24/32 hits at spacing 0 in 320 cycles but still merged all dense spacing-2 demand (0/32 hits, 317 cycles); `distance/maxout=8/6` did not improve completion and produced large redundant-drop counts in some dense cases. Therefore the current system experiment conservatively remains `L3MshrDepth=4/reserve=1` until directed SQL evidence says otherwise.
+
+### 2. `pf_useful` accounting deviation isolated further
+
+- `hyp8-l3pf-useacct-t1` added per-line useful accounting to the diagnostic leaf. In dense merge-only cases, useful pulses clustered at at most two pulses per line (e.g. 56 pulses over 28 lines at spacing 2), while `usehit=0` confirmed these were merge-side pulses rather than installed-line hit pulses.
+- Conclusion: `pf_useful` is a useful-event count, not a unique-line coverage metric. It deliberately counts both installed-line hits and demand merges onto in-flight prefetch fills, and the merge side can be counted more than once per stream line in dense conditions. Directed SQL interpretation must therefore use cycles, `l3_hit/l3_miss`, `l3_pf_issue/drop`, and the new starvation level counters rather than `pf_useful/pf_issue` as a accuracy ratio.
+- The combined witness closure (`hyp8-witness-l3pf4`) required correcting the telemetry hierarchy to observe the active implementation inside `i_l3_as_l2.gen_l2`; the first launch exposed this as a Verilation-time dotted-reference error before any evidence was collected.
+
+
+## 2026-11-26 — Correction: dense-leaf `pf_useful` inflation was a testbench handshake artifact
+
+### 1. Root cause isolated (`hyp8-l3pf-usehs-t1/t2`)
+
+- Adding exact slave-AR/R handshake counts exposed that the diagnostic leaf issued 251/256 AR handshakes for only 160 intended reads (128 warmup + 32 stream). The apparently impossible `pf_useful > 32` dense-stream counts were therefore not evidence of an RTL double-count in `g6lc_l2_top`; they were caused by repeated testbench AR handshakes and duplicate same-line demand merges.
+- The leaf handshake was fixed to wait on exact AR/R fire-count edges and capture `r.data` at the fire edge. Corrected runs issue exactly `arf=160 rf=160`, and per-line useful accounting becomes clean (`usemax=1`).
+- The canonical leaf `verif/tb/l2/tb_g6lc_l3_pf_ewt_hyp8.sv` had the same handshake pattern and was fixed the same way; warmup was also changed to one line per distinct 4 KiB page so warmup cannot train the page-keyed stream detector.
+
+### 2. Corrected leaf evidence (`hyp8-l3pf-mshr-hsfix-t1`, `hyp8-l3pf-ewt-hsfix-t2`)
+
+- Dense-stream corrected results at `MSHR=4/reserve=1, distance/maxout=4/4`: **18/32 hits at spacing 0**, **21/32 at spacing 2**, **26/32 at spacing 8**; all with exact `arf=160 rf=160` and `usemax=1`.
+- The canonical 20-cycle spaced leaf still passes at the system operating point: `hits=26/32 (81.2%) pf_iss=30 pf_use=26 pf_drp=2`; all three mutants remain caught (`NO_WARM_EVICT`, `NO_HIT_RETRAIN`, `REDUNDANT_REARM`).
+- Corrected dense completion-cycle data also warns that installed-hit count is not itself the performance objective: merge-only configurations can complete the simplified serialized-memory leaf faster even with zero installed-line hits. Therefore the full-cluster SQL comparison must use cycles plus hit/miss/issue/drop/starvation counters, not hit rate or `pf_useful` alone.
+
+
+## 2026-11-26 — L3 stride-prefetch cross-page continuation leaf evidence
+
+- The corrected 96-line cross-page diagnostic starts halfway down a fresh 4 KiB page and crosses exactly one page boundary. At `MSHR4/res1/D4/M4`, pre-continuation RTL retrained from scratch at the boundary: spacing-2 `72/96` installed hits, `1010` cycles at `quiet=0`; successor-page lines `1..7` were all demand/merge misses and installed hits began only at line 8.
+- Implemented conservative stride-1 continuation in both `corev_apu/l2_cache/g6lc_l2_pf.sv` and the hyp8 copy: a stream must already have `conf>=2`, stride `+1`, and the first demand miss in the exactly adjacent next page. Only then is confidence carried forward; no candidate is speculatively emitted across the boundary. Hyp8 uses same-page priority plus single-owner continuation selection. The adjacent-page gap calculation is `PAGE_LBITS+1` bits wide rather than a full physical-line subtract, keeping the train-side cone small and off the demand path.
+- Post-continuation sweep (`hyp8-l3pf-xpagesweep-prod-t1`) at `D4/M4`:
+  - `quiet=0`: spacing0 `61/96,1079c` (from `60/96,1102c`), spacing2 `76/96,978c` (from `72/96,1010c`), spacing8 `86/96,1348c` (from `84/96,1368c`).
+  - `quiet=2`: spacing0 `61/96,1097c` (from `60/96,1120c`), spacing2 `72/96,986c` (from `68/96,1018c`), spacing8 `86/96,1348c` (from `84/96,1368c`).
+  - Boundary trace: successor-page installed hits now begin at line 4 rather than line 8; lines 4..7 hit. Dense spacing-0 gain is small because fill latency/merge bandwidth, not training alone, remains the limiter.
+- Added persistent oracle `verif/tb/l2/tb_g6lc_l3_pf_xpage_hyp8.sv` (`D4/M4/Q2`, spacing2). Remote `hyp8-l3pf-xpageleaf-t2`: positive `PASS hits=72/96 early=4/7 pf_iss=78 pf_use=78`; `-DG6LC_MUT_PF_NO_XPAGE_CONTINUE` is caught by `FAIL L3_PF_XPAGE_EARLY_HITS`. Canonical warm-set eWT leaf remains positive `26/32` with all three original mutants caught (`hyp8-l3pf-ewt-xpage-t1`). Main-tree `g6lc_l2_pf` passes standalone Verilator lint (`hyp8-mainpf-lint-t4`); remaining width warnings are pre-existing round-robin integer-width warnings, not from this change.
+- Interpretation: cross-page continuation is leaf-confirmed and conservative, but system-level commitment still requires full-chip directed SQL evidence because prefetch usefulness/cycle impact depends on L3/DRAM bandwidth and demand interference. The currently running PF4/WFIFO witnesses predate this RTL change and therefore remain valid PF4 baseline evidence, not continuation evidence.
+
+
+## 2026-11-26 — first completed full-scan PF SQL result and PF4 write/read comparison
+
+
+Provenance correction: remote closure inspection shows that the witness previously called PF2/WFIFO in this section actually used `L2PfDistance=2, L2PfMaxOutstanding=1, L2PfQuiet=8` (the conservative PF1/8 operating point plus WFIFO), not the abandoned `2/2/2` experiment. All scan/write-read comparisons here therefore compare **PF1/8+WFIFO** against **PF4/4/2+WFIFO**; no full-system `2/2/2` SQL evidence exists because that build was invalidated and abandoned before use.
+
+- Forced re-ingest of `mc-directed-wfifo-t1` replaced the earlier empty duplicate row 712 with final rows 717-719. This resolves the prior exact-equality concern: the WFIFO `mc_l2_write_read` result is genuinely identical to the pre-WFIFO conservative PF1/8 result on this single-hart directed test, not evidence of a distinct WFIFO effect. The test has no meaningful multicore AW contention (`hub_aw_hold_other=8207`, unchanged), so it cannot validate or refute the W-owner FIFO motivation seen in OpenWrt.
+- First completed full `mc_l3_stride_scan` prefetch comparison (`mc-directed-wfifo-t1`, run719, conservative PF + WFIFO): **736,647 cycles**, `l2_hit=27`, `l2_miss=16389`, `l3_hit=11799`, `l3_miss=4590`, `l3_pf_issue=3606`, `l3_pf_useful=3606`, `l3_pf_drop=4`, `ar_fire=16449`. Baseline run499 was **781,762 cycles**, `l3_hit=8193`, `l3_miss=8196`, `ar_fire=16451`. This is **-45,115 cycles (-5.77%)** with exactly +3,606 L3 hits, one per issued prefetch, and no loss of the baseline second-pass hits. The implied marginal benefit is about **12.5 cycles per converted L3 miss** in this dense streaming test.
+- `mc-directed-l3pf4-t1` `mc_l2_write_read` (run715, PF4+WFIFO, no cross-page continuation): **370,276 cycles** vs 372,480 for PF1/8+WFIFO and 375,932 baseline, a further **-2,204 cycles (-0.59%) vs PF1/8** and **-5,656 cycles (-1.50%) vs baseline**. `l3_hit=507`, `l3_miss=1544`, `pf_issue/useful=507/507`, `pf_drop=208`; `ar_fire=8131` (only +4 vs PF1/8). Starvation levels: `pf_cand=1037`, `pf_wait=322`, `pf_noport=0`, `pf_probebusy=322`. Thus launch/tag-port unavailability is absent in this test; observed waiting is entirely serialization behind an in-flight probe. Because these are level-cycle counts rather than unique-candidate counts, they measure latency/backpressure, not directly lost candidates.
+- The PF4/write-read drop cause is not yet split by SQL counters. Added sim-only one-hot drop-cause telemetry to the hyp8 testharness (`l3_pf_dtag/dinflt/dwtrk/dway/dmshr`) using the existing hierarchical probe style, plus parser coverage in `run_mc_int2_review.py` and `test_testharness_proxy.py`; focused parser test passes. The cross-page witness build was restarted before significant compile time so this telemetry will be present in `hyp8-witness-l3pf4xpg`.
+
+
+### Stall-census bottleneck migration in the scan
+
+Correctly splitting the [stall-census] sections (the earlier key=value scan conflated
+etired,
+otissued, and inflight fields) shows that the PF scan win is a bottleneck migration rather than a disappearance of all memory exposure:
+
+- run499 baseline hart0 final:
+otissued ld=99,386,
+otissued alu=259,815, inflight ld=214,831, inflight alu=34,691.
+- run719 PF1/8+WFIFO hart0 final:
+otissued ld=38,728 (**-60,658**),
+otissued alu=405,392 (**+145,577**), inflight ld=82,104 (**-132,727**), inflight alu=37,554 (**+2,863**).
+- Retired instruction mix is unchanged (
+et=114,723, ld=16,384, st=8,193, lu=65,558), so this is not extra work or incorrect speculation. The prefetcher removes enough fill latency that the load is no longer the oldest blocked instruction as often; the dependent checksum dd s2/s3, s*, t4 then becomes the exposed wait behind the load result. The benchmark's loop is deliberately serial (ld -> checksum dd before the next iteration's independent address increment can matter), so additional prefetch coverage has diminishing cycle returns once DRAM latency is converted into ordinary L3-hit load-use latency.
+- This also explains why pf_useful==pf_issue in the scan is good evidence rather than a concern: l3_hit increased by exactly +3,606 over the baseline second-pass hits, with no loss of baseline hits, while cycles fell by 45,115. The next large scan bottleneck after L3-miss conversion is the load-use/dependency latency of the test itself, not a new correctness deviation.
+
+
+### Telemetry/readiness additions while PF4 scan is running
+
+- erif/regress/remote/run_mc_int2_review.py now also parses the separate *** [mc_hub] aw_fire/ar_fire/wbusy/inv_adm/mem_nready/rr_loss line into hubCounters; 	est_testharness_proxy.py covers it (McCacheCounterParseTests: 4 tests, OK). Tracedb already ingests bracketed mc_* key/value lines generically, but the structured directed JSON now retains the same hub split instead of dropping it.
+- Future directed model launches through .devin-tmp/run_directed_model.py include +smt_progress +smt_cyc_progress=50000. The baseline scan progress trace shows why this matters: run499 pass0 was still in the store loop at 100k cycles, entered pass1 by 150k, reached pass2 only around 510k, then spent roughly 260k cycles in the L3-hit pass. Without per-50k-cycle retirement/PC progress, the PF1/8-PF4 cycle delta cannot be attributed between first-touch miss conversion and the pass2 load-use floor.
+- Interpretive bound from run499: pass0 costs roughly 120k cycles, pass1 roughly 390k, pass2 roughly 260k. Since pass0 is store-path-only and pass2 already hits L3 in the baseline, the prefetcher can only improve the ~390k first-touch pass; total-cycle deltas therefore understate the first-touch improvement ratio.
+
+
+### W-owner FIFO hold-split telemetry correction
+
+Post-WFIFO RTL review exposed a telemetry regression rather than a functional regression: after 69ce0782b, AW admission is bounded by wq_full, not raw w_busy_q, but the testharness still attributed every overlapping AW hold to wbusy whenever the W-owner queue was nonempty. That would make the post-WFIFO [mc_hub] split overstate the very bottleneck the FIFO removed. The hyp8 testharness now keeps wbusy as a raw occupancy diagnostic and adds one-hot-ish wqfull and sigwait split fields, with inv-retention prioritized only after slot/WQ exhaustion and before signature wait; mem_nready remains grant-and-!aw_ready, and
+r_loss remains grant-and-fire competition.
+un_mc_int2_review.py parses both the old and new [mc_hub] forms (McCacheCounterParseTests OK). This change is for the next model build; the already-compiling hyp8-witness-l3pf4xpg evidence still uses the older split, so its total AW hold/fire counts remain valid but its wbusy component must not be interpreted as an admission blocker.
+
+
+## 2026-11-26 — Directed PF4 SQL evidence: geometry tradeoff is coverage-limited, not probe-port-limited
+
+Ingested mc-directed-l3pf4-t1 as runs 723-725 and compared fixed-work directed cycles/census against baseline run499 and the WFIFO/PF1/8 run719/718. Retired instruction counts are identical, so cycle and stall-accounting comparisons are meaningful.
+
+| test | baseline | PF1/8+WFIFO | PF4/WFIFO | interpretation |
+|---|---:|---:|---:|---|
+| mc_l3_stride_scan | 781,762c, hit/miss 8193/8196 | **736,647c**, 11799/4590, PF 3606/3606/4 | **750,446c**, 10809/5580, PF 2616/2616/476 | PF4 is 31,316c better than baseline but **13,799c worse than PF1/8** because useful coverage fell by 990 lines |
+| mc_l2_write_read | 375,932c, hit/miss 0/2051 | 372,480c, 283/1768, PF 283/283/0 | **370,276c**, 507/1544, PF 507/507/208 | PF4 is best here, 5,656c better than baseline and 2,204c better than PF1/8 |
+
+PF4 starvation telemetry rules out lack of probe-port availability: scan cand=3868 wait=776 noport=0 probebusy=776; write/read cand=1037 wait=322 noport=0 probebusy=322. Every wait is behind an already in-flight probe. The scan regression is therefore explained by reduced useful prefetch installation plus drops, not by total absence of a probe slot. Final scan stall census reinforces this: PF4 has
+otissued ld=83330 and inflight ld=185492, much closer to baseline (99386/214831) than PF1/8 (38728/82104), with identical
+et=114723. The system-level optimization target is thus useful-line coverage and redundant/contended prefetch admission, not simply farther lookahead.
+
+The first OpenWrt/fw_payload PF4 boot attempt was stopped after 23 minutes: its log had not advanced for ~22 minutes (last mtime 03:15:59, only repeated [rob] state at t=1560) while the process consumed ~194% CPU and competed with the xpg build. This is a hang/livelock symptom to investigate separately, but the static log is insufficient for SQL cycle-cost evidence.
+
+Important provenance correction: remote closure inspection confirms the hyp8-witness-l3pf4 build already contains the W-owner FIFO (w_owner_fifo_q present). Therefore run724/725 are PF4+WFIFO evidence; the xpg build isolates cross-page continuation plus drop-cause telemetry rather than being the first PF4+WFIFO combination.
+
+
+### Prefetch quiet-window root cause found in code/SQL correlation
+
+The PF4 SQL regression prompted a re-read of the training path and exposed a semantic bug independent of cross-page continuation: pf_train intentionally includes first demand hits to prefetched lines (l2_pf_useful_o) so hit-based retraining can sustain a confirmed stream, but g6lc_l2_pf used the same pulse to reload the demand-miss quiet window. Thus every successful dense-hit retrain also suppressed candidate offers for another QUIET cycles, exactly when the stream was locked and should continue emitting lookahead. This is a plausible mechanism for the PF4 scan under-coverage (2616 useful vs PF1/8 3606) and for wait cycles being probe/quiet serialization rather than
+oport. Implemented in both hyp8 and main: g6lc_l2_top now computes pf_train_miss solely from demand-miss MSHR allocation in S_TAG and passes it as 	rain_miss_i; 	rain_i still includes hit retraining for stream state. The standalone engine leaf ties the new pin to its miss-only training stimulus. This RTL requires leaf/full-model verification before commit and is not present in the already-building xpg witness.
+
+
+Quiet-fix leaf verification (hyp8-l3pf-quietfix-t1): positive PASS hits=26/32 pf_iss=30 pf_use=26 pf_drp=2; all three canonical mutants still caught (NO_WARM_EVICT, NO_HIT_RETRAIN, REDUNDANT_REARM). The positive hit count is unchanged on this small warm-set leaf, so the fix is validated as non-regressing rather than yet proven as a system uplift; directed SQL evidence is still required. Isolated leaf evidence does not waive aggregate ./build.sh verify.
+
+
+Cross-page dense-leaf A/B now confirms the quiet-window fix independently of the system build: at dist/maxout/quiet=4/4/2, spacing 2, the quietfix-only leaf improved from the pre-fix cross-page result **72/96 hits, 986 cycles** to **76/96 hits, 978 cycles** (hyp8-l3pf-quietfix-xpg-t1), matching the best prior quiet-0 hit count while retaining quiet-2 throttling. The mutant -DG6LC_MUT_PF_NO_XPAGE_CONTINUE was still caught. A separate experimental no-rearm-preservation variant produced the same 76/96/978 result, so the measured uplift is attributable to quiet separation rather than that additional rearm change; the no-rearm experiment was not promoted to repo RTL.
+
+
+### XPG drop-cause evidence and transient-MSHR retry
+
+`mc-directed-l3pf4xpg-t1` completed `mc_l2_write_read` in **371,483 cycles** with `l3_hit=440`, `l3_miss=1611`, `pf_issue/useful=440/440`, `pf_drop=180`, `cand=900`, `wait=280`, `noport=0`, `probebusy=280`. The new cause split is unambiguous: **all 180 drops are `l3_pf_dmshr`; dtag/dinflt/dwtrk/dway are zero**. Thus the write/read prefetch loss is transient MSHR-reserve exhaustion, not duplicate rearming or tag/write-tracker residency. Cross-page continuation without the quiet fix is intermediate in cycles (370,276 PF4 baseline, 371,483 XPG, 372,480 PF1/8), so it is not yet a system uplift by itself.
+
+A targeted experiment now treats MSHR-reserve exhaustion as retryable backpressure: the L3 prefetch probe remains armed instead of dropping the candidate when every persistent cause is absent and only the demand-reserve threshold blocks allocation. The leaf-verified result (`hyp8-l3pf-mshrretry-t1`, cross-page D4/M4/Q2 spacing2) is `pf_drop=0`, `pf_issue/useful=88/88`, and **908 cycles** versus the quietfix baseline's `pf_drop=10` and **978 cycles**. Installed-hit count falls to 12/96 because more demand loads merge onto already in-flight prefetch fills; this is the known merge-vs-install accounting distinction, so final commitment still requires directed SQL cycle evidence. The canonical warm-set eWT oracle strengthens the leaf case (`hyp8-l3pf-ewtretry-t1`): positive PASS improves to **28/32 hits** with `pf_iss=32`, `pf_use=28`, `pf_drp=0` (quietfix baseline was 26/32, 30/26/2), and all three mutants remain caught (`NO_WARM_EVICT`, `NO_HIT_RETRAIN`, `REDUNDANT_REARM`). The same retry RTL has been applied to both hyp8 and main trees locally; it is not in the already-compiling xpgq witness. A separate incremental-rearm experiment (`hyp8-l3pf-increarm-t1`) was not promoted: it passed but was slightly worse than quietfix baseline (`75/96 hits, 980 cycles, drp=12` versus `76/96, 978, drp=10`).
+
+
+Retry-geometry leaf sweep (`hyp8-l3pf-retrygeom-t1`, corrected-handshake cross-page D/Q2 leaf): with `dist/maxout=4/4`, increasing MSHR depth 4->6->8 produced byte-identical results at all spacings (`spacing2`: 12/96 installed hits, 908 cycles, 88/88 useful, zero drops), because the maxout=4 burst cap remains the tighter limit. Wider `6/6/MSHR6` increased installed hits (`spacing2`: 21/96) but did not improve dense-spacing cycles (still 908) and failed the strict leaf hit oracle; `8/8/MSHR8` further increased installed hits (30/96) but reintroduced 56 drops and also failed the oracle. Therefore deeper geometry is **not** promoted on leaf evidence. The committed-order experiment remains retry-first at 4/4/MSHR4; any MSHR-depth change requires full-chip SQL evidence rather than this simplified zero/short-latency memory model.
+
+
+A follow-up cross-page full-burst rearm experiment (`hyp8-l3pf-xfullrearm-t1`) was **not** promoted: it produced 91/91 useful pulses and zero drops in the retry leaf but **0/96 installed-hit first uses** because every dense demand merged onto an already in-flight fill; spacing-2 cycles were effectively unchanged (906 vs 908). This exposed a telemetry interpretation gap rather than a functional failure. The hyp8 mc testbench therefore now derives SQL-ingestible `l3_pf_usehit` (`pf_useful` coincident with an L3 tag hit, an installed-line use) and `l3_pf_usemerge` (`pf_useful` without a same-cycle tag hit, an in-flight-fill merge) from the existing hit/useful pulses, with no RTL functional-path or port change. `run_mc_int2_review.py` and `McCacheCounterParseTests` were extended backward-compatibly (4/4 parser tests pass). The retry witness chain has not yet copied its closure, so these counters will be present in the XPGQR system evidence.
+
+
+The previously open `hub_aw_hold_other=8207` write/read lead is now closed as **not an independent bottleneck**. Across the directed variants it is essentially `aw_fire=8192` plus pipeline residue: it is the normal first valid-launch/arbitration cycle for almost every write, while the blocker split shows `wbusy` only ~33 cycles, `mem_nready=13`, `inv_adm=0`, `rr_loss=0`, and zero slot-table holds. The W-owner FIFO already removed serialization behind earlier write data, and the remaining one-cycle-per-write level is not large enough to explain the 370k-cycle test (AW fires average ~45 cycles apart). No hub RTL change is justified by this evidence.
+
+### 2026-11-26 hyp8-mc XPG cross-page SQL closure and L2 retry leaf oracle
+
+* Ingested `mc-directed-l3pf4xpg-t1` with final scan run 740. Fixed-work scan retired instructions remain 114,723 across baseline/PF variants, so cycle and stall differences are comparable. `mc_l3_stride_scan` improved from 781,762c baseline (run 499) and 736,647c conservative PF+WFIFO (run 719) to **711,466c** with PF4+WFIFO+cross-page continuation (XPG, run 740): -70,296c vs baseline and -25,181c vs the best prior directed witness. PF4 without XPG (run 725) was 750,446c, so XPG is also -38,980c vs same-geometry no-XPG.
+* Run 740 cache/PF counters: L2 hit/miss stayed 27/16,389; L3 hit/miss improved to 13,879/2,510 (baseline 8,193/8,196; conservative PF 11,799/4,590; PF4 no-XPG 10,809/5,580). `l3_pf_issue/useful/drop=5687/5688/166`; drop causes are 162 transient `dmshr`, 4 tag-hit, and zero in-flight/write-tracker/no-way. Starvation remains probe-busy only (`wait=probebusy=270`, `noport=0`). Final hart0 load stalls fell sharply: `notissued ld=29,982` and `inflight ld=56,318` vs 38,728/82,104 for conservative PF and 99,386/214,831 baseline.
+* The companion XPG write/read run 739 remains slightly worse than PF4 no-XPG (371,483c vs 370,276c) but better than baseline (375,932c); all 180 prefetch drops are transient `dmshr`. This is exactly the case the XPGQR retry witness isolates. Cross-page continuation is therefore already scan-validated, while write/read arbitration/backpressure policy must be decided from XPGQ/XPGQR rather than inferred from the scan win alone.
+* Updated `verif/tb/l2/tb_g6lc_l2_pf.sv` for the retry semantics and reran it remotely as `hyp8-l2pf-retry-t4`: positive `PASS` (`L2PF_METRICS issue=9 useful=2 drop=3`) and the data oracle negative was caught. The oracle now requires no issue/drop while seven demand fills pin the MSHR reserve, then requires both transiently blocked candidates to retry and issue after drain. The eighth pinned demand uses a stride-breaking line in the already allocated p79 stream so it does not retrain p78/p7A follow-ons. Part-B capacity artifacts were removed by using a 16 KiB leaf cache and moving positive-issue B4-B6 streams to uncontended high indexes; this keeps resident/in-flight/tracked-write drops isolated from the no-evict capacity rule.
+
+## 2026-11-25 XPGQ write/read checkpoint, main-tree parity, and L2 MSHR bottleneck observability
+
+- XPGQ `mc_l2_write_read` finished at exactly the XPG cycle count and cache/prefetch census: 371,483 cycles, `l2_hit=6065`, `l2_miss=2051`, `l3_hit=440`, `l3_miss=1611`, `l3_pf_issue/useful/drop=440/440/180`, all 180 drops `dmshr`, with `l3_pf_cand/wait/noport/probebusy=901/281/0/281`. Quiet-window separation is therefore neutral on this write/read workload; the scan comparison remains the meaningful quiet-fix witness, and MSHR-retry remains the specific write/read candidate-loss fix.
+- Main-tree `g6lc_l2_pf` cross-page continuation was brought into exact single-owner parity with the hyp tree: when several predecessor streams match one successor page, only the first priority match is transferred. Standalone main-tree Verilator lint passes (`MAIN_L2_PF_XPAGE_LINT_PASS`); remaining width warnings are pre-existing round-robin diagnostics.
+- SQL census after the XPG scan still shows the shared L2 as the next opportunistic memory-parallelism bottleneck: scan `l2_miss=16,389` against only `l2_hit=27`, while XPG converts most of those misses into L3 hits (`l3_hit=13,879`, `l3_miss=2,510`). The hyp8 configuration currently uses `L2MshrDepth=2` and `L2PrefetchEn=0`; therefore every stride-scan line pays the shared-L2/L3 hit latency with at most two total fills in flight. Added backward-compatible SQL-ingestible `l2_mshr_full` occupied-cycle telemetry to the hyp mc testbench/parser so the next witness can quantify this structural limit before changing depth or enabling L2 prefetch. Parser verification remains green (`McCacheCounterParseTests` 4/4). A copied-closure experiment script is prepared to test `L2PrefetchEn=1` only after the XPGQ/XPGQR witness evidence is complete; the repository config remains L3-only until system cycle evidence justifies the change.
+
+## 2026-11-26 � XPGQ scan final neutrality and scan phase decomposition (SQL/log evidence)
+
+- `mc-directed-l3pf4xpgq-t1/mc_l3_stride_scan` completed in **exactly** the XPG cycle count: **711,466 cycles**. Cache counters are likewise effectively identical: `l2_hit=27`, `l2_miss=16389`, `l3_hit=13879`, `l3_miss=2510`, `l3_pf_issue/useful/drop=5687/5688/166`; XPGQ candidate/wait telemetry differs only by three candidate/probebusy cycles (`6126/273` versus XPG `6123/270`). Retired-instruction progress was identical at every 50k checkpoint through completion. Therefore the demand-miss/hit-retrain quiet-window separation is system-neutral on this workload; it is retained only as a semantic bug fix unless XPGQR shows a coupled benefit.
+- Comparing core0/hart0 50k-cycle retirement checkpoints for baseline run 499 versus XPG run 740 shows that the entire XPG scan benefit is in first-touch pass 1. Baseline reaches `ret=73,529` at 500k cycles, while XPG is already at `ret=76,266` by 450k. After both enter pass 2 their per-50k retirement rates are essentially the same (~7.3k instructions/50k). Thus cross-page L3 prefetch removes about 70k cycles of first-touch DRAM exposure, but does **not** address the pass-2 rate limiter.
+- The pass-2 bottleneck is now sharply constrained by SQL: `l2_hit=27` versus `l2_miss=16,389` in both baseline and XPG. Since the 512 KiB scan footprint exceeds the 256 KiB shared L2 and reuse distance is the whole footprint, pass-2 L3 hits still miss L2 and must refill through the shared-L2 MSHR/fill path. `L2MshrDepth=2` is therefore the leading throughput limiter; write tracker/read tracker holds are negligible (`l2_wtrk_full=0`, `l2_line_hold=0`, `l2_rdtrk=34`). This strengthens the motivation for the queued `L2MshrDepth=4`/L2-prefetch witness and for interpreting `l2_mshr_full` occupancy before considering deeper MSHR geometry.
+- Write/read remains a separate opportunity: its first read pass has only 2,048 compulsory lines, but XPG/XPGQ convert only 440 into L3 hits while 1,611 remain L3 misses. The preceding store pass is a perfect stride-1 stream, so store-stream-trained prefetching is a plausible follow-on experiment, but it needs a write-only negative/control test because indiscriminate store-trained prefetching can waste bandwidth on write-only streams.
+
+### Cross-page full-burst rearm negative control (leaf, not promoted)
+
+A selective cross-page full-burst rearm experiment was tested because frontier-only rearm leaves successor-page lines 1-3 as demand misses. The hypothesis was that those lines had never been issued across the structural page boundary and therefore should be armed after the first successor-page demand miss. The isolated retry leaf falsified the simple coverage interpretation: with `D4/M4/Q2/spacing2` it produced `pf_iss=91`, `pf_use=91`, **0/96 installed-hit first uses**, and 906 cycles versus the prior retry leaf's 88/88, nonzero installed-hit behavior, and 908 cycles. The near successor-page fills occupy the small MSHR/memory pipeline just as dense demand arrives, so demand merges onto in-flight fills and the far frontier never gains enough lead to install. The two-cycle difference is noise-level and does not justify the loss of installed-hit coverage or the extra fill pressure. Frontier-only rearm is therefore retained unchanged; successor-page lines 1-3 act as demand lead-time sacrifices that let later lookahead install. No RTL deviation remains from this experiment.
+
+### XPGQR write/read system evidence (retry confirmed; scan pending)
+
+The XPGQR directed `mc_l2_write_read` completed at **369,099 cycles**, improving on PF4+WFIFO without retry (**370,276 cycles**) by 1,177 cycles and on XPG/XPGQ (**371,483 cycles**) by 2,384 cycles. The telemetry signature is exactly the intended mechanism: `l3_pf_dmshr` and total drops fell from 180 to **0**, `l3_pf_issue/useful` rose from 440/440 to **627/627**, and `l3_hit` rose from 440 to **626**. The single merge-side useful pulse is visible as `usehit/usemerge=626/1`. Retry converted permanent drops into bounded probe waiting rather than port starvation: candidates/waits rose to 2,103/1,476 while `noport` remained zero, and 1,476/1,476 waits were `probebusy`. This is the first directed write/read witness faster than the prior PF4+WFIFO best and confirms transient MSHR-reserve exhaustion as the recovered write/read loss. Scan evidence is still required before final promotion because retry can alter memory pressure in a longer streaming phase.
+
+### Hit-retrain emit parity fix and quiet-suppression observability
+
+Main/hyp parity review exposed a subtle parallel-implementation deviation in the hyp8 prefetcher: after quiet-window separation, hit-based retraining no longer reloads the quiet counter, so the `(QUIET == 0)` guard in the hyp parallel emit picker did not prevent a stream being hit-retrained from emitting a candidate derived from its old `last` in the same cycle. The main-tree serial implementation suppresses emission for the retrained stream unconditionally; because demand misses still reload a nonzero quiet window, the only exposure is hit-based retraining. The hyp picker now uses the same unconditional `train_i && train_match` suppression. This is a correctness/parity fix, not a performance knob. The corrected cross-page retry leaf `hyp8-l3pf-retrainparity-t1` passes with unchanged dense-stream metrics (`hits=12/96`, `pf_issue/useful=88/88`, `pf_drop=0`, 908 cycles) and the no-cross-page mutant is still caught. Current XPGQR/XPGQ system witnesses predate this one-line fix, so subsequent witness closures must include it.
+
+Added backward-compatible `l3_pf_quietblk` SQL telemetry: the counter hierarchically observes cycles where the L3 prefetcher has an internally armed candidate (`cnd_vld_q`) but `cand_valid_o` is suppressed by the nonzero quiet timer. Existing candidate/wait counters cannot see this state because `cand_valid_o` is already gated low. This separates quiet-window suppression from probe-busy and no-port starvation in the next witnesses. Parser coverage remains green (`McCacheCounterParseTests` 4/4). A copied-closure quiet=0 witness script is prepared but deliberately not launched while the L2PFM4 build and XPGQR scan occupy the builder.
+
+### L2 prefetch capacity constraint and isolation plan
+
+Architecture review of the shared-L2 prefetch experiment shows why `L2PrefetchEn` must remain evidence-gated rather than enabled opportunistically. Unlike the non-inclusive eWT L3, the shared L2 instance is built with `PF_EVICT_OK=0`: prefetch probes only allocate invalid non-pending ways, because silent displacement is not generally legal under the inclusive victim/back-invalidation contract. In the scan workload the 512 KiB footprint is twice the 256 KiB shared L2, so cold invalid ways are consumed during the first pass and ordinary L2 prefetch largely loses installation capacity exactly when pass-2 L3 hits still miss L2. Enabling prefetch eviction is therefore not a small parameter tweak: it intersects the inclusive victim notification path, L1 invalidation ordering, and write-update/in-flight-fill collision rules. It remains a possible future architecture experiment, but not a justified minimal-constraint change on current SQL evidence.
+
+The running L2PFM4 witness is deliberately only a coupled exploration (`L2PrefetchEn=1` plus `L2MshrDepth=4`). If it improves scan or write/read, attribution must be split before any promotion. Prepared but unlaunched copied-closure scripts isolate `L2PrefetchEn=1/L2MshrDepth=2` and `L2PrefetchEn=0/L2MshrDepth=4`; they also inherit the hit-retrain emit parity fix and quiet-suppression telemetry. This preserves evidence discipline without adding more build load while the coupled witness is still compiling.
+
+Quiet=0 leaf control `hyp8-l3pf-q0leaf-t1` is neutral in the dense spacing-2 cross-page leaf after the retry and hit-retrain parity fixes: exactly `hits=12/96`, `pf_issue/useful=88/88`, `pf_drop=0`, 908 cycles, identical to quiet=2, with the no-cross-page mutant still caught. This weakens � but does not eliminate � the quiet window as the primary dense-stream bottleneck; it may still matter for sparser demand interleavings, so the prepared system witness remains a split experiment rather than a promoted default.
+
+### XPGQR final directed SQL evidence — transient retry promoted
+
+The XPGQR directed suite is now fully ingested (`mc-directed-l3pf4xpgqr-t1`, SQL runs 765-767; write/read run 766, scan run 767). Fixed-work cycle comparison:
+
+| test | baseline | PF4+WFIFO | XPG/XPGQ | XPGQR |
+|---|---:|---:|---:|---:|
+| `mc_l2_write_read` | 375,932 | 370,276 | 371,483 | **369,099** |
+| `mc_l3_stride_scan` | 781,762 | 750,446 | 711,466 | **693,516** |
+
+Scan mechanism at final SQL: `l3_hit/l3_miss` improved from XPG `13,879/2,510` to XPGQR **`15,485/904`**; `l3_pf_issue/useful` rose `5,687/5,688` to **`7,292/7,292`**; drops fell `166` to **0**; `l3_pf_dmshr` fell `162` to **0**; `noport` stayed **0** and probe waits remained small (`274`). All 7,292 useful uses were installed-line hits (`usehit=7,292`, `usemerge=0`). Thus retry did not merely merge demand onto in-flight fills: it materially increased installed prefetch coverage and converted another 1,606 scan L3 misses into hits. Baseline scan had 8,196 misses, so XPGQR leaves only 904 first-touch misses — about 89% of the original first-touch miss stream is now satisfied as L3 hits.
+
+Write/read mechanism remains consistent: cycles improved PF4 `370,276` to XPGQR **`369,099`** and XPG/XPGQ `371,483` to **`369,099`**; drops `180/208` to **0**; `dmshr` `180` to **0**; `issue/useful` `507` (PF4) or `440` (XPG) to **`627/627`**; `l3_hit` rose to **626**. Retry waiting is visible (`cand/wait/probebusy=2,103/1,476/1,476`) but demand still wins the probe port (`noport=0`), and the net fixed-work cycle result is positive.
+
+The strict leaf/system evidence chain therefore supports committing the XPGQR operating point as the current hyp8-mc L3 prefetch baseline: cross-page continuation, hit/miss quiet separation, hit-retrain emit parity, and transient-MSHR retry at distance/maxout 4/4, quiet 2, reserve 1. This does **not** yet promote L2 prefetch, L2/L3 MSHR-depth changes, quiet=0, or reserve=0; those remain copied-closure experiments.
+
+Compile validation note: the `hyp8-witness-l3pf4xpgqr-mshr4only` copied closure carries the quietblk hierarchical probe and hit-retrain parity fix. Its full-hyp8 Verilator elaboration reached MTask graph generation with no `%Error`, validating the hierarchical `gen_l2.gen_pf.i_pf.cnd_vld_q/quiet_q` references before C++ compilation.

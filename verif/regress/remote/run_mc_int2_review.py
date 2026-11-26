@@ -79,7 +79,11 @@ def parse_cache_counters(text):
     # hub_ar_hold (hub-side read-behind-write hold cycles). N4/T10c adds
     # hub_aw_hold_slot/hub_aw_hold_other (AW backpressure by cause); M5/N3
     # adds l2_pf_issue/l2_pf_useful/l2_pf_drop; the hyp8 L3 enable adds the
-    # same three counters for the non-inclusive eWT L3 instance.
+    # same three counters for the non-inclusive eWT L3 instance, followed by
+    # l3_pf_cand/l3_pf_wait/l3_pf_noport/l3_pf_probebusy starvation levels,
+    # the one-hot l3_pf_dtag/l3_pf_dinflt/l3_pf_dwtrk/l3_pf_dway/l3_pf_dmshr
+    # drop-cause pulses, the l3_pf_usehit/l3_pf_usemerge useful split, and
+    # the l2_mshr_full occupied-cycle level and the l3_pf_quietblk suppression level.
     match = re.search(r'\*\*\* \[mc_cache\] l2_hit=(\d+) l2_miss=(\d+) l2_bypass=(\d+)'
                       r' l3_hit=(\d+) l3_miss=(\d+)'
                       r'(?: l2_selfinv=(\d+) l3_selfinv=(\d+))?'
@@ -94,7 +98,15 @@ def parse_cache_counters(text):
                       r'(?: l2_pf_issue=(\d+) l2_pf_useful=(\d+)'
                       r' l2_pf_drop=(\d+))?'
                       r'(?: l3_pf_issue=(\d+) l3_pf_useful=(\d+)'
-                      r' l3_pf_drop=(\d+))?', text)
+                      r' l3_pf_drop=(\d+))?'
+                      r'(?: l3_pf_cand=(\d+) l3_pf_wait=(\d+)'
+                      r' l3_pf_noport=(\d+) l3_pf_probebusy=(\d+))?'
+                      r'(?: l3_pf_dtag=(\d+) l3_pf_dinflt=(\d+)'
+                      r' l3_pf_dwtrk=(\d+) l3_pf_dway=(\d+)'
+                      r' l3_pf_dmshr=(\d+))?'
+                      r'(?: l3_pf_usehit=(\d+) l3_pf_usemerge=(\d+))?'
+                      r'(?: l2_mshr_full=(\d+))?'
+                      r'(?: l3_pf_quietblk=(\d+))?', text)
     if not match:
         return None
     return {'l2_hit': int(match.group(1)), 'l2_miss': int(match.group(2)),
@@ -121,7 +133,38 @@ def parse_cache_counters(text):
             'l2_pf_drop': int(match.group(24)) if match.group(24) else None,
             'l3_pf_issue': int(match.group(25)) if match.group(25) else None,
             'l3_pf_useful': int(match.group(26)) if match.group(26) else None,
-            'l3_pf_drop': int(match.group(27)) if match.group(27) else None}
+            'l3_pf_drop': int(match.group(27)) if match.group(27) else None,
+            'l3_pf_cand': int(match.group(28)) if match.group(28) else None,
+            'l3_pf_wait': int(match.group(29)) if match.group(29) else None,
+            'l3_pf_noport': int(match.group(30)) if match.group(30) else None,
+            'l3_pf_probebusy': int(match.group(31)) if match.group(31) else None,
+            'l3_pf_dtag': int(match.group(32)) if match.group(32) else None,
+            'l3_pf_dinflt': int(match.group(33)) if match.group(33) else None,
+            'l3_pf_dwtrk': int(match.group(34)) if match.group(34) else None,
+            'l3_pf_dway': int(match.group(35)) if match.group(35) else None,
+            'l3_pf_dmshr': int(match.group(36)) if match.group(36) else None,
+            'l3_pf_usehit': int(match.group(37)) if match.group(37) else None,
+            'l3_pf_usemerge': int(match.group(38)) if match.group(38) else None,
+            'l2_mshr_full': int(match.group(39)) if match.group(39) else None,
+            'l3_pf_quietblk': int(match.group(40)) if match.group(40) else None}
+
+
+def parse_hub_counters(text):
+    # T26 prints the hub AW/AR fire counts and the AW-hold blocker split on a
+    # separate [mc_hub] line so the long [mc_cache] counter line remains
+    # backward-compatible with legacy parsers.
+    match = re.search(r'\*\*\* \[mc_hub\] aw_fire=(\d+) ar_fire=(\d+)'
+                      r' aw_hold_other split: wbusy=(\d+)'
+                      r'(?: wqfull=(\d+) sigwait=(\d+))?'
+                      r' inv_adm=(\d+) mem_nready=(\d+) rr_loss=(\d+)', text)
+    if not match:
+        return None
+    return {'aw_fire': int(match.group(1)), 'ar_fire': int(match.group(2)),
+            'wbusy': int(match.group(3)),
+            'wqfull': int(match.group(4)) if match.group(4) else None,
+            'sigwait': int(match.group(5)) if match.group(5) else None,
+            'inv_adm': int(match.group(6)),
+            'mem_nready': int(match.group(7)), 'rr_loss': int(match.group(8))}
 
 
 def verdict(text, bound, kind, rc=0, expect_mask=None):
@@ -139,6 +182,7 @@ def verdict(text, bound, kind, rc=0, expect_mask=None):
               'retiredMask': held.group(2) if held else (silent.group(1) if silent else None),
               'programExit': int(program.group(1)) if program else None,
               'cacheCounters': parse_cache_counters(text),
+              'hubCounters': parse_hub_counters(text),
               'outcome': 'fail'}
     if record['assertions'] or len(banners) != 1:
         return record

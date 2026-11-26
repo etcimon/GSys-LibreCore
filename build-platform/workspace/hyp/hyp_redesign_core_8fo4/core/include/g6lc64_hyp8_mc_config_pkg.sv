@@ -373,15 +373,25 @@ L2En: bit'(1),  // hyp8-mc: always on (4-core shared L2/L3)
       // SQL run700-703: L2 already hits ~98%, while L3 is effectively cold
       // (l3_hit=2 vs ~950-986 misses) because the verified non-inclusive eWT
       // prefetcher was never enabled. Keep L2 prefetch off (it would duplicate
-      // the high-hit L2 stream) and enable conservative L3-only stride PF:
-      // demand reserve 1 of 4 MSHRs, one outstanding candidate per stream, and
-      // an 8-cycle quiet window after every demand miss.
+      // the high-hit L2 stream) and enable L3-only stride PF. Directed SQL
+      // (mc_l2_write_read, run707) then showed every issued candidate useful
+      // (283/283, zero drops) but only ~14% first-touch coverage. The leaf
+      // spacing sweep then isolated the reason: DISTANCE/MAX_OUT=2 cannot run
+      // ahead of dense demand (0/32 warm-set hits at spacing 0-2). The
+      // corrected handshake-edge leaf shows DISTANCE/MAX_OUT=4 restores only
+      // 18-21/32 installed hits at spacing 0-2 (the earlier 23-24/32 claim
+      // was a testbench handshake artifact), while still merging most demand
+      // onto in-flight fills. DISTANCE=8 adds no consistent benefit because
+      // the shared four-entry MSHR plus one-demand reserve caps the useful
+      // fill pipeline. Bind 4/4 with a two-cycle quiet window pending the
+      // full-chip quiet=0 comparison; the global demand reserve, not the
+      // per-stream cap, remains the MSHR pressure limit.
       L2PfStreams: unsigned'(4),
-      L2PfDistance: unsigned'(2),
+      L2PfDistance: unsigned'(4),
       L2PfStrideEn: bit'(1),
       L2PfMshrReserve: unsigned'(1),
-      L2PfMaxOutstanding: unsigned'(1),
-      L2PfQuiet: unsigned'(8),
+      L2PfMaxOutstanding: unsigned'(4),
+      L2PfQuiet: unsigned'(2),
       L3PrefetchEn: bit'(1),
       SharedTlbDepth: int'(64),
 

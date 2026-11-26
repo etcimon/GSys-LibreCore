@@ -375,6 +375,8 @@ class ApuLeafTests(unittest.TestCase):
         self.assertEqual(proxy.apu_leaf_env(['APU_DEV_COHORT=layout',
                                            'APU_DEV_TEST_TIMEOUT=30']),
                          {'APU_DEV_COHORT': 'layout', 'APU_DEV_TEST_TIMEOUT': '30'})
+        self.assertEqual(proxy.apu_leaf_env(['APU_DEV_COHORT=xfer2']),
+                         {'APU_DEV_COHORT': 'xfer2'})
         for bad in ('APU_DEV_COHORT=everything', 'APU_DEV_TEST_TIMEOUT=0',
                     'APU_TOOL_SETUP_TIMEOUT=-1', 'APU_AUTO_INSTALL=yes',
                     'APU_VERILATOR_HOME=/untrusted'):
@@ -1780,6 +1782,52 @@ class McCacheCounterParseTests(unittest.TestCase):
     def test_mc_runner_parser(self):
         from run_mc_int2_review import parse_cache_counters
         self.check(parse_cache_counters)
+
+    def test_mc_runner_parser_l3_pf_starvation(self):
+        from run_mc_int2_review import parse_cache_counters
+        line = (self.LINE18[:-1] +
+                ' l2_pf_issue=13 l2_pf_useful=17 l2_pf_drop=19'
+                ' l3_pf_issue=23 l3_pf_useful=29 l3_pf_drop=31'
+                ' l3_pf_cand=37 l3_pf_wait=41 l3_pf_noport=43 l3_pf_probebusy=47'
+                ' l3_pf_dtag=53 l3_pf_dinflt=59 l3_pf_dwtrk=61'
+                ' l3_pf_dway=67 l3_pf_dmshr=71'
+                ' l3_pf_usehit=73 l3_pf_usemerge=79 l2_mshr_full=83 l3_pf_quietblk=89\n')
+        parsed = parse_cache_counters(line)
+        self.assertEqual(parsed['l2_pf_issue'], 13)
+        self.assertEqual(parsed['l2_pf_useful'], 17)
+        self.assertEqual(parsed['l2_pf_drop'], 19)
+        self.assertEqual(parsed['l3_pf_issue'], 23)
+        self.assertEqual(parsed['l3_pf_useful'], 29)
+        self.assertEqual(parsed['l3_pf_drop'], 31)
+        self.assertEqual(parsed['l3_pf_cand'], 37)
+        self.assertEqual(parsed['l3_pf_wait'], 41)
+        self.assertEqual(parsed['l3_pf_noport'], 43)
+        self.assertEqual(parsed['l3_pf_probebusy'], 47)
+        self.assertEqual(parsed['l3_pf_dtag'], 53)
+        self.assertEqual(parsed['l3_pf_dinflt'], 59)
+        self.assertEqual(parsed['l3_pf_dwtrk'], 61)
+        self.assertEqual(parsed['l3_pf_dway'], 67)
+        self.assertEqual(parsed['l3_pf_dmshr'], 71)
+        self.assertEqual(parsed['l3_pf_usehit'], 73)
+        self.assertEqual(parsed['l3_pf_usemerge'], 79)
+        self.assertEqual(parsed['l2_mshr_full'], 83)
+        self.assertEqual(parsed['l3_pf_quietblk'], 89)
+
+    def test_mc_runner_parser_mc_hub_split(self):
+        from run_mc_int2_review import parse_hub_counters
+        line = ('*** [mc_hub] aw_fire=11 ar_fire=13 aw_hold_other split:'
+                ' wbusy=17 inv_adm=19 mem_nready=23 rr_loss=29\n')
+        self.assertEqual(parse_hub_counters(line), {
+            'aw_fire': 11, 'ar_fire': 13, 'wbusy': 17,
+            'wqfull': None, 'sigwait': None,
+            'inv_adm': 19, 'mem_nready': 23, 'rr_loss': 29})
+        line_new = ('*** [mc_hub] aw_fire=11 ar_fire=13 aw_hold_other split:'
+                    ' wbusy=17 wqfull=31 sigwait=37 inv_adm=19 mem_nready=23 rr_loss=29\n')
+        self.assertEqual(parse_hub_counters(line_new), {
+            'aw_fire': 11, 'ar_fire': 13, 'wbusy': 17,
+            'wqfull': 31, 'sigwait': 37,
+            'inv_adm': 19, 'mem_nready': 23, 'rr_loss': 29})
+        self.assertIsNone(parse_hub_counters('*** [mc_cache] l2_hit=1\n'))
 
     def test_opensbi_runner_parser(self):
         from run_opensbi_source_review import parse_cache_counters

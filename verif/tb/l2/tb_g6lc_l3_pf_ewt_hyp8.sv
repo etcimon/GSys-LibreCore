@@ -4,13 +4,15 @@
 // Isolated hyp8 non-inclusive eWT L3 warm-set prefetching leaf:
 // Instantiates g6lc_l3_top with hyp8-mc eWT L3 settings
 // (SET_ASSOC=16, RR_EN=1, TAG_SRAM=1, WRITE_UPDATE=1, POSTED_WRITES=1,
-//  PF_EN=1, PF_EVICT_OK=1, MSHR_DEPTH=4, PF_MSHR_RESERVE=1, PF_DISTANCE=2,
-//  PF_MAX_OUT=2, PF_QUIET=2).
+//  PF_EN=1, PF_EVICT_OK=1, MSHR_DEPTH=4, PF_MSHR_RESERVE=1, PF_DISTANCE=4,
+//  PF_MAX_OUT=4, PF_QUIET=2).
 //
 // Scenario:
 //   1. Warm ALL sets of the 16-way L3 (fill every way -> 100% valid sets).
 //   2. Stream 32 consecutive 64B lines on a fresh page (stride +1) with
-//      20-cycle compute spacing between reads:
+//      20-cycle compute spacing between reads. The SQL/leaf spacing sweep
+//      showed DISTANCE/MAX_OUT=2 cannot run ahead of dense demand, while
+//      4/4 reaches 18/21 hits even at spacing 0/2 and remains high at spacing 8.
 //      - Fixed (PF_EVICT_OK=1): L3 prefetcher trains after 2 deltas and
 //        prefetches ahead into warm sets -> >= 24/32 (75%+, steady-state >90%)
 //        L3 hits on the warm stream, l3_pf_issue >= 24, l3_pf_useful >= 24!
@@ -74,10 +76,10 @@ module tb_g6lc_l3_pf_ewt_hyp8;
       .RDTRK_DEPTH    (4),
       .PF_EN          (1'b1),
       .PF_STREAMS     (4),
-      .PF_DISTANCE    (2),
+      .PF_DISTANCE    (4),
       .PF_STRIDE      (1'b1),
       .PF_MSHR_RESERVE(1),
-      .PF_MAX_OUT     (2),
+      .PF_MAX_OUT     (4),
       .PF_QUIET       (2),
       .PF_EVICT_OK    (1'b1),
       .BYTE_SIZE      (BYTE_SIZE),
@@ -156,11 +158,18 @@ module tb_g6lc_l3_pf_ewt_hyp8;
   end
 
   int unsigned hits = 0, iss_n = 0, use_n = 0, drp_n = 0;
+  int unsigned ar_fire_n = 0, r_fire_n = 0;
+  logic [63:0] last_rdata = '0;
   always @(posedge clk) if (rst_n) begin
     if (l3_hit) hits  <= hits + 1;
     if (pf_iss) iss_n <= iss_n + 1;
     if (pf_use) use_n <= use_n + 1;
     if (pf_drp) drp_n <= drp_n + 1;
+    if (slv_req.ar_valid && slv_resp.ar_ready) ar_fire_n <= ar_fire_n + 1;
+    if (slv_resp.r_valid && slv_req.r_ready) begin
+      r_fire_n <= r_fire_n + 1;
+      last_rdata <= slv_resp.r.data;
+    end
   end
 
   task automatic do_read(input logic [63:0] addr, output logic [63:0] rdata, output bit was_hit);
@@ -176,13 +185,16 @@ module tb_g6lc_l3_pf_ewt_hyp8;
     slv_req.ar.cache = 4'b1111;
     slv_req.r_ready  = 1'b1;
     slv_req.b_ready  = 1'b1;
-    while (!slv_resp.ar_ready) tick();
-    tick();
-    slv_req.ar_valid = 1'b0;
-    while (!slv_resp.r_valid) tick();
-    rdata   = slv_resp.r.data;
-    was_hit = (hits > h0);
-    tick();
+    begin
+      int unsigned af0, rf0;
+      af0 = ar_fire_n; rf0 = r_fire_n;
+      while (ar_fire_n == af0) tick();
+      slv_req.ar_valid = 1'b0;
+      while (r_fire_n == rf0) tick();
+      rdata   = last_rdata;
+      was_hit = (hits > h0);
+      tick();
+    end
   endtask
 
   logic [63:0] d;
@@ -194,12 +206,13 @@ module tb_g6lc_l3_pf_ewt_hyp8;
     rst_n = 1'b1;
     repeat (2) tick();
 
-    // 1. Warm EVERY set/way of the 16-way L3 (8 sets x 16 ways = 128 lines)
-    //    Use separate 4KiB pages per line (stride 4096+64) so warmup fills all
-    //    sets/ways completely without creating a false page stream.
+    // 1. Warm EVERY set/way of the 16-way L3 (8 sets x 16 ways = 128 lines).
+    //    Use one line in each of 128 distinct 4 KiB pages so warmup cannot
+    //    train the page-keyed stride prefetcher; choose the in-page offset to
+    //    cover all 8 sets and the page number to provide 16 distinct ways.
     for (int s = 0; s < NUM_SETS; s++) begin
       for (int w = 0; w < SET_ASSOC; w++) begin
-        do_read(64'h8000_0000 + (64'(w) << 12) + (64'(s) << 6), d, h);
+        do_read(64'h8000_0000 + (64'(w * NUM_SETS + s) << 12) + (64'(s) << 6), d, h);
       end
     end
     repeat (30) tick();

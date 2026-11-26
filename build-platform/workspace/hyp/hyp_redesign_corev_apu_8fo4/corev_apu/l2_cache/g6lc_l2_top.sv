@@ -165,7 +165,7 @@ module g6lc_l2_top
 
   // Identity when disabled (should not be instantiated; safety net)
   if (!Enable) begin : gen_identity
-    
+
 
   // BEGIN sv-timing auto-correct (balance_mux rewrite)
 // ----------------------------------------------------------------
@@ -586,11 +586,13 @@ assign mst_req_o  = slv_req_i;
   logic                          pf_cand_vld, pf_cand_take;
   logic [AXI_ADDR_WIDTH-1:0]     pf_cand_line;
   logic                          pf_train;
+  logic                          pf_train_miss;
   logic                          pf_probe_q, pf_probe_d;
   logic                          pf_row_q, pf_row_d;
   logic [AXI_ADDR_WIDTH-1:0]     pf_addr_q, pf_addr_d;
   logic                          pf_launch, pf_launch_ok, pf_capture;
   logic                          pf_probe_fire, pf_alloc;
+  logic                          pf_mshr_reserve_full, pf_retry_mshr;
   logic                          pf_way_ok;
   logic [WAY_W-1:0]              pf_way;
   logic [SET_ASSOC-1:0]          pf_pend_way;
@@ -946,6 +948,7 @@ assign mst_req_o  = slv_req_i;
   // also re-train on first demand hits to prefetched lines (l2_pf_useful_o,
   // self-clearing in g6lc_l2_tag) so confirmed streams stay locked and sustain
   // >80% (90%+) steady-state L3 hit rate instead of breaking stride after each hit.
+  assign pf_train_miss   = PF_EN && mshr_alloc && (state_q == S_TAG);
 `ifdef G6LC_MUT_L3_PF_NO_HIT_RETRAIN
   assign pf_train        = PF_EN && mshr_alloc && (state_q == S_TAG);
 `else
@@ -1395,6 +1398,7 @@ assign mst_req_o  = slv_req_i;
       .clk_i,
       .rst_ni,
       .train_i      (pf_train),
+      .train_miss_i (pf_train_miss),
       .train_line_i (line_align(addr_q)),
       .cand_valid_o (pf_cand_vld),
       .cand_line_o  (pf_cand_line),
@@ -1425,6 +1429,10 @@ assign mst_req_o  = slv_req_i;
   assign pf_launch     = pf_launch_ok && (pf_capture || pf_probe_q);
   assign pf_probe_fire = PF_EN && pf_probe_q && (state_q == S_IDLE) &&
                          pf_row_q && tag_row_valid;
+  assign pf_mshr_reserve_full =
+      (mshr_count >= (MSHR_W + 1)'(MSHR_DEPTH - PF_MSHR_RESERVE));
+  assign pf_retry_mshr = pf_probe_fire && !tag_hit && !mshr_lookup_hit &&
+                         !wtrk_line0_match && pf_way_ok && pf_mshr_reserve_full;
 
   logic install_discard;
   assign install_discard = fill_kill_q[inst_idx] ||
@@ -2328,10 +2336,18 @@ assign mst_req_o  = slv_req_i;
         fill_ferr_d[mshr_alloc_idx]  = axi_pkg::RESP_OKAY;
         fill_pf_d[mshr_alloc_idx]    = 1'b1;
         l2_pf_issue_o                = 1'b1;
+        pf_probe_d                   = 1'b0;
+      end else if (pf_retry_mshr) begin
+        // MSHR reserve exhaustion is transient backpressure, not evidence
+        // that the candidate is useless. Keep the probe armed and retry it
+        // after a demand/prefetch fill retires instead of permanently losing
+        // the stream frontier. Persistent causes (tag hit, in-flight merge,
+        // write tracker, or no allocatable way) still drop immediately.
+        pf_probe_d = 1'b1;
       end else begin
         l2_pf_drop_o = 1'b1;
+        pf_probe_d = 1'b0;
       end
-      pf_probe_d = 1'b0;
     end
 
     // A served-out pf head carrying no waiters frees itself — no slave

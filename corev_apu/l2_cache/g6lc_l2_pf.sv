@@ -9,12 +9,14 @@
 // write-tracker R1 rule, the demand reserve — live in g6lc_l2_top; this
 // module only learns the pattern and proposes lines.
 //
-// Streams are keyed on the 4 KiB page of the miss line (region tag): a
-// stream can never propose a candidate outside its own page, so the page
-// bound is structural, not a check. Next-line is stride=1 through the same
-// path; a stride other than 1 is only armed when STRIDE_EN and confirmed by
-// two consecutive equal deltas (the stored stride is the previous delta, so
-// the first equal pair both confirms and triggers).
+// Streams are keyed on the 4 KiB page of the miss line (region tag): an armed
+// burst can never propose a candidate outside its own page, so the page bound
+// is structural, not a check. A confirmed stride-1 stream may carry its
+// confidence into the physically adjacent next page only after demand first
+// misses there; the first cross-page line is never speculated. Next-line is
+// stride=1 through the same path; a stride other than 1 is only armed when
+// STRIDE_EN and confirmed by two consecutive equal deltas (the stored stride
+// is the previous delta, so the first equal pair both confirms and triggers).
 //
 // Each trigger arms PF_DISTANCE pending candidates ahead of the training
 // miss; a per-stream round-robin drains at most one per cycle. Candidates
@@ -45,6 +47,9 @@ module g6lc_l2_pf #(
     // allocated (fresh or merged) in the MSHR. One pulse per commit.
     input  logic                        train_i,
     input  logic [AXI_ADDR_WIDTH-1:0]   train_line_i,
+    // Demand-miss commit component of train_i. Hit-based retraining advances
+    // the stream but must not reload the demand-miss quiet window.
+    input  logic                        train_miss_i,
     // Candidate stream: held until cand_take_i. At most one per cycle.
     output logic                        cand_valid_o,
     output logic [AXI_ADDR_WIDTH-1:0]   cand_line_o,
@@ -76,7 +81,7 @@ module g6lc_l2_pf #(
 
   stream_t [NR_STREAMS-1:0] st_q, st_d;
   logic [SW-1:0]             rr_q, rr_d;
-  // Demand-miss quiet window: train_i reloads the countdown, and while it
+  // Demand-miss quiet window: train_miss_i reloads the countdown, and while it
   // is non-zero no candidate is offered (pend keeps its arming).
   logic [QW-1:0]             quiet_q, quiet_d;
   // Emit cursor: which stream is currently holding a pending candidate.
@@ -105,15 +110,50 @@ module g6lc_l2_pf #(
   // Stream match for the training address (also gates the emit walk below).
   logic [LINE_BITS-1:0] train_line;
   logic                 train_hit;
+  logic [NR_STREAMS-1:0] train_xcont;
   logic [SW-1:0]        train_hit_idx;
   assign train_line = train_line_i[AXI_ADDR_WIDTH-1:OFF_BITS];
   always_comb begin
+    for (int unsigned s = 0; s < NR_STREAMS; s++) begin
+      logic [DLT_W-1:0] xgap_s;
+      // Exact adjacent-page line gap for stride 1: lines remaining in the
+      // predecessor page plus the line offset in the successor page. This is
+      // only PAGE_LBITS+1 bits wide, unlike a full physical-line subtract.
+      xgap_s = DLT_W'(1 << PAGE_LBITS) -
+               DLT_W'(st_q[s].last[PAGE_LBITS-1:0]) +
+               DLT_W'(train_line[PAGE_LBITS-1:0]);
+`ifdef G6LC_MUT_PF_NO_XPAGE_CONTINUE
+      train_xcont[s] = 1'b0;
+`else
+      // Confirmed stride-1 continuation into the physically adjacent page.
+      // Demand hits do not retrain `last`, so accept a small positive line
+      // gap rather than only last+1; the first line in the new page remains
+      // a demand miss and no candidate is emitted speculatively across the
+      // boundary.
+      train_xcont[s] = st_q[s].valid && (st_q[s].conf >= 2'd2) &&
+                       (st_q[s].stride == DLT_W'(1)) &&
+                       (page_of(train_line) == (st_q[s].page + PAGETAG_W'(1))) &&
+                       (xgap_s <= DLT_W'(PF_DISTANCE) + DLT_W'(4));
+`endif
+    end
+  end
+  always_comb begin
     train_hit     = 1'b0;
     train_hit_idx = '0;
+    // Same-page residency takes priority; only absent that does a confirmed
+    // cross-page continuation select its predecessor stream.
     for (int unsigned s = 0; s < NR_STREAMS; s++) begin
       if (st_q[s].valid && (st_q[s].page == page_of(train_line))) begin
         train_hit     = 1'b1;
         train_hit_idx = SW'(s);
+      end
+    end
+    if (!train_hit) begin
+      for (int unsigned s = 0; s < NR_STREAMS; s++) begin
+        if (train_xcont[s] && !train_hit) begin
+          train_hit     = 1'b1;
+          train_hit_idx = SW'(s);
+        end
       end
     end
   end
@@ -140,7 +180,7 @@ module g6lc_l2_pf #(
 
     // ---- quiet window after a demand miss commit ----
     quiet_d = (quiet_q != '0) ? quiet_q - 1'b1 : '0;
-    if (train_i) quiet_d = QW'(QUIET);
+    if (train_miss_i) quiet_d = QW'(QUIET);
 
     // ---- retire the offered candidate ----
     if (cnd_vld_q && cand_take_i) cnd_vld_d = 1'b0;
@@ -175,10 +215,13 @@ module g6lc_l2_pf #(
       if (train_hit) begin
         tr_d = delta_of(train_line, st_q[train_hit_idx].last);
         st_d[train_hit_idx].last = train_line;
+        if (train_xcont[train_hit_idx]) st_d[train_hit_idx].page = page_of(train_line);
         if (tr_d != 0) begin
-          tr_str = STRIDE_EN ? tr_d : DLT_W'(1);
-          if (st_q[train_hit_idx].seen &&
-              (tr_d == st_q[train_hit_idx].stride)) begin
+          tr_str = train_xcont[train_hit_idx] ? st_q[train_hit_idx].stride
+                                              : (STRIDE_EN ? tr_d : DLT_W'(1));
+          if (train_xcont[train_hit_idx] ||
+              (st_q[train_hit_idx].seen &&
+               (tr_d == st_q[train_hit_idx].stride))) begin
             // Equal deltas → confirmed hit. N3: a stream arms only on its
             // SECOND confirmed hit (conf ≥ 2 counting this one) and then at
             // most PEND_CAP candidates — the burst cap that keeps PF fills
