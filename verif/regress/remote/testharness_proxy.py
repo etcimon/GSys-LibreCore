@@ -2205,6 +2205,14 @@ APU_DEV_COHORTS = {
     'layout': ('ue_cpos_emptylayout_1', 'ue_cpos_dslcompat_1', 'ue_cneg_layoutmix_1'),
     'baseline': ('ue_gpos_tri_1', 'ue_gpos_fsubo_1', 'ue_gpos_fsubocopy_1',
                  'ue_cpos_dcopy_descarr_1'),
+    # §12.3 C/5a-r2: base + promoted *2 transfer twins — the *2 ctypes
+    # must reach the xfer engine, not the external work sink
+    'xfer2': ('ue_cpos_xfer_copy_1', 'ue_cpos_xfer_copy2_1',
+              'ue_cpos_xfer_copymix_1', 'ue_cneg_xfer_oob_1',
+              'ue_cneg_xfer_oob2_1', 'ue_cpos_clear_rgba8_1',
+              'ue_cpos_clear_rgba8_c2_1', 'ue_cpos_i2i_copy_1',
+              'ue_cpos_i2i_copy2_1', 'ue_cpos_i2i_blit_1',
+              'ue_cpos_i2i_blit2_1'),
 }
 
 # Env vars a leaf run may inject into the detached launcher: guest-stage
