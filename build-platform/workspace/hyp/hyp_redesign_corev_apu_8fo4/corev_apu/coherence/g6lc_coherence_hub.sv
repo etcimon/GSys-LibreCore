@@ -661,11 +661,26 @@ assign mem_req_o            = core_req_i[0];
     assign aw_have_free   = aw_hold_q ? 1'b1 : (two_free_slots || (any_free_slot && !ar_competing));
     assign aw_free_slot   = aw_hold_q ? aw_hold_slot_q : aw_free_enc;
 
-    // Write data owner follows last accepted AW (AXI W has no id)
-    logic [CID_W-1:0] w_owner_q, w_owner_d;
-    logic             w_busy_q, w_busy_d;
+    // Write data ownership is a small FIFO in AW acceptance order (AXI W has
+    // no id). Later AWs may be accepted while earlier write data is still
+    // draining; the FIFO preserves the required W ordering without serializing
+    // independent write-address admissions behind a single in-flight beat.
+    localparam int unsigned WQ_DEPTH = (OT_MAX < 2) ? 2 : OT_MAX;
+    localparam int unsigned WQ_CNT_W = $clog2(WQ_DEPTH + 1);
+    logic [CID_W-1:0] w_owner_fifo_q [WQ_DEPTH], w_owner_fifo_d [WQ_DEPTH];
+    logic [OT_W-1:0]  w_slot_fifo_q  [WQ_DEPTH], w_slot_fifo_d  [WQ_DEPTH];
+    logic [WQ_CNT_W-1:0] wq_count_q, wq_count_d;
+    logic [WQ_CNT_W-1:0] wq_push_index;
+    logic             wq_pop, wq_full;
+    logic [CID_W-1:0] w_owner_q;
+    logic             w_busy_q;
     // Slot of the in-flight W-data owner (for optional debug); B uses scoreboard.
-    logic [OT_W-1:0]  w_slot_q, w_slot_d;
+    logic [OT_W-1:0]  w_slot_q;
+
+    assign w_busy_q  = (wq_count_q != '0);
+    assign w_owner_q = w_owner_fifo_q[0];
+    assign w_slot_q  = w_slot_fifo_q[0];
+    assign wq_full   = (wq_count_q == WQ_CNT_W'(WQ_DEPTH));
 
     // Inv ready (from bus). Still never used to gate AW: admission consults the
     // registered retention occupancy below instead, which keeps the obligation
@@ -887,9 +902,13 @@ assign mem_req_o            = core_req_i[0];
       //pragma translate_off
       aw_ot_cnt_d = aw_ot_cnt_q;
       //pragma translate_on
-      w_owner_d   = w_owner_q;
-      w_busy_d    = w_busy_q;
-      w_slot_d    = w_slot_q;
+      wq_count_d    = wq_count_q;
+      wq_push_index = wq_count_q;
+      wq_pop        = 1'b0;
+      for (int unsigned s = 0; s < WQ_DEPTH; s++) begin
+        w_owner_fifo_d[s] = w_owner_fifo_q[s];
+        w_slot_fifo_d[s]  = w_slot_fifo_q[s];
+      end
       for (int unsigned s = 0; s < OT_MAX; s++) begin
         ar_ot_d[s] = ar_ot_q[s];
         aw_ot_d[s] = aw_ot_q[s];
@@ -908,14 +927,22 @@ assign mem_req_o            = core_req_i[0];
       // Drive mem aw_valid from request availability alone — do NOT gate on
       // mem aw_ready (downstream L2 only asserts ready when valid is high;
       // gating valid on ready is a combinational deadlock).
-      // Hold new AW while write data for previous AW still in flight (W has no id).
+      // Admit write addresses while earlier write data drains, bounded only by
+      // the W-owner FIFO. The FIFO preserves AXI W ordering; serializing AW on
+      // w_busy would charge every multi-core store an avoidable address bubble.
       // A write that will require an invalidation may only be admitted when the
       // retention slot is free, so its obligation cannot be dropped. This reads
       // only registered occupancy and the incoming cache attribute, never
       // inv_ready or aw_fire, so admission stays loop-free.
+`ifdef G6LC_MUT_HUB_SINGLE_W_OWNER
       aw_grant = (aw_hold_q || (|aw_req && !aw_ot_full && aw_have_free && !w_busy_q &&
                                !(aw_may_invalidate && inv_pend_valid_q))) &&
                  (!OOO_SF || (sig_pending_q && (sig_done_q || sig_result_valid)));
+`else
+      aw_grant = (aw_hold_q || (|aw_req && !aw_ot_full && aw_have_free && !wq_full &&
+                               !(aw_may_invalidate && inv_pend_valid_q))) &&
+                 (!OOO_SF || (sig_pending_q && (sig_done_q || sig_result_valid)));
+`endif
 
       if (aw_grant) begin
         mem_req_o.aw       = core_req_i[aw_winner].aw;
@@ -940,9 +967,6 @@ assign mem_req_o            = core_req_i[0];
             coh_line_tag(core_req_i[aw_winner].aw.addr, LINE_BYTES);
         aw_ot_d[aw_free_slot].b_held     = 1'b0;
         aw_ot_d[aw_free_slot].r_held     = 1'b0;
-        w_owner_d = aw_winner;
-        w_slot_d  = aw_free_slot;
-        w_busy_d  = 1'b1;
       end
 
       // ---- AR path (independent of AW) — same valid/ready split ----
@@ -968,16 +992,45 @@ assign mem_req_o            = core_req_i[0];
             coh_line_tag(core_req_i[ar_winner].ar.addr, LINE_BYTES);
       end
 
-      // ---- W data follows w_owner ----
+      // ---- W data follows the oldest accepted write address ----
       if (w_busy_q && core_req_i[w_owner_q].w_valid) begin
         mem_req_o.w       = core_req_i[w_owner_q].w;
         mem_req_o.w_valid = 1'b1;
         core_resp_o[w_owner_q].w_ready = mem_resp_i.w_ready;
         if (mem_resp_i.w_ready) begin
           w_fire = 1'b1;
-          if (core_req_i[w_owner_q].w.last) w_busy_d = 1'b0;
+          if (core_req_i[w_owner_q].w.last) wq_pop = 1'b1;
         end
       end
+
+      // ---- W-owner FIFO ordering update ----
+      // Pop the head after its last W beat and append each accepted AW. The
+      // simultaneous pop/push case keeps the queue occupancy unchanged while
+      // preserving strict AW-acceptance order on the shared W channel.
+      if (wq_pop) begin
+        for (int unsigned s = 0; s < WQ_DEPTH-1; s++) begin
+          w_owner_fifo_d[s] = w_owner_fifo_q[s+1];
+          w_slot_fifo_d[s]  = w_slot_fifo_q[s+1];
+        end
+        w_owner_fifo_d[WQ_DEPTH-1] = '0;
+        w_slot_fifo_d[WQ_DEPTH-1]  = '0;
+        wq_push_index = wq_count_q - 1'b1;
+      end
+      if (aw_fire && (!wq_full || wq_pop)) begin
+        w_owner_fifo_d[wq_push_index] = aw_winner;
+        w_slot_fifo_d[wq_push_index]  = aw_free_slot;
+      end
+      unique case ({aw_fire, wq_pop})
+        2'b10:   wq_count_d = wq_count_q + 1'b1;
+        2'b01:   wq_count_d = wq_count_q - 1'b1;
+        default: wq_count_d = wq_count_q;
+      endcase
+      //pragma translate_off
+      if (aw_fire && wq_full && !wq_pop)
+        $fatal(1, "HUB_W_OWNER_FIFO_OVERFLOW");
+      if (wq_pop && !w_busy_q)
+        $fatal(1, "HUB_W_OWNER_FIFO_UNDERFLOW");
+      //pragma translate_on
 
       // ---- Held-B presentation ----
       // A B consumed while its invalidation was still in flight is offered to
@@ -1207,9 +1260,11 @@ assign mem_req_o            = core_req_i[0];
         //pragma translate_off
         aw_ot_cnt_q <= '0;
         //pragma translate_on
-        w_owner_q   <= '0;
-        w_busy_q    <= 1'b0;
-        w_slot_q    <= '0;
+        wq_count_q <= '0;
+        for (int unsigned s = 0; s < WQ_DEPTH; s++) begin
+          w_owner_fifo_q[s] <= '0;
+          w_slot_fifo_q[s]  <= '0;
+        end
         for (int unsigned s = 0; s < OT_MAX; s++) begin
           ar_ot_q[s]  <= '0;
           aw_ot_q[s]  <= '0;
@@ -1245,9 +1300,11 @@ assign mem_req_o            = core_req_i[0];
         //pragma translate_off
         aw_ot_cnt_q <= aw_ot_cnt_d;
         //pragma translate_on
-        w_owner_q   <= w_owner_d;
-        w_busy_q    <= w_busy_d;
-        w_slot_q    <= w_slot_d;
+        wq_count_q <= wq_count_d;
+        for (int unsigned s = 0; s < WQ_DEPTH; s++) begin
+          w_owner_fifo_q[s] <= w_owner_fifo_d[s];
+          w_slot_fifo_q[s]  <= w_slot_fifo_d[s];
+        end
         for (int unsigned s = 0; s < OT_MAX; s++) begin
           ar_ot_q[s]  <= ar_ot_d[s];
           aw_ot_q[s]  <= aw_ot_d[s];

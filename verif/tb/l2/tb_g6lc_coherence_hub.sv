@@ -1564,6 +1564,72 @@ module tb_g6lc_coherence_hub;
       $fatal(1, "HUB_B2B_OVERLAP_CYCLES cyc=%0d expected <= %0d", cyc, 2 * NWR + 8);
   endtask
 
+  // W-owner FIFO: a second core's write address may be accepted while the
+  // first write's data is still waiting for the shared memory W channel. The
+  // data itself must still emerge in strict AW acceptance order. The review
+  // mutation -DG6LC_MUT_HUB_SINGLE_W_OWNER re-serializes AW admission on
+  // w_busy and must fail HUB_WFIFO_AW_OVERLAP.
+  task automatic w_owner_fifo_order;
+    localparam data_t DATA0 = 64'h5150_0000_0000_0000;
+    localparam data_t DATA1 = 64'h5151_1111_1111_1111;
+    bit accepted;
+    reset();
+    memory_rsp.aw_ready = 1;
+    memory_rsp.w_ready  = 0;
+    core_req[0].aw = aw(64'h8000_1000, 4'h1, 4'h0);
+    core_req[1].aw = aw(64'h8000_2000, 4'h2, 4'h0);
+    core_req[0].aw_valid = 1;
+    core_req[1].aw_valid = 0;
+    core_req[0].w = '{data: DATA0, strb: 8'hff, last: 1'b1, user: '0};
+    core_req[1].w = '{data: DATA1, strb: 8'hff, last: 1'b1, user: '0};
+    core_req[0].w_valid = 1;
+    core_req[1].w_valid = 1;
+    accepted = 0;
+    for (int k = 0; k < 12 && !accepted; k++) begin
+      #2;
+      if (core_rsp[0].aw_ready) begin
+        accepted = 1;
+        tick();
+      end else begin
+        tick();
+      end
+    end
+    core_req[0].aw_valid = 0;
+    if (!accepted)
+      $fatal(1, "HUB_WFIFO_SETUP first AW not granted");
+    core_req[1].aw_valid = 1;
+    accepted = 0;
+    for (int k = 0; k < 8 && !accepted; k++) begin
+      #2;
+      if (core_rsp[1].aw_ready) begin
+        accepted = 1;
+        tick();
+      end else begin
+        tick();
+      end
+    end
+    core_req[1].aw_valid = 0;
+    if (!accepted)
+      $fatal(1, "HUB_WFIFO_AW_OVERLAP second AW serialized behind W data");
+    memory_rsp.w_ready = 1;
+    #2;
+    if (!memory_req.w_valid || memory_req.w.data !== DATA0 ||
+        !core_rsp[0].w_ready || core_rsp[1].w_ready)
+      $fatal(1, "HUB_WFIFO_ORDER head data=%h ready0=%0d ready1=%0d",
+             memory_req.w.data, core_rsp[0].w_ready, core_rsp[1].w_ready);
+    tick();
+    core_req[0].w_valid = 0;
+    #2;
+    if (!memory_req.w_valid || memory_req.w.data !== DATA1 ||
+        !core_rsp[1].w_ready || core_rsp[0].w_ready)
+      $fatal(1, "HUB_WFIFO_ORDER next data=%h ready0=%0d ready1=%0d",
+             memory_req.w.data, core_rsp[0].w_ready, core_rsp[1].w_ready);
+    tick();
+    core_req[1].w_valid = 0;
+    memory_rsp.w_ready = 0;
+    $display("HUB_WFIFO_ORDER_PASS");
+  endtask
+
   initial begin
     scenario = 0;
     negative = $test$plusargs("oracle_negative");
@@ -1598,6 +1664,7 @@ module tb_g6lc_coherence_hub;
       26: writer_acquisition();
       27: atop_parked_r();
       28: back_to_back_sig_overlap();
+      29: w_owner_fifo_order();
       default: $fatal(1, "HUB_SCENARIO");
     endcase
     $display("HUB_PASS scenario=%0d", scenario);

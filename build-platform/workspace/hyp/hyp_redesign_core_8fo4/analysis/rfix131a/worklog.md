@@ -9857,3 +9857,24 @@ Scanned all 284 modules via `sv-timing analyze --all-modules --target-mhz 5000 -
 - `verif/regress/remote/run_mc_int2_review.py`: extended `parse_cache_counters` for optional `l3_pf_issue/l3_pf_useful/l3_pf_drop`; legacy lines remain accepted.
 - Local parser verification: `python -m unittest test_testharness_proxy.McCacheCounterParseTests` `OK` plus explicit new-key probe `MC_PARSER_L3PF_PASS`.
 - Remote full-cluster build+witness `hyp8-witness-l3pf-r704fix` launched from the run-704 closure overlaid with the bp_loop/WT-D$/memdep fixes and this L3-PF change; directed comparison tag planned: `mc-directed-l3pf-r704fix` against run-499 baseline (`781,762` cycles, `l3_hit=8,193`, `l3_miss=8,196`, PF counters zero).
+
+## 2026-11-25 — SQL store-path bottleneck fix: coherence-hub W-owner FIFO (`wbusy` AW serialization) in both trees
+
+### 1. SQL evidence and root cause
+
+- Run-704 matched telemetry showed the coherence hub still charging the multicore store stream with substantial write-address backpressure: `hub_aw_hold_other=76,935` against only `aw_fire=61,695`, with `hub_wbusy=19,425`, `hub_aw_sc_collide=35,996`, `l2_posted=61,666`, and `l2_wupd=48,584`. Earlier completed witnesses had the same shape at larger scale (`wbusy`/`aw_fire` roughly one-third of write-address fire count).
+- The root cause was structural in `g6lc_coherence_hub.sv`: because AXI W has no id, `aw_grant` serialized every new AW behind `!w_busy_q`, where `w_busy_q` represented only the latest accepted write. Independent write addresses therefore could not enter the hub even when their data was not needed yet and the shared W channel could have been scheduled in strict AW order.
+
+### 2. Minimal implementation (hyp8 mirror and main `corev_apu`)
+
+- Replaced the single overwriteable `w_owner/w_busy` state with a small in-order W-owner FIFO (`WQ_DEPTH=max(2,MAX_OUTSTANDING)`), accepting later AWs while earlier write data drains and forwarding W beats strictly from the oldest accepted write address.
+- `aw_grant` is now bounded by FIFO capacity (`!wq_full`) rather than current W occupancy; overflow/underflow are simulation-fatal invariants. The review mutation `G6LC_MUT_HUB_SINGLE_W_OWNER` restores the prior serialized admission policy.
+- No invalidation-retention ordering was relaxed: cacheable/AMO/lock writes that may invalidate still require the retention slot to be free, and the invalidation bus ordering/ACK-after-invalidation mechanisms are unchanged.
+
+### 3. Timing and remote verification (`ovh_calltorch`)
+
+- `sv-timing` (`delay-v50`, `g6lc_coherence_hub`, 5 GHz/20 ps FO4 structural screen): worst path **51.50 -> 51.25 FO4** (no worst-path regression; added FIFO state is sequential/control-local).
+- Extended `verif/tb/l2/tb_g6lc_coherence_hub.sv` with scenario 29 (`w_owner_fifo_order`): a second core's AW must be accepted while the first write's W beat is blocked, and emitted W data must remain exact `DATA0 -> DATA1` AW-order.
+- `hyp8-wfifo-t2` (hyp mirror): `HUB_BC_PASS count=25`, `HUB_OOO_PASS`, `HUB_B2B_OVERLAP cyc=34`, all prior mutants caught, new `G6LC_MUT_HUB_SINGLE_W_OWNER` caught by `HUB_WFIFO_AW_OVERLAP`, plus `COH_L2_0_7_PASS` and `COH_L3_0_7_PASS` (`COH_HUB_OVERLAP_REMOTE_PASS`, rc=0).
+- `hyp8-wfifo-main-t1` (same closure with main `corev_apu/coherence/g6lc_coherence_hub.sv` substituted): hub positive regressions passed (`HUB_BC_PASS count=25`, `HUB_OOO_PASS`, including scenario 29) before the runner reached a pre-existing main/hyp mutant-coverage mismatch for `G6LC_MUT_HUB_NO_INV_OWED`; the W FIFO RTL and scenario themselves compile and pass in both trees.
+- Note: isolated remote leaf evidence verifies the modified hub/mutation in isolation and does not waive repository-level aggregate verification gates (`./build.sh verify`).
