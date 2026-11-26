@@ -537,6 +537,33 @@ module tb_g6lc_apu_vgsys
   end
   assign w_r = !w_vq;
 
+  // promoted *2 transfer records must route to the internal xfer
+  // engine, never the external work sink.  This check is an explicit
+  // ctype list — deliberately NOT the cmdexec/vgtop predicate — so a
+  // routing regression (a *2 ctype missing from vgtop's work_is_xfer)
+  // fails here even though the TB sink would otherwise accept and
+  // silently complete the record with no DMA.  Main-DUT sink only:
+  // the WorkSink=0 twin's work_ready_i is tied off and never reaches
+  // this w_v/w_r pair.
+  always @(posedge clk)
+    if (rst_ni && w_v && w_r &&
+        (w_o.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) ||
+         w_o.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_2_EXT) ||
+         w_o.ctype == 32'(APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT) ||
+         w_o.ctype == 32'(APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT) ||
+         w_o.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT) ||
+         w_o.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_2_EXT) ||
+         w_o.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT) ||
+         w_o.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_2_EXT) ||
+         w_o.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT) ||
+         w_o.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_2_EXT) ||
+         w_o.ctype == 32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT) ||
+         w_o.ctype == 32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_2_EXT) ||
+         w_o.ctype == 32'(APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT) ||
+         w_o.ctype == 32'(APU_VN_TYPE_VK_CMD_CLEAR_DEPTH_STENCIL_IMAGE_EXT)))
+      $fatal(1, "xfer-class record reached the external work sink ctype=%0d",
+             w_o.ctype);
+
   // ---- fence / notify / used observability -------------------------------
   int unsigned f_count = 0;
   logic [63:0] f_seen_id;

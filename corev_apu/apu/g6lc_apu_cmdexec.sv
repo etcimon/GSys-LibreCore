@@ -605,34 +605,7 @@ module g6lc_apu_cmdexec
     state_e              pay_ret_q;       // post-walk continuation
 
     // XFER-class record types, assembled through the StXf* states
-    wire work_is_xfer = rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) ||
-                        rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_2_EXT) ||
-                        rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT) ||
-                        rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT) ||
-                        rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT) ||
-                        rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_2_EXT) ||
-                        rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT) ||
-                        rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_2_EXT) ||
-                        rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT) ||
-                        rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_2_EXT) ||
-                        rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT) ||
-                        rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_2_EXT) ||
-                        rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT) ||
-                        rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_CLEAR_DEPTH_STENCIL_IMAGE_EXT);
+    wire work_is_xfer = apu_cmdexec_is_xfer(rec_q.ctype);
     // operand handles pack the non-commandBuffer lookup slots
     // sequentially: {srcBuffer,dstImage}, {srcImage,dstBuffer},
     // {srcImage,dstImage}, {image} — operand n rides handle[n].
@@ -3564,8 +3537,10 @@ module g6lc_apu_cmdexec
                   state_q <= StWork;
                 end
               end else if (xf_two_ops && xf_opnd_q == 2'd0 &&
-                           rec_q.ctype ==
-                           32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT)) begin
+                           (rec_q.ctype ==
+                            32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) ||
+                            rec_q.ctype ==
+                            32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_2_EXT))) begin
                 xf_src_base_q <= xb;
                 xf_src_size_q <= xs;
                 xf_opnd_q     <= 2'd1;
@@ -3575,7 +3550,9 @@ module g6lc_apu_cmdexec
                 // B2I source buffer / I2B destination buffer lands in
                 // src/dst respectively per the op direction
                 if (rec_q.ctype ==
-                    32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT)) begin
+                    32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT) ||
+                    rec_q.ctype ==
+                    32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_2_EXT)) begin
                   xf_src_base_q <= xb;
                   xf_src_size_q <= xs;
                 end else begin

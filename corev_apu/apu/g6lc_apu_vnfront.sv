@@ -4234,29 +4234,11 @@ module g6lc_apu_vnfront
                       APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT ||
                       // §12.3 C/5a+5b: Xfer operand payloads (copy
                       // regions, fill/update headers, update data,
-                      // image region/range words) stream verbatim
-                      // like push constants
-                      op_q.cmd_type ==
-                      APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT ||
-                      op_q.cmd_type ==
-                      APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT ||
-                      op_q.cmd_type ==
-                      APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT ||
-                      op_q.cmd_type ==
-                      APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT ||
-                      op_q.cmd_type ==
-                      APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT ||
-                      op_q.cmd_type ==
-                      APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT ||
-                      // T1: 20 VkImageBlit words per region
-                      op_q.cmd_type ==
-                      APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT ||
-                      op_q.cmd_type ==
-                      APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT ||
-                      // depth-stencil clear streams its 5w pRanges the
-                      // same way (value rides rec.imm, not the payload)
-                      op_q.cmd_type ==
-                      APU_VN_TYPE_VK_CMD_CLEAR_DEPTH_STENCIL_IMAGE_EXT ||
+                      // image region/range words — VkImageBlit 20w/
+                      // region, depth-stencil clear 5w pRanges) stream
+                      // verbatim like push constants; the shared
+                      // predicate covers the promoted *2 ctypes too
+                      apu_cmdexec_is_xfer(op_q.cmd_type) ||
                       // G1c: dynamic-state + render-pass keeps stream
                       // verbatim (viewport 6w/vp, scissor 4w/sc,
                       // BeginRP 9+4w/clearval; BindIndexBuffer's u64

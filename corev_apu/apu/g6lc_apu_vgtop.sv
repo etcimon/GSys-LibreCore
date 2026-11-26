@@ -405,24 +405,7 @@ module g6lc_apu_vgtop
                        work_o.ctype ==
                        32'(APU_VN_TYPE_VK_CMD_DISPATCH_INDIRECT_EXT);
     // §12.3 C/5a+5b: Xfer-class records go to the internal DMA engine
-    wire         work_is_xfer = work_o.ctype ==
-                       32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) ||
-                       work_o.ctype ==
-                       32'(APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT) ||
-                       work_o.ctype ==
-                       32'(APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT) ||
-                       work_o.ctype ==
-                       32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT) ||
-                       work_o.ctype ==
-                       32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT) ||
-                       work_o.ctype ==
-                       32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT) ||
-                       work_o.ctype ==
-                       32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT) ||
-                       work_o.ctype ==
-                       32'(APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT) ||
-                       work_o.ctype ==
-                       32'(APU_VN_TYPE_VK_CMD_CLEAR_DEPTH_STENCIL_IMAGE_EXT);
+    wire         work_is_xfer = apu_cmdexec_is_xfer(work_o.ctype);
     // draw-class records route to the raster engine: vkCmdDraw,
     // vkCmdDrawIndexed, the §5a indirect draws (the executor has
     // already fetched their operands into rd_i), and in-render-pass

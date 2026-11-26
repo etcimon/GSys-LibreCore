@@ -1866,6 +1866,35 @@ def img_dclear_words(model, words, im, depth, ranges):
             for i in range(len(words))]
 
 
+def img_i2i_words(model, dst_words, src_words, im, regions):
+    """apply I2I copy regions to a device-layout word image — the
+    expected footprint after vkCmdCopyImage/BlitImage, computed from
+    the two uploaded patterns (NOT the model's transfer path).
+    regions = [(sx, sy, dx, dy, ew, eh)] pixel top-lefts + extent;
+    every dst texel in each rect takes the src texel at the same
+    (x,y) offset; pitch padding and untouched texels are unchanged."""
+    _v, bpp = img_fmt_tables(model)
+    bpp_ = bpp[im['fmt'] & 15]
+    layb = img_layer_bytes(model, im['w'], im['h'], im['fmt'],
+                           im['mips'])
+    db = bytearray(b''.join(struct.pack('<I', w) for w in dst_words))
+    sb = bytearray(b''.join(struct.pack('<I', w) for w in src_words))
+    for sx, sy, dx, dy, ew, eh in regions:
+        for l in range(im['layers']):
+            for m in range(im['mips']):
+                wm, hm = img_mdim(im['w'], m), img_mdim(im['h'], m)
+                pt = img_mpitch(model, im['w'], im['fmt'], m)
+                off = l * layb + img_mip_off(model, im['w'], im['h'],
+                                             im['fmt'], m)
+                for y in range(eh):
+                    for x in range(ew):
+                        s = off + (sy + y) * pt + (sx + x) * bpp_
+                        d = off + (dy + y) * pt + (dx + x) * bpp_
+                        db[d:d + bpp_] = sb[s:s + bpp_]
+    return [struct.unpack('<I', bytes(db[4 * i:4 * i + 4]))[0]
+            for i in range(len(dst_words))]
+
+
 # §12.3 C/5b-r2: the CLEAR sessions — {vkfmt, image geometry, colour
 # words, ranges} per variant; clear_oob carries three ranges that each
 # violate one subresource rule -> DEVICE_LOST, no write.
@@ -1881,6 +1910,11 @@ CLEAR_SESSIONS = {
     'clear_rgba8':   dict(vkfmt=37, w=16, h=16, mips=3, layers=2,
                           cw=[F32_H, F32_Q, F32_TQ, F32_ONE],
                           ranges=[(1, 1, 2, 1, 1)]),
+    # §12.3 C/5a-r2: same session with the B2I upload and I2B
+    # readback promoted to their *2 wire forms (the clear stays base)
+    'clear_rgba8_c2': dict(vkfmt=37, w=16, h=16, mips=3, layers=2,
+                           cw=[F32_H, F32_Q, F32_TQ, F32_ONE],
+                           ranges=[(1, 1, 2, 1, 1)]),
     'clear_srgb':    dict(vkfmt=43, w=16, h=16, mips=3, layers=2,
                           cw=[F32_H, F32_Q, F32_TQ, F32_ONE],
                           ranges=[(1, 0, 1, 0, 2)]),
@@ -3009,8 +3043,11 @@ class FrontModel(ObjectTable, PayloadMemory):
         def a32(i):
             return ar.get(abase + i, 0)
         if ct in (T['vkCmdCopyBufferToImage'],
-                  T['vkCmdCopyImageToBuffer']):
-            b2i = ct == T['vkCmdCopyBufferToImage']
+                  T.get('vkCmdCopyBufferToImage2', -1),
+                  T['vkCmdCopyImageToBuffer'],
+                  T.get('vkCmdCopyImageToBuffer2', -1)):
+            b2i = ct in (T['vkCmdCopyBufferToImage'],
+                         T.get('vkCmdCopyBufferToImage2', -1))
             img = self._xfer_img_extent(
                 r['handle'][1 if b2i else 0],
                 r['kind'][1 if b2i else 0])
@@ -3046,7 +3083,8 @@ class FrontModel(ObjectTable, PayloadMemory):
                         rl >= ew and ih >= eh and need <= buf[1]):
                     return True
             return False
-        if ct == T.get('vkCmdBlitImage', -1):
+        if ct in (T.get('vkCmdBlitImage', -1),
+                  T.get('vkCmdBlitImage2', -1)):
             # T1 mirror of xfer XBlitCvt: one unscaled, unflipped region of
             # equal formats runs as CopyImage; anything else is refused
             s0 = self._xfer_img_extent(r['handle'][0], r['kind'][0])
@@ -3062,7 +3100,7 @@ class FrontModel(ObjectTable, PayloadMemory):
             ext = [sx(sv[7 + k]) - sx(sv[4 + k]) for k in range(3)]
             dex = [sx(sv[17 + k]) - sx(sv[14 + k]) for k in range(3)]
             return any(e <= 0 for e in ext) or ext != dex
-        if ct == T['vkCmdCopyImage']:
+        if ct in (T['vkCmdCopyImage'], T.get('vkCmdCopyImage2', -1)):
             s0 = self._xfer_img_extent(r['handle'][0], r['kind'][0])
             d0 = self._xfer_img_extent(r['handle'][1], r['kind'][1])
             if s0 is None or d0 is None:
@@ -3729,12 +3767,17 @@ class FrontModel(ObjectTable, PayloadMemory):
             elif ct in (T.get('vkCmdBindIndexBuffer', -1),
                         T.get('vkCmdBindIndexBuffer2', -1)):
                 ib = r['handle'][0]
-            elif ct in (T['vkCmdCopyBuffer'], T['vkCmdFillBuffer'],
+            elif ct in (T['vkCmdCopyBuffer'], T.get('vkCmdCopyBuffer2', -1),
+                        T['vkCmdFillBuffer'],
                         T['vkCmdUpdateBuffer'],
                         T['vkCmdCopyBufferToImage'],
+                        T.get('vkCmdCopyBufferToImage2', -1),
                         T['vkCmdCopyImageToBuffer'],
+                        T.get('vkCmdCopyImageToBuffer2', -1),
                         T['vkCmdCopyImage'],
+                        T.get('vkCmdCopyImage2', -1),
                         T.get('vkCmdBlitImage', -1),
+                        T.get('vkCmdBlitImage2', -1),
                         T['vkCmdClearColorImage'],
                         T['vkCmdClearDepthStencilImage']):
                 # §12.3 C/5a + C/5b: Xfer operand validation runs in
@@ -9053,6 +9096,28 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             clr_init = [((i * 0x01010101) + 0xA5A5_5A5A) & 0xFFFFFFFF
                         for i in range(img_foot(clr_b) // 4)]
 
+        # §12.3 C/5a-r2: the i2i_* sessions — two transfer-only images
+        # (A=cl_img source, B=cl_img2 destination), each with its own
+        # upload staging buffer; cl_rbuf reads image B back packed.
+        # Pattern A is the clear sessions' init formula, pattern B is
+        # its bitwise inverse — every untouched B texel is the guard.
+        i2i = variant in ('i2i_copy', 'i2i_copy2', 'i2i_blit',
+                          'i2i_blit2')
+        i2i_a = i2i_b = i2i_im = None
+        i2i_init = i2i_initB = []
+        cl_img2, cl_imem2 = 0x5100_0000_9100, 0x6000_0000_9100
+        cl_sbuf2, cl_smem2 = 0x5000_0000_9100, 0x6000_0000_9101
+        if i2i:
+            did = img_fmt_id(model, 37)      # VK_FORMAT_R8G8B8A8_UNORM
+            assert did != 0xFF, 'i2i fmt unsupported'
+            i2i_im = {'w': 16, 'h': 16, 'fmt': did, 'mips': 1,
+                      'layers': 1}
+            i2i_a = {'img': i2i_im}
+            i2i_b = {'img': i2i_im}
+            i2i_init = [((i * 0x01010101) + 0xA5A5_5A5A) & 0xFFFFFFFF
+                        for i in range(img_foot(i2i_a) // 4)]
+            i2i_initB = [w ^ 0xFFFFFFFF for w in i2i_init]
+
         # §12.3 C/5a xfer staging image: 128 B of distinctive data
         BIG_XFER_SZ = 0x100001      # T4: dEQP buffer_1048577 size
         BIG_TAIL_W = [(0x5A00_0000 + 0x1111 * i) & 0xFFFFFFFF for i in range(8)]
@@ -9061,6 +9126,71 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         XFER_FILL_W = 0xDEAD_BEEF
         XFER_UPD_W = [(0xC0FF_0000 + i) & 0xFFFFFFFF
                       for i in range(16)]
+
+        # §12.3 C/5a-r2: the *2 promotion variants replay each base
+        # transfer command through its VK_KHR_copy_commands2 /
+        # maintenance4 wire form — the Info2 wrapper carries the same
+        # operands and the *2 region structs add only sType/pNext, so
+        # cmdexec resolves identical operands and vgtop must route the
+        # promoted ctype to the same xfer engine.
+        XFER2_INFO = {
+            'vkCmdCopyBuffer': ('vkCmdCopyBuffer2', 'pCopyBufferInfo',
+                                'VkCopyBufferInfo2', 'VkBufferCopy',
+                                'VkBufferCopy2'),
+            'vkCmdCopyBufferToImage': ('vkCmdCopyBufferToImage2',
+                                       'pCopyBufferToImageInfo',
+                                       'VkCopyBufferToImageInfo2',
+                                       'VkBufferImageCopy',
+                                       'VkBufferImageCopy2'),
+            'vkCmdCopyImageToBuffer': ('vkCmdCopyImageToBuffer2',
+                                       'pCopyImageToBufferInfo',
+                                       'VkCopyImageToBufferInfo2',
+                                       'VkBufferImageCopy',
+                                       'VkBufferImageCopy2'),
+            'vkCmdCopyImage': ('vkCmdCopyImage2', 'pCopyImageInfo',
+                               'VkCopyImageInfo2', 'VkImageCopy',
+                               'VkImageCopy2'),
+            'vkCmdBlitImage': ('vkCmdBlitImage2', 'pBlitImageInfo',
+                               'VkBlitImageInfo2', 'VkImageBlit',
+                               'VkImageBlit2'),
+        }
+        # variants that promote every listed command; xfer_copymix
+        # promotes only the pre-dispatch copy (passed explicitly at
+        # that emission site) and leaves the readback copy base
+        XFER2_PROMOTE = {
+            'xfer_copy2': ('vkCmdCopyBuffer',),
+            'xfer_oob2': ('vkCmdCopyBuffer',),
+            'clear_rgba8_c2': ('vkCmdCopyBufferToImage',
+                               'vkCmdCopyImageToBuffer'),
+            'i2i_copy2': ('vkCmdCopyImage',),
+            'i2i_blit2': ('vkCmdBlitImage',),
+        }
+
+        def promote_xfer2(name, args):
+            """base (name,args) -> promoted *2 (name,args): the Info2
+            struct carries every non-commandBuffer operand and each
+            pRegions element is re-st()'d under its *2 type."""
+            spec = XFER2_INFO.get(name)
+            if spec is None:
+                return name, args
+            name2, pinfo, it2, rt, rt2 = spec
+            info = {k: v for k, v in args.items()
+                    if k not in ('commandBuffer', 'pRegions',
+                                 'regionCount')}
+            info['regionCount'] = args['regionCount']
+            info['pRegions'] = [
+                st(rt2, **{k: v for k, v in r.items()
+                           if k not in ('sType', 'pNext')})
+                for r in args['pRegions']]
+            return name2, dict(
+                commandBuffer=args['commandBuffer'],
+                **{pinfo: st(it2, pNext=[], **info)})
+
+        def x2(name, args, yes=None):
+            """emit the base or the promoted *2 wire form per variant"""
+            if yes is None:
+                yes = name in XFER2_PROMOTE.get(variant, ())
+            return promote_xfer2(name, args) if yes else (name, args)
 
         # ---- segment A part 1: device + buffers + memory -------------- #
         seg_a1 = [
@@ -9382,7 +9512,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     device=V['dev'],
                     pCreateInfo=st('VkEventCreateInfo', flags=0),
                     pEvent=rm_ev[i])) for i in range(4)]
-        if variant in ('xfer_copy', 'xfer_big'):
+        if variant in ('xfer_copy', 'xfer_big', 'xfer_copy2',
+                       'xfer_copymix'):
             # §12.3 C/5a: staging src buffer, fill target, readback —
             # pure transfer operands (not descriptor-bound).  xfer_big
             # (T4) adds two 1 MiB + 1 buffers: the CTS
@@ -9502,6 +9633,65 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         device=V['dev'],
                         pAllocateInfo=st('VkMemoryAllocateInfo',
                                          allocationSize=img_foot(clr_b),
+                                         memoryTypeIndex=0, pNext=[]),
+                        pMemory=bmem)),
+                    ('vkBindBufferMemory', dict(
+                        device=V['dev'], buffer=bf, memory=bmem,
+                        memoryOffset=0)),
+                ]
+
+        if i2i:
+            # §12.3 C/5a-r2: two transfer-only RGBA8_UNORM 16x16 images
+            # (TRANSFER_SRC|DST usage) — cl_img is the copy source A,
+            # cl_img2 the destination B — each with its own upload
+            # staging buffer; cl_rbuf takes B's packed readback
+            for imh, mmh in ((cl_img, cl_imem), (cl_img2, cl_imem2)):
+                seg_a1 += [
+                    ('vkCreateImage', dict(
+                        device=V['dev'],
+                        pCreateInfo=st('VkImageCreateInfo',
+                            flags=0, imageType=1, format=37,
+                            extent=st('VkExtent3D', width=16,
+                                      height=16, depth=1),
+                            mipLevels=1, arrayLayers=1, samples=1,
+                            tiling=0, usage=0x3, sharingMode=0,
+                            queueFamilyIndexCount=0,
+                            pQueueFamilyIndices=[], initialLayout=0),
+                        pImage=imh)),
+                    ('vkGetImageMemoryRequirements', dict(
+                        device=V['dev'], image=imh,
+                        pMemoryRequirements=st(
+                            'VkMemoryRequirements'))),
+                    ('vkAllocateMemory', dict(
+                        device=V['dev'],
+                        pAllocateInfo=st('VkMemoryAllocateInfo',
+                                         allocationSize=img_foot(i2i_a),
+                                         memoryTypeIndex=0, pNext=[]),
+                        pMemory=mmh)),
+                    ('vkBindImageMemory', dict(
+                        device=V['dev'], image=imh, memory=mmh,
+                        memoryOffset=0)),
+                ]
+            for bf, bmem, usg in ((cl_sbuf, cl_smem, 0x1),
+                                  (cl_sbuf2, cl_smem2, 0x1),
+                                  (cl_rbuf, cl_rmem, 0x2)):
+                seg_a1 += [
+                    ('vkCreateBuffer', dict(
+                        device=V['dev'],
+                        pCreateInfo=st('VkBufferCreateInfo',
+                                       size=img_foot(i2i_a),
+                                       usage=usg, sharingMode=0,
+                                       queueFamilyIndexCount=0,
+                                       pQueueFamilyIndices=[]),
+                        pBuffer=bf)),
+                    ('vkGetBufferMemoryRequirements', dict(
+                        device=V['dev'], buffer=bf,
+                        pMemoryRequirements=st(
+                            'VkMemoryRequirements'))),
+                    ('vkAllocateMemory', dict(
+                        device=V['dev'],
+                        pAllocateInfo=st('VkMemoryAllocateInfo',
+                                         allocationSize=img_foot(i2i_a),
                                          memoryTypeIndex=0, pNext=[]),
                         pMemory=bmem)),
                     ('vkBindBufferMemory', dict(
@@ -9801,6 +9991,24 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 clr_img_base, clr_st_base, clr_rb_base = \
                     blob_base[-3:]
                 apw(clr_st_base, clr_init)
+            i2i_img_base = i2i_img2_base = i2i_st_base = \
+                i2i_st2_base = i2i_rb_base = None
+            if i2i:
+                # blob+map both i2i images and the three transfer
+                # buffers; each upload staging receives its pattern's
+                # device-layout bytes — the images are only ever
+                # written by the cbuf's records
+                for mid in (cl_imem, cl_smem, cl_imem2, cl_smem2,
+                            cl_rmem):
+                    rid = RES_BLOB0 + len(blob_base)
+                    base_b = create_blob_mem(rid, img_foot(i2i_a),
+                                             mid)
+                    assert base_b is not None, 'i2i blob refused'
+                    blob_base.append(map_blob(rid))
+                (i2i_img_base, i2i_st_base, i2i_img2_base,
+                 i2i_st2_base, i2i_rb_base) = blob_base[-5:]
+                apw(i2i_st_base, i2i_init)
+                apw(i2i_st2_base, i2i_initB)
             if variant == 'memsplit':
                 # the lazy type-1 memory takes backing only here, via
                 # MAP_BLOB -> ALLOC_AT in the guest window
@@ -9842,7 +10050,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     apw(blob_base[n_bind],
                         [0, 0, 0, 0, vec['gx'], vec['gy'],
                          vec['gz'], 0])
-            if variant in ('xfer_copy', 'xfer_big'):
+            if variant in ('xfer_copy', 'xfer_big', 'xfer_copy2',
+                           'xfer_copymix'):
                 # memory-backed blobs for the transfer-only buffers;
                 # the guest stages the copy source contents
                 for j in range(5 if variant == 'xfer_big' else 3):
@@ -10180,7 +10389,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 # fail validation -> the record writes nothing and the
                 # submission dies.
                 regs = img_regions(clr_b, pack=0)
-                seg_a2.append(('vkCmdCopyBufferToImage', dict(
+                seg_a2.append(x2('vkCmdCopyBufferToImage', dict(
                     commandBuffer=V['cb'],
                     srcBuffer=cl_sbuf, dstImage=cl_img,
                     dstImageLayout=5, regionCount=len(regs),
@@ -10232,10 +10441,114 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                  for asp, bm, lc, bl, nl in
                                  clr['ranges']])))
                 regs = img_regions(clr_b, pack=1)
-                seg_a2.append(('vkCmdCopyImageToBuffer', dict(
+                seg_a2.append(x2('vkCmdCopyImageToBuffer', dict(
                     commandBuffer=V['cb'],
                     srcImage=cl_img, srcImageLayout=5,
                     dstBuffer=cl_rbuf, regionCount=len(regs),
+                    pRegions=[st('VkBufferImageCopy',
+                                 bufferOffset=r['bufferOffset'],
+                                 bufferRowLength=r['bufferRowLength'],
+                                 bufferImageHeight=r['bufferImageHeight'],
+                                 imageSubresource=st(
+                                     'VkImageSubresourceLayers',
+                                     aspectMask=r['sub'][0],
+                                     mipLevel=r['sub'][1],
+                                     baseArrayLayer=r['sub'][2],
+                                     layerCount=r['sub'][3]),
+                                 imageOffset=st('VkOffset3D', x=0,
+                                                y=0, z=0),
+                                 imageExtent=st('VkExtent3D',
+                                                width=r['ext'][0],
+                                                height=r['ext'][1],
+                                                depth=r['ext'][2]))
+                              for r in regs])))
+            if i2i:
+                # §12.3 C/5a-r2: base B2I uploads of pattern A -> image
+                # A and pattern B -> image B, then the A->B operation
+                # (CopyImage 2-region / BlitImage 1-region, base or
+                # promoted *2), then a base packed I2B readback of B.
+                # src layout 6, dst layout 7 (transitions are no-ops).
+                sub = dict(aspectMask=1, mipLevel=0, baseArrayLayer=0,
+                           layerCount=1)
+                for sbf, dimg, dlay in ((cl_sbuf, cl_img, 6),
+                                        (cl_sbuf2, cl_img2, 7)):
+                    regs = img_regions(i2i_a, pack=0)
+                    seg_a2.append(('vkCmdCopyBufferToImage', dict(
+                        commandBuffer=V['cb'], srcBuffer=sbf,
+                        dstImage=dimg, dstImageLayout=dlay,
+                        regionCount=len(regs),
+                        pRegions=[st('VkBufferImageCopy',
+                                     bufferOffset=r['bufferOffset'],
+                                     bufferRowLength=r['bufferRowLength'],
+                                     bufferImageHeight=
+                                     r['bufferImageHeight'],
+                                     imageSubresource=st(
+                                         'VkImageSubresourceLayers',
+                                         aspectMask=r['sub'][0],
+                                         mipLevel=r['sub'][1],
+                                         baseArrayLayer=r['sub'][2],
+                                         layerCount=r['sub'][3]),
+                                     imageOffset=st('VkOffset3D', x=0,
+                                                    y=0, z=0),
+                                     imageExtent=st('VkExtent3D',
+                                                    width=r['ext'][0],
+                                                    height=r['ext'][1],
+                                                    depth=r['ext'][2]))
+                                  for r in regs])))
+                if variant in ('i2i_copy', 'i2i_copy2'):
+                    # two regions: src(2,1) 5x3 -> dst(7,9) and
+                    # src(0,8) 4x4 -> dst(0,0)
+                    seg_a2.append(x2('vkCmdCopyImage', dict(
+                        commandBuffer=V['cb'], srcImage=cl_img,
+                        srcImageLayout=6, dstImage=cl_img2,
+                        dstImageLayout=7, regionCount=2,
+                        pRegions=[
+                            st('VkImageCopy',
+                               srcSubresource=st(
+                                   'VkImageSubresourceLayers', **sub),
+                               srcOffset=st('VkOffset3D', x=2, y=1,
+                                            z=0),
+                               dstSubresource=st(
+                                   'VkImageSubresourceLayers', **sub),
+                               dstOffset=st('VkOffset3D', x=7, y=9,
+                                            z=0),
+                               extent=st('VkExtent3D', width=5,
+                                         height=3, depth=1)),
+                            st('VkImageCopy',
+                               srcSubresource=st(
+                                   'VkImageSubresourceLayers', **sub),
+                               srcOffset=st('VkOffset3D', x=0, y=8,
+                                            z=0),
+                               dstSubresource=st(
+                                   'VkImageSubresourceLayers', **sub),
+                               dstOffset=st('VkOffset3D', x=0, y=0,
+                                            z=0),
+                               extent=st('VkExtent3D', width=4,
+                                         height=4, depth=1))])))
+                else:
+                    # blit: one unscaled unflipped region — src rect
+                    # (2,1)-(7,4) -> dst rect (7,9)-(12,12), filter 0
+                    seg_a2.append(x2('vkCmdBlitImage', dict(
+                        commandBuffer=V['cb'], srcImage=cl_img,
+                        srcImageLayout=6, dstImage=cl_img2,
+                        dstImageLayout=7, regionCount=1,
+                        pRegions=[st('VkImageBlit',
+                            srcSubresource=st(
+                                'VkImageSubresourceLayers', **sub),
+                            srcOffsets=[st('VkOffset3D', x=2, y=1, z=0),
+                                        st('VkOffset3D', x=7, y=4,
+                                           z=1)],
+                            dstSubresource=st(
+                                'VkImageSubresourceLayers', **sub),
+                            dstOffsets=[st('VkOffset3D', x=7, y=9, z=0),
+                                        st('VkOffset3D', x=12, y=12,
+                                           z=1)])],
+                        filter=0)))
+                regs = img_regions(i2i_b, pack=1)
+                seg_a2.append(('vkCmdCopyImageToBuffer', dict(
+                    commandBuffer=V['cb'], srcImage=cl_img2,
+                    srcImageLayout=7, dstBuffer=cl_rbuf,
+                    regionCount=len(regs),
                     pRegions=[st('VkBufferImageCopy',
                                  bufferOffset=r['bufferOffset'],
                                  bufferRowLength=r['bufferRowLength'],
@@ -10291,8 +10604,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     regionCount=1,
                     pRegions=[st('VkBufferCopy', srcOffset=0, dstOffset=0,
                                  size=BIG_XFER_SZ)])))
-            if variant in ('xfer_copy', 'xfer_big'):
-                seg_a2.append(('vkCmdCopyBuffer', dict(
+            if variant in ('xfer_copy', 'xfer_big', 'xfer_copy2',
+                           'xfer_copymix'):
+                seg_a2.append(x2('vkCmdCopyBuffer', dict(
                     commandBuffer=V['cb'],
                     srcBuffer=bufs[n_bind], dstBuffer=bufs[0],
                     regionCount=2,
@@ -10300,7 +10614,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         st('VkBufferCopy', srcOffset=4, dstOffset=12,
                            size=32),
                         st('VkBufferCopy', srcOffset=68, dstOffset=76,
-                           size=16)])))
+                           size=16)]),
+                    yes=variant in ('xfer_copy2', 'xfer_copymix')))
                 seg_a2.append(('vkCmdPipelineBarrier', dict(
                     commandBuffer=V['cb'],
                     srcStageMask=0x2000, dstStageMask=0x8,
@@ -10544,23 +10859,24 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                                 height=r['ext'][1],
                                                 depth=r['ext'][2]))
                               for r in regs])))
-            if variant in ('xfer_copy', 'xfer_big'):
+            if variant in ('xfer_copy', 'xfer_big', 'xfer_copy2',
+                           'xfer_copymix'):
                 # post-dispatch: fill a third buffer to its end, then
                 # copy the shader's output into the readback buffer
                 seg_a2.append(('vkCmdFillBuffer', dict(
                     commandBuffer=V['cb'], dstBuffer=bufs[n_bind + 1],
                     dstOffset=0, size=0xFFFFFFFFFFFFFFFF,
                     data=XFER_FILL_W)))
-                seg_a2.append(('vkCmdCopyBuffer', dict(
+                seg_a2.append(x2('vkCmdCopyBuffer', dict(
                     commandBuffer=V['cb'],
                     srcBuffer=bufs[1], dstBuffer=bufs[n_bind + 2],
                     regionCount=1,
                     pRegions=[st('VkBufferCopy', srcOffset=0,
                                  dstOffset=0, size=128)])))
-            elif variant == 'xfer_oob':
+            elif variant in ('xfer_oob', 'xfer_oob2'):
                 # dst extent past the buffer end -> the engine refuses
                 # before any write -> DEVICE_LOST
-                seg_a2.append(('vkCmdCopyBuffer', dict(
+                seg_a2.append(x2('vkCmdCopyBuffer', dict(
                     commandBuffer=V['cb'],
                     srcBuffer=bufs[0], dstBuffer=bufs[1],
                     regionCount=1,
@@ -10792,7 +11108,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             lost = variant in ('lostbuf', 'baddesc', 'nopipe',
                                'bindoob', 'worksink', 'descoob',
                                'updoob', 'layoutmix', 'deadpool',
-                               'xfer_oob', 'xfer_overlap', 'unbacked',
+                               'xfer_oob', 'xfer_oob2', 'xfer_overlap',
+                               'unbacked',
                                'badfmt', 'viewoob', 'kindmix',
                                'xfer_img_oob', 'unnorm', 'clear_oob',
                                'clear_ds_asp',
@@ -10815,12 +11132,14 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         rec(EK_APRCHK, sbase + 4 * j, w, w, 0)
                     note("B' gates: %d descriptor record words"
                          % (sbyt // 4))
-                if variant in ('xfer_copy', 'xfer_update', 'xfer_big'):
+                if variant in ('xfer_copy', 'xfer_update', 'xfer_big',
+                               'xfer_copy2', 'xfer_copymix'):
                     # §12.3 C/5a: the copy/update ran before the
                     # dispatch (barrier ordering) — the shader's
                     # expected output is the spirv_model run on the
                     # *modified* input image
-                    if variant in ('xfer_copy', 'xfer_big'):
+                    if variant in ('xfer_copy', 'xfer_big',
+                                   'xfer_copy2', 'xfer_copymix'):
                         inb = splice_bytes(vec['inits'][0], 12,
                                            XFER_STAGE_W, 4, 32)
                         inb = splice_bytes(inb, 76,
@@ -10855,7 +11174,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                             rec(EK_APRCHK, base_b + 4 * j,
                                 couts[k][j], couts[k][j],
                                 1 if ccls[k][j] == 'f' else 0)
-                    if variant in ('xfer_copy', 'xfer_big'):
+                    if variant in ('xfer_copy', 'xfer_big',
+                                   'xfer_copy2', 'xfer_copymix'):
                         # proof the copy landed: the input buffer's
                         # aperture image itself
                         base_b = blob_base[0]
@@ -10983,6 +11303,35 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                      % (variant, len(clr_exp),
                         ' + packed readback'
                         if not clr_refused else ''))
+
+            if i2i:
+                # §12.3 C/5a-r2: the I2I gates — image A's footprint is
+                # the uploaded pattern verbatim (the op only reads it);
+                # image B's is pattern B with the destination rectangles
+                # replaced by A's source texels (the guard elsewhere is
+                # B's own inverse pattern); the packed I2B readback must
+                # equal packed expected B.  Computed from the two
+                # patterns via img_dev_foot/img_i2i_words, not the
+                # model's transfer path.
+                i2i_regs = ([(2, 1, 7, 9, 5, 3), (0, 8, 0, 0, 4, 4)]
+                            if variant in ('i2i_copy', 'i2i_copy2')
+                            else [(2, 1, 7, 9, 5, 3)])
+                a_dev = img_dev_foot(model, i2i_init, i2i_im)
+                b_dev = img_dev_foot(model, i2i_initB, i2i_im)
+                b_exp = img_i2i_words(model, b_dev, a_dev, i2i_im,
+                                      i2i_regs)
+                W(TP_CHECK, CK_APR, len(a_dev), i2i_img_base)
+                for j, w in enumerate(a_dev):
+                    rec(EK_APRCHK, i2i_img_base + 4 * j, w, w, 0)
+                W(TP_CHECK, CK_APR, len(b_exp), i2i_img2_base)
+                for j, w in enumerate(b_exp):
+                    rec(EK_APRCHK, i2i_img2_base + 4 * j, w, w, 0)
+                pm = img_pack(b_exp, i2i_im)
+                W(TP_CHECK, CK_APR, len(pm), i2i_rb_base)
+                for j, w in enumerate(pm):
+                    rec(EK_APRCHK, i2i_rb_base + 4 * j, w, w, 0)
+                note("B' gates: i2i %s %d A words + %d B words + readback"
+                     % (variant, len(a_dev), len(b_exp)))
 
             if variant == 'poolreset':
                 # §12.3 D per-frame pool reset: alloc N sets, reset,
@@ -17621,8 +17970,10 @@ def main():
                          'lostbuf, baddesc, nopipe, pgfull, badmem, '
                          'bindoob, descoob, updoob, layoutmix, '
                          'deadpool, poolfull, worksink, multiwr, '
-                         'xfer_copy, '
-                         'xfer_update, xfer_oob, xfer_overlap')
+                         'xfer_copy, xfer_copy2, xfer_copymix, '
+                         'xfer_update, xfer_oob, xfer_oob2, '
+                         'xfer_overlap, clear_rgba8_c2, i2i_copy, '
+                         'i2i_copy2, i2i_blit, i2i_blit2')
     ap.add_argument('--print', dest='print_cmd', metavar='CMD')
     ap.add_argument('--dump-json', metavar='FILE',
                     help='write every generated instance (args+words) as '

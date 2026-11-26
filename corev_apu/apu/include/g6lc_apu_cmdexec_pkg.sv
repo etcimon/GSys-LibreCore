@@ -127,4 +127,29 @@ package g6lc_apu_cmdexec_pkg;
     APU_CMDEXEC_FENCE_DEVICE_LOST = 2'd2
   } apu_cmdexec_fence_e;
 
+  // XFER-class record types: shared by cmdexec operand resolution and
+  // vgtop routing.  ResolveImage(_2) is deliberately excluded — a
+  // multisample resolve is not an I2I copy.
+  function automatic logic apu_cmdexec_is_xfer(input logic [31:0] ctype);
+    case (ctype)
+      32'(g6lc_apu_vn_pkg::APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT),
+      32'(g6lc_apu_vn_pkg::APU_VN_TYPE_VK_CMD_COPY_BUFFER_2_EXT),
+      32'(g6lc_apu_vn_pkg::APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT),
+      32'(g6lc_apu_vn_pkg::APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT),
+      32'(g6lc_apu_vn_pkg::APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT),
+      32'(g6lc_apu_vn_pkg::APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_2_EXT),
+      32'(g6lc_apu_vn_pkg::APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT),
+      32'(g6lc_apu_vn_pkg::APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_2_EXT),
+      32'(g6lc_apu_vn_pkg::APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT),
+      32'(g6lc_apu_vn_pkg::APU_VN_TYPE_VK_CMD_COPY_IMAGE_2_EXT),
+      32'(g6lc_apu_vn_pkg::APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT),
+      32'(g6lc_apu_vn_pkg::APU_VN_TYPE_VK_CMD_BLIT_IMAGE_2_EXT),
+      32'(g6lc_apu_vn_pkg::APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT),
+      32'(g6lc_apu_vn_pkg::APU_VN_TYPE_VK_CMD_CLEAR_DEPTH_STENCIL_IMAGE_EXT):
+        return 1'b1;
+      default:
+        return 1'b0;
+    endcase
+  endfunction
+
 endpackage

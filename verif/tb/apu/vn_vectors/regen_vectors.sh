@@ -44,6 +44,11 @@ done
 # positive variants on bufcopy_1
 python3 $G --compute-session ue_cpos_multiwr_1  bufcopy_1 --variant multiwr
 python3 $G --compute-session ue_cpos_xfer_copy_1 bufcopy_1 --variant xfer_copy
+# §12.3 C/5a-r2: promoted *2 transfer forms — same operands through the
+# Info2/region2 wire structs; base and promoted share every gate
+python3 $G --compute-session ue_cpos_xfer_copy2_1 bufcopy_1 --variant xfer_copy2
+python3 $G --compute-session ue_cpos_xfer_copymix_1 bufcopy_1 --variant xfer_copymix
+python3 $G --compute-session ue_cneg_xfer_oob2_1 bufcopy_1 --variant xfer_oob2
 # vkUpdateDescriptorSets COPIES (dcopy): writes land in staging twins and
 # pDescriptorCopies moves every element into the real sets — the first
 # vectors with descriptorCopyCount > 0 (array binds -> non-zero offsets)
@@ -104,6 +109,13 @@ python3 $G --compute-session ue_cneg_clear_ds_asp_1 bufcopy_1 --variant clear_ds
 # T1: a scaled blit is refused before any write (unscaled blits run as I2I)
 python3 $G --compute-session ue_cneg_blit_scaled_1 texfetch_1 --variant blit_scaled
 python3 $G --compute-session ue_cpos_blit_id_1 texfetch_1 --variant blit_id
+# §12.3 C/5a-r2: clear with B2I/I2B promoted to *2 (clear stays base)
+python3 $G --compute-session ue_cpos_clear_rgba8_c2_1 bufcopy_1 --variant clear_rgba8_c2
+# two-image I2I copy/blit sessions (base + promoted *2), clear scaffolding
+python3 $G --compute-session ue_cpos_i2i_copy_1 bufcopy_1 --variant i2i_copy
+python3 $G --compute-session ue_cpos_i2i_copy2_1 bufcopy_1 --variant i2i_copy2
+python3 $G --compute-session ue_cpos_i2i_blit_1 bufcopy_1 --variant i2i_blit
+python3 $G --compute-session ue_cpos_i2i_blit2_1 bufcopy_1 --variant i2i_blit2
 python3 $G --compute-session ue_cpos_ctxkill_reuse_1 bufcopy_1 \
     --variant ctxkill_reuse
 
