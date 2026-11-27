@@ -593,12 +593,27 @@ assign mst_req_o  = slv_req_i;
   logic                          pf_launch, pf_launch_ok, pf_capture;
   logic                          pf_probe_fire, pf_alloc;
   logic                          pf_mshr_reserve_full, pf_retry_mshr;
+  logic                          pf_hint_in;
   logic                          pf_way_ok;
+  logic [NUM_SETS-1:0]           pf_fullset_q, pf_fullset_d;
+  logic                          pf_cand_fullset, pf_probe_capture, pf_fullset_skip;
   logic [WAY_W-1:0]              pf_way;
   logic [SET_ASSOC-1:0]          pf_pend_way;
   logic [AXI_ADDR_WIDTH-1:0]     pf_launch_addr;
   logic                          tag_wpf, tag_hit_pf;
   logic [MSHR_DEPTH-1:0]         fill_pf_q, fill_pf_d;
+  // Hop-by-hop prefetch provenance for the fill outstanding at each MSHR
+  // entry: set either for a locally generated prefetch fill or for a demand
+  // fill whose upstream request already carried the hint. The bit is emitted
+  // on the downstream fill AR so lower prefetchers do not train on traffic
+  // that was itself prefetch-generated.
+  logic [MSHR_DEPTH-1:0]         fill_hint_q, fill_hint_d;
+  // Experimental early-serve bookkeeping: set once a demand fill's primary
+  // burst has been forwarded before whole-line retirement. Prototype only.
+  logic [MSHR_DEPTH-1:0]         fill_eserved_q, fill_eserved_d;
+  logic                          serve_early_q, serve_early_d;
+  logic                          early_pend;
+  logic [BEAT_IDX_W:0]           early_base, early_need;
   logic                          head_pf, pf_retire;
 
   // Storamic W1 whole-cache invalidation walk state (1 set/cycle once idle).
@@ -846,6 +861,7 @@ assign mst_req_o  = slv_req_i;
   logic [2:0]                size_q, size_d;
   logic [3:0]                cache_q, cache_d;
   logic [2:0]                prot_q, prot_d;
+  logic [AXI_USER_WIDTH-1:0] user_q, user_d;
   logic [5:0]                atop_q, atop_d;  // AXI ATOP (AMOs / AMOCAS)
   logic                      lock_q, lock_d;
   logic                      burst_incr_q, burst_incr_d;
@@ -948,12 +964,18 @@ assign mst_req_o  = slv_req_i;
   // also re-train on first demand hits to prefetched lines (l2_pf_useful_o,
   // self-clearing in g6lc_l2_tag) so confirmed streams stay locked and sustain
   // >80% (90%+) steady-state L3 hit rate instead of breaking stride after each hit.
-  assign pf_train_miss   = PF_EN && mshr_alloc && (state_q == S_TAG);
+  // AXI user bit 0 is reserved inside the cache hierarchy as a prefetch
+  // provenance hint. Demand requests must drive it low; a hinted fill is
+  // still cached and served normally, but it must not train a downstream
+  // stream prefetcher. This prevents L2 prefetch lookahead from recursively
+  // amplifying L3 lookahead while preserving training from true demand.
+  assign pf_hint_in     = 1'b0;  // clean early-serve witness: provenance hints disabled
+  assign pf_train_miss  = PF_EN && mshr_alloc && (state_q == S_TAG) && !pf_hint_in;
 `ifdef G6LC_MUT_L3_PF_NO_HIT_RETRAIN
-  assign pf_train        = PF_EN && mshr_alloc && (state_q == S_TAG);
+  assign pf_train        = PF_EN && mshr_alloc && (state_q == S_TAG) && !pf_hint_in;
 `else
-  assign pf_train        = PF_EN && ((mshr_alloc && (state_q == S_TAG)) ||
-                                     (PF_EVICT_OK && l2_pf_useful_o));
+  assign pf_train        = PF_EN && ((mshr_alloc && (state_q == S_TAG) && !pf_hint_in) ||
+                                     (PF_EVICT_OK && l2_pf_useful_o && !pf_hint_in));
 `endif
 
   // --------------------
@@ -1078,11 +1100,27 @@ assign mst_req_o  = slv_req_i;
   assign head_pf        = PF_EN && (fifo_cnt_q != '0) && head_pf_bit;
   assign serve_pend     = (fifo_cnt_q != '0) &&
                           (head_state == F_READY) &&
-                          !(head_pf && !mshr_waiter_valid);
+                          !((head_pf || fill_eserved_q[head_idx]) && !mshr_waiter_valid);
   assign pf_retire      = (fifo_cnt_q != '0) &&
                           (head_state == F_READY) &&
-                          head_pf && !mshr_waiter_valid &&
+                          (head_pf || fill_eserved_q[head_idx]) && !mshr_waiter_valid &&
                           (state_q != S_SERVE) && (state_q != S_SERVE_POP);
+  // Experimental: once every beat needed by the primary burst has been
+  // collected, forward that burst without waiting for the rest of the line.
+  // Restricted to an in-line demand burst; wrap/cross-line shapes keep the
+  // conservative whole-fill path. fill_bcnt is a count of contiguous line
+  // beats because FILL_ID bursts return in issue order.
+  assign early_base = {1'b0, head_addr[OFF_BITS-1:BEAT_ADDR_LSB]};
+  assign early_need = early_base + (BEAT_IDX_W + 1)'(head_len) + 1'b1;
+  assign early_pend = (fifo_cnt_q != '0) &&
+                      (head_state == F_FILLING) && collect_active &&
+                      (collect_idx == head_idx) &&
+                      !head_pf_bit && !fill_eserved_q[head_idx] &&
+                      !fill_kill_q[head_idx] &&
+                      (fill_ferr_q[head_idx] == axi_pkg::RESP_OKAY) &&
+                      (head_len < 8'(BEATS)) &&
+                      (early_need <= (BEAT_IDX_W + 1)'(BEATS)) &&
+                      (fill_bcnt_q[head_idx] >= early_need);
   // Postable iff non-atomic, unlocked and outside the reserved fill id —
   // ATOP/lock/FILL_ID-alias writes keep the blocking S_BYPASS_AW→W→B path
   // but still hold a (blocking) tracker entry for uniform B routing.
@@ -1122,6 +1160,7 @@ assign mst_req_o  = slv_req_i;
                        (state_q == S_IDLE && mst_resp_i.r_valid &&
                         !mst_r_ot_q && !is_fill_beat && !rdtrk_head_match);
   assign fsm_wants_r = (state_q == S_HIT_WAIT) || (state_q == S_SERVE_POP) ||
+                       (early_pend && !rdtrk_probe_match[1] && (state_q == S_IDLE)) ||
                        (serve_pend && !rdtrk_probe_match[1] &&
                         ((state_q == S_IDLE) ||
                          (state_q == S_TAG) ||
@@ -1423,11 +1462,21 @@ assign mst_req_o  = slv_req_i;
                          !(WRITE_UPDATE && (state_q == S_IDLE) &&
                            (state_d == S_BYPASS_AW));
   assign pf_launch_addr = pf_probe_q ? pf_addr_q : pf_cand_line;
-  assign pf_capture    = pf_cand_vld && !pf_probe_q && pf_launch_ok;
+  // Once a probe proves that every way in a set is physically valid and
+  // PF_EVICT_OK=0, later prefetch candidates for that set cannot allocate.
+  // Consume those candidates without spending another tag/MSHR/WTRK probe.
+  // The bit is cleared by any invalidation matching the set (conservatively,
+  // even if the invalidate misses) and by the inval-all walk. Only a probe
+  // with all physical valid bits set marks the set, so pending-fill cases do
+  // not become sticky false positives.
+  assign pf_cand_fullset = 1'b0;  // clean early-serve witness: full-set suppression disabled
+  assign pf_capture      = pf_cand_vld && !pf_probe_q && pf_launch_ok;
+  assign pf_probe_capture = pf_capture && !pf_cand_fullset;
+  assign pf_fullset_skip = pf_capture && pf_cand_fullset;
   // Relaunch each cycle while armed: same-index re-reads are idempotent, and
   // keeping pf_probe_fire out of the launch term severs the combinational
   // pf_launch -> tag row_valid -> probe -> launch loop under TAG_SRAM.
-  assign pf_launch     = pf_launch_ok && (pf_capture || pf_probe_q);
+  assign pf_launch     = pf_launch_ok && (pf_probe_capture || pf_probe_q);
   assign pf_probe_fire = PF_EN && pf_probe_q && (state_q == S_IDLE) &&
                          pf_row_q && tag_row_valid;
   assign pf_mshr_reserve_full =
@@ -1588,7 +1637,15 @@ assign mst_req_o  = slv_req_i;
     fill_bcnt_d   = fill_bcnt_q;
     fill_ferr_d   = fill_ferr_q;
     fill_pf_d     = fill_pf_q;
+    fill_hint_d   = fill_hint_q;
+    fill_eserved_d = fill_eserved_q;
+    serve_early_d = serve_early_q;
     pf_probe_d    = pf_probe_q;
+    pf_fullset_d  = pf_fullset_q;
+    if (tag_match_inval)
+      pf_fullset_d[tag_match_index] = 1'b0;
+    if (inval_all_act_q)
+      pf_fullset_d[inval_all_idx_q] = 1'b0;
     // Recomputed every cycle: 1 when the last tag launch was the pf row and
     // an inval-match did not steal it. Only read under TAG_SRAM.
     pf_row_d      = pf_launch && !tag_match_inval;
@@ -1629,6 +1686,7 @@ assign mst_req_o  = slv_req_i;
     size_d      = size_q;
     cache_d     = cache_q;
     prot_d      = prot_q;
+    user_d      = user_q;
     atop_d      = atop_q;
     lock_d      = lock_q;
     burst_incr_d = burst_incr_q;
@@ -1674,6 +1732,20 @@ assign mst_req_o  = slv_req_i;
           // A deferred self-invalidation must land before any later request can
           // look up the line it covers.
           state_d = S_IDLE;
+        end else if (early_pend && !prefer_write && r_fsm_start_ok &&
+                     !rdtrk_probe_match[1]) begin
+          // Experimental critical-word forwarding: the head demand fill is
+          // still collecting, but every beat of its primary burst is already
+          // in the fill buffer. Serve just that burst; the entry remains
+          // allocated until the whole fill retires.
+          serve_idx_d   = head_idx;
+          serve_addr_d  = head_addr;
+          serve_id_d    = mshr_complete_id;
+          serve_len_d   = head_len;
+          serve_beat_d  = '0;
+          serve_intr_d  = 1'b0;
+          serve_early_d = 1'b1;
+          state_d       = S_SERVE;
         end else if (!slv_accept_block && slv_req_i.ar_valid && (serve_turn_q || !serve_pend) && !prefer_write) begin
           // Prefer reads (MLP); accept write when no AR
           slv_resp_o.ar_ready = 1'b1;
@@ -1683,6 +1755,7 @@ assign mst_req_o  = slv_req_i;
           size_d      = slv_req_i.ar.size;
           cache_d     = slv_req_i.ar.cache;
           prot_d      = slv_req_i.ar.prot;
+          user_d      = slv_req_i.ar.user;
           atop_d      = '0;
           // Exclusive LR (AxLOCK) must reach g6lc_axi_lrsc. Zeroing lock_d
           // here made LDEX a plain AR; STEX then saw no reservation (Vg6lc
@@ -1715,9 +1788,10 @@ assign mst_req_o  = slv_req_i;
           serve_len_d  = head_len;
           serve_beat_d = '0;
           serve_intr_d = 1'b0;
+          serve_early_d = 1'b0;
           // A pf fill has no primary burst: waitered pf heads start at the
           // waiter pop; the waitless case is retired inline (pf_retire).
-          state_d      = head_pf ? S_SERVE_POP : S_SERVE;
+          state_d      = (head_pf || fill_eserved_q[head_idx]) ? S_SERVE_POP : S_SERVE;
         end else if (!slv_accept_block && slv_req_i.aw_valid && wtrk_aw_ok) begin
           // Writes: write-through bypass (always push to memory); optional allocate
           slv_resp_o.aw_ready = 1'b1;
@@ -1727,6 +1801,7 @@ assign mst_req_o  = slv_req_i;
           size_d      = slv_req_i.aw.size;
           cache_d     = slv_req_i.aw.cache;
           prot_d      = slv_req_i.aw.prot;
+          user_d      = slv_req_i.aw.user;
           // Preserve ATOP/lock — dropping them turns AMOCAS into a plain store
           // and the HPDCACHE UC FSM hangs waiting for the atomic R beat.
           atop_d      = slv_req_i.aw.atop;
@@ -1768,7 +1843,8 @@ assign mst_req_o  = slv_req_i;
             serve_len_d=head_len;
             serve_beat_d='0;
             serve_intr_d=1'b1;
-            state_d=head_pf ? S_SERVE_POP : S_SERVE;
+            serve_early_d=1'b0;
+            state_d=(head_pf || fill_eserved_q[head_idx]) ? S_SERVE_POP : S_SERVE;
           end
         end else if(tag_hit)begin
           l2_hit_o = 1'b1;
@@ -1823,6 +1899,8 @@ assign mst_req_o  = slv_req_i;
                 fill_bcnt_d[mshr_alloc_idx]  = '0;
                 fill_ferr_d[mshr_alloc_idx]  = axi_pkg::RESP_OKAY;
                 fill_pf_d[mshr_alloc_idx]    = 1'b0;
+                fill_hint_d[mshr_alloc_idx]  = pf_hint_in;
+                fill_eserved_d[mshr_alloc_idx] = 1'b0;
               end
               state_d = S_IDLE;
             end else if (serve_pend && r_fsm_start_ok &&
@@ -1838,7 +1916,8 @@ assign mst_req_o  = slv_req_i;
               serve_len_d  = head_len;
               serve_beat_d = '0;
               serve_intr_d = 1'b1;
-              state_d      = head_pf ? S_SERVE_POP : S_SERVE;
+              serve_early_d = 1'b0;
+              state_d      = (head_pf || fill_eserved_q[head_idx]) ? S_SERVE_POP : S_SERVE;
             end
             // else stall in S_TAG until MSHR free / evict accept / way frees
           end
@@ -1892,9 +1971,17 @@ assign mst_req_o  = slv_req_i;
         if (slv_req_i.r_ready) begin
           if (serve_beat_q == serve_len_q) begin
             serve_beat_d = '0;
+            if (serve_early_q) begin
+              // Primary burst is complete, but the fill entry stays live
+              // until the whole line is collected/installed. Waiters, if
+              // any, are served only after the conservative F_READY point.
+              fill_eserved_d[serve_idx_q] = 1'b1;
+              serve_early_d = 1'b0;
+              serve_intr_d  = 1'b0;
+              state_d       = S_IDLE;
             // Serve any same-line reader that attached before retiring the
             // MSHR entry; the entry must stay valid until then.
-            if (mshr_waiter_valid) begin
+            end else if (mshr_waiter_valid) begin
               state_d = S_SERVE_POP;
             end else begin
               mshr_complete = 1'b1;
@@ -1970,7 +2057,8 @@ assign mst_req_o  = slv_req_i;
           serve_len_d=head_len;
           serve_beat_d='0;
           serve_intr_d=1'b1;
-          state_d=head_pf ? S_SERVE_POP : S_SERVE;
+          serve_early_d=1'b0;
+          state_d=(head_pf || fill_eserved_q[head_idx]) ? S_SERVE_POP : S_SERVE;
         end
       end
 
@@ -2144,6 +2232,7 @@ assign mst_req_o  = slv_req_i;
       mst_req_o.ar.burst = axi_pkg::BURST_INCR;
       mst_req_o.ar.cache = 4'b1111;
       mst_req_o.ar.prot  = 3'b000;
+      mst_req_o.ar.user  = AXI_USER_WIDTH'(fill_hint_q[issue_idx]);
       if (mst_resp_i.ar_ready) begin
         fill_state_d[issue_idx] = F_FILLING;
         issued_cnt_d            = issued_cnt_d + 1'b1;
@@ -2305,7 +2394,7 @@ assign mst_req_o  = slv_req_i;
     // ---- T9h/M5 prefetch admission (runs after the case so the demand
     // FSM's final state_d is visible; the pf probes mux tag/MSHR/tracker
     // ports only on cycles the demand path does not own them) ----
-    if (pf_capture) begin
+    if (pf_probe_capture) begin
       pf_probe_d = 1'b1;
       pf_addr_d  = pf_cand_line;
     end
@@ -2336,6 +2425,8 @@ assign mst_req_o  = slv_req_i;
         fill_bcnt_d[mshr_alloc_idx]  = '0;
         fill_ferr_d[mshr_alloc_idx]  = axi_pkg::RESP_OKAY;
         fill_pf_d[mshr_alloc_idx]    = 1'b1;
+        fill_hint_d[mshr_alloc_idx]  = 1'b0;  // clean early-serve witness: no downstream hint
+        fill_eserved_d[mshr_alloc_idx] = 1'b0;
         l2_pf_issue_o                = 1'b1;
         pf_probe_d                   = 1'b0;
       end else if (pf_retry_mshr) begin
@@ -2347,6 +2438,9 @@ assign mst_req_o  = slv_req_i;
         pf_probe_d = 1'b1;
       end else begin
         l2_pf_drop_o = 1'b1;
+        if (!PF_EVICT_OK && !tag_hit && !mshr_lookup_hit &&
+            !wtrk_line0_match && (&tag_way_valid))
+          pf_fullset_d[idx_of(pf_addr_q)] = 1'b1;
         pf_probe_d = 1'b0;
       end
     end
@@ -2392,6 +2486,7 @@ assign mst_req_o  = slv_req_i;
       size_q      <= '0;
       cache_q     <= '0;
       prot_q      <= '0;
+      user_q      <= '0;
       atop_q      <= '0;
       lock_q      <= 1'b0;
       burst_incr_q <= 1'b0;
@@ -2424,7 +2519,11 @@ assign mst_req_o  = slv_req_i;
       fill_act_q  <= '0;
       fill_kill_q <= '0;
       fill_pf_q   <= '0;
+      fill_hint_q <= '0;
+      fill_eserved_q <= '0;
+      serve_early_q <= 1'b0;
       pf_probe_q  <= 1'b0;
+      pf_fullset_q <= '0;
       pf_row_q    <= 1'b0;
       pf_addr_q   <= '0;
       fifo_rd_q   <= '0;
@@ -2453,6 +2552,7 @@ assign mst_req_o  = slv_req_i;
       size_q      <= size_d;
       cache_q     <= cache_d;
       prot_q      <= prot_d;
+      user_q      <= user_d;
       atop_q      <= atop_d;
       lock_q      <= lock_d;
       burst_incr_q <= burst_incr_d;
@@ -2485,7 +2585,11 @@ assign mst_req_o  = slv_req_i;
       fill_act_q  <= fill_act_d;
       fill_kill_q <= fill_kill_d;
       fill_pf_q   <= fill_pf_d;
+      fill_hint_q <= fill_hint_d;
+      fill_eserved_q <= fill_eserved_d;
+      serve_early_q <= serve_early_d;
       pf_probe_q  <= pf_probe_d;
+      pf_fullset_q <= pf_fullset_d;
       pf_row_q    <= pf_row_d;
       pf_addr_q   <= pf_addr_d;
       fifo_rd_q   <= fifo_rd_d;
