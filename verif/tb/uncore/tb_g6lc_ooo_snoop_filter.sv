@@ -11,7 +11,13 @@ module tb_g6lc_ooo_snoop_filter;
   logic [CW-1:0] alloc_core = 0;
   logic alloc_ready, lookup_ready, result_valid, ready;
   logic [NC-1:0] present;
-  logic [NC-1:0] held[4*NE];
+  logic [NC-1:0] held[NE];
+
+  function automatic int unsigned sfh(input int line_id);
+    logic [63:0] a;
+    a = 64'h1000 + 64'(line_id) * 16;
+    return int'(a[4 +: 3] ^ a[7 +: 3]);
+  endfunction
   bit negative;
 
   g6lc_ooo_snoop_filter #(.NR_CORES(NC), .NR_ENTRIES(NE), .LINE_BYTES(16)) dut (
@@ -33,7 +39,7 @@ module tb_g6lc_ooo_snoop_filter;
     #1;
     if (!alloc_ready) $fatal(1, "SIG_ALLOC_READY");
     tick();
-    held[line_id][core] = 1;
+    held[sfh(line_id)][core] = 1;
     alloc_valid = 0;
   endtask
 
@@ -45,9 +51,9 @@ module tb_g6lc_ooo_snoop_filter;
     if (!lookup_ready) $fatal(1, "SIG_LOOKUP_READY");
     tick();
     observed = negative ? '0 : present;
-    if (!result_valid || (held[line_id] & ~observed) != '0)
-      $fatal(1, "SIG_SHARER_LOST line=%0d expected=%b got=%b", line_id, held[line_id], observed);
-    if (exact && observed != held[line_id]) $fatal(1, "SIG_PRECISION");
+    if (!result_valid || (held[sfh(line_id)] & ~observed) != '0)
+      $fatal(1, "SIG_SHARER_LOST line=%0d expected=%b got=%b", line_id, held[sfh(line_id)], observed);
+    if (exact && observed != held[sfh(line_id)]) $fatal(1, "SIG_PRECISION");
     lookup_valid = 0;
   endtask
 
@@ -85,7 +91,7 @@ module tb_g6lc_ooo_snoop_filter;
       #1;
       if (!alloc_ready) $fatal(1, "SIG_RETRY_READY");
       tick();
-      held[1][NC-1] = 1;
+      held[sfh(1)][NC-1] = 1;
       alloc_valid = 0;
       query(1, 1);
       for (int n = 0; n < 192; n++) begin

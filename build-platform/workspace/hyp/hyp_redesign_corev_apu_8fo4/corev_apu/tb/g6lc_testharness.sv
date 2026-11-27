@@ -2491,6 +2491,7 @@ module g6lc_testharness #(
   //pragma translate_off
   longint unsigned mc_cnt_l2_hit, mc_cnt_l2_miss, mc_cnt_l2_bypass,
                    mc_cnt_l3_hit, mc_cnt_l3_miss,
+                   mc_cnt_l1_acc, mc_cnt_l1_miss,
                    mc_cnt_l2_selfinv, mc_cnt_l3_selfinv,
                    mc_cnt_l2_wupd, mc_cnt_l3_wupd,
                    mc_cnt_l2_wtrk_full, mc_cnt_l2_line_hold,
@@ -2738,8 +2739,47 @@ module g6lc_testharness #(
     assign mc_l3_pf_dway_obs = 1'b0;
     assign mc_l3_pf_dmshr_obs = 1'b0;
   end
+  // L1 D$ lookup census. Accesses are core-side request grants on the three
+  // architectural ports (PTW/load/store as presented by g6lc_core). Misses are
+  // per-port miss-interface acceptances inside the WT D$, so a replayed or
+  // merged demand miss still counts as a missing lookup rather than only as a
+  // newly allocated MSHR entry. This is observability only; the hierarchy tap
+  // is compiled out for synthesis by the surrounding translate_off region.
+  logic [NR_CORES-1:0][1:0] mc_l1_acc_cnt_obs, mc_l1_miss_cnt_obs;
+  int unsigned mc_l1_acc_inc, mc_l1_miss_inc;
+  for (genvar c = 0; c < NR_CORES; c++) begin : gen_mc_l1_tap
+    if (!G6LCCfg.EnableAccelerator && (G6LCCfg.DCacheType == config_pkg::WT)) begin : gen_wt_tap
+      assign mc_l1_acc_cnt_obs[c] =
+          ((i_cluster.gen_core[c].i_g6lc.gen_std.i_g6lc.dcache_req_ports_ex_cache[0].data_req &&
+            i_cluster.gen_core[c].i_g6lc.gen_std.i_g6lc.dcache_req_ports_cache_ex[0].data_gnt) ? 2'd1 : 2'd0) +
+          ((i_cluster.gen_core[c].i_g6lc.gen_std.i_g6lc.dcache_req_ports_ex_cache[1].data_req &&
+            i_cluster.gen_core[c].i_g6lc.gen_std.i_g6lc.dcache_req_ports_cache_ex[1].data_gnt) ? 2'd1 : 2'd0) +
+          ((i_cluster.gen_core[c].i_g6lc.gen_std.i_g6lc.dcache_req_ports_ex_cache[2].data_req &&
+            i_cluster.gen_core[c].i_g6lc.gen_std.i_g6lc.dcache_req_ports_cache_ex[2].data_gnt) ? 2'd1 : 2'd0);
+      assign mc_l1_miss_cnt_obs[c] =
+          ((i_cluster.gen_core[c].i_g6lc.gen_std.i_g6lc.gen_cache_wt.i_cache_subsystem.i_wt_dcache.miss_req[0] &&
+            i_cluster.gen_core[c].i_g6lc.gen_std.i_g6lc.gen_cache_wt.i_cache_subsystem.i_wt_dcache.miss_ack[0]) ? 2'd1 : 2'd0) +
+          ((i_cluster.gen_core[c].i_g6lc.gen_std.i_g6lc.gen_cache_wt.i_cache_subsystem.i_wt_dcache.miss_req[1] &&
+            i_cluster.gen_core[c].i_g6lc.gen_std.i_g6lc.gen_cache_wt.i_cache_subsystem.i_wt_dcache.miss_ack[1]) ? 2'd1 : 2'd0) +
+          ((i_cluster.gen_core[c].i_g6lc.gen_std.i_g6lc.gen_cache_wt.i_cache_subsystem.i_wt_dcache.miss_req[3] &&
+            i_cluster.gen_core[c].i_g6lc.gen_std.i_g6lc.gen_cache_wt.i_cache_subsystem.i_wt_dcache.miss_ack[3]) ? 2'd1 : 2'd0);
+    end else begin : gen_no_wt_tap
+      assign mc_l1_acc_cnt_obs[c]  = '0;
+      assign mc_l1_miss_cnt_obs[c] = '0;
+    end
+  end
+  always_comb begin
+    mc_l1_acc_inc  = 0;
+    mc_l1_miss_inc = 0;
+    for (int c = 0; c < NR_CORES; c++) begin
+      mc_l1_acc_inc  += mc_l1_acc_cnt_obs[c];
+      mc_l1_miss_inc += mc_l1_miss_cnt_obs[c];
+    end
+  end
   always_ff @(posedge clk_i) begin
     if (rst_ni) begin
+      mc_cnt_l1_acc    <= mc_cnt_l1_acc    + mc_l1_acc_inc;
+      mc_cnt_l1_miss   <= mc_cnt_l1_miss   + mc_l1_miss_inc;
       mc_cnt_l2_hit    <= mc_cnt_l2_hit    + mc_l2_hit_obs;
       mc_cnt_l2_miss   <= mc_cnt_l2_miss   + mc_l2_miss;
       mc_cnt_l2_bypass <= mc_cnt_l2_bypass + mc_l2_bypass_obs;
@@ -2799,6 +2839,8 @@ module g6lc_testharness #(
       mc_cnt_l3_pf_dway <= mc_cnt_l3_pf_dway + mc_l3_pf_dway_obs;
       mc_cnt_l3_pf_dmshr <= mc_cnt_l3_pf_dmshr + mc_l3_pf_dmshr_obs;
     end else begin
+      mc_cnt_l1_acc    <= '0;
+      mc_cnt_l1_miss   <= '0;
       mc_cnt_l2_hit    <= '0;
       mc_cnt_l2_miss   <= '0;
       mc_cnt_l2_bypass <= '0;
@@ -3024,7 +3066,7 @@ module g6lc_testharness #(
                c, mc_gap_max[c], MC_GAP_LIMIT, mc_last_wfi[c]);
     if (mc_any_hung)
       $display("*** [mc_verdict] FAIL: a core ran and then stopped retiring (exit code 126)");
-    $display("*** [mc_cache] l2_hit=%0d l2_miss=%0d l2_bypass=%0d l3_hit=%0d l3_miss=%0d l2_selfinv=%0d l3_selfinv=%0d l2_wupd=%0d l3_wupd=%0d l2_wtrk_full=%0d l2_line_hold=%0d l2_posted=%0d l2_rdtrk=%0d l2_hold_r1=%0d l2_hold_r1_wu=%0d l2_hold_r2=%0d hub_aw_sc_collide=%0d hub_ar_hold=%0d hub_aw_hold_slot=%0d hub_aw_hold_other=%0d dram_latency=%0d l2_pf_issue=%0d l2_pf_useful=%0d l2_pf_drop=%0d l3_pf_issue=%0d l3_pf_useful=%0d l3_pf_drop=%0d l3_pf_cand=%0d l3_pf_wait=%0d l3_pf_noport=%0d l3_pf_probebusy=%0d l3_pf_dtag=%0d l3_pf_dinflt=%0d l3_pf_dwtrk=%0d l3_pf_dway=%0d l3_pf_dmshr=%0d l3_pf_usehit=%0d l3_pf_usemerge=%0d l2_mshr_full=%0d l3_pf_quietblk=%0d l2_pf_dtag=%0d l2_pf_dinflt=%0d l2_pf_dwtrk=%0d l2_pf_dway=%0d l2_pf_dmshr=%0d",
+    $display("*** [mc_cache] l2_hit=%0d l2_miss=%0d l2_bypass=%0d l3_hit=%0d l3_miss=%0d l2_selfinv=%0d l3_selfinv=%0d l2_wupd=%0d l3_wupd=%0d l2_wtrk_full=%0d l2_line_hold=%0d l2_posted=%0d l2_rdtrk=%0d l2_hold_r1=%0d l2_hold_r1_wu=%0d l2_hold_r2=%0d hub_aw_sc_collide=%0d hub_ar_hold=%0d hub_aw_hold_slot=%0d hub_aw_hold_other=%0d dram_latency=%0d l2_pf_issue=%0d l2_pf_useful=%0d l2_pf_drop=%0d l3_pf_issue=%0d l3_pf_useful=%0d l3_pf_drop=%0d l3_pf_cand=%0d l3_pf_wait=%0d l3_pf_noport=%0d l3_pf_probebusy=%0d l3_pf_dtag=%0d l3_pf_dinflt=%0d l3_pf_dwtrk=%0d l3_pf_dway=%0d l3_pf_dmshr=%0d l3_pf_usehit=%0d l3_pf_usemerge=%0d l2_mshr_full=%0d l3_pf_quietblk=%0d l2_pf_dtag=%0d l2_pf_dinflt=%0d l2_pf_dwtrk=%0d l2_pf_dway=%0d l2_pf_dmshr=%0d l1_acc=%0d l1_miss=%0d",
              mc_cnt_l2_hit, mc_cnt_l2_miss, mc_cnt_l2_bypass, mc_cnt_l3_hit, mc_cnt_l3_miss,
              mc_cnt_l2_selfinv, mc_cnt_l3_selfinv, mc_cnt_l2_wupd, mc_cnt_l3_wupd,
              mc_cnt_l2_wtrk_full, mc_cnt_l2_line_hold, mc_cnt_l2_posted,
@@ -3038,7 +3080,7 @@ module g6lc_testharness #(
              mc_cnt_l3_pf_dway, mc_cnt_l3_pf_dmshr,
              mc_cnt_l3_pf_usehit, mc_cnt_l3_pf_usemerge, mc_cnt_l2_mshr_full, mc_cnt_l3_pf_quietblk,
              mc_cnt_l2_pf_dtag, mc_cnt_l2_pf_dinflt, mc_cnt_l2_pf_dwtrk,
-             mc_cnt_l2_pf_dway, mc_cnt_l2_pf_dmshr);
+             mc_cnt_l2_pf_dway, mc_cnt_l2_pf_dmshr, mc_cnt_l1_acc, mc_cnt_l1_miss);
     $display("*** [mc_l2mshr] occ0=%0d occ1=%0d occ2=%0d occ3p=%0d full=%0d",
              mc_cnt_l2_mshr_occ0, mc_cnt_l2_mshr_occ1, mc_cnt_l2_mshr_occ2,
              mc_cnt_l2_mshr_occ3p, mc_cnt_l2_mshr_full);

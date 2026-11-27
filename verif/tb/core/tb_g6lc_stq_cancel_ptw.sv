@@ -238,6 +238,20 @@ module tb_g6lc_stq_cancel_ptw;
     check(byp_cnt_s == 0 && byp_ready && dut.state_q == 2'd0 && pushes == 3 && wbs == 5 && last_wb_tid == 4'd12,
           "STQ_EX_WAIT_POPPED_ONCE");
 
+    // S6 (mc_multi_writer_line): store E (tid 14) arrives at the store unit
+    // after its scoreboard slot has already been commit-dropped (sb_live=0).
+    // The store must be consumed without push or writeback, even though the
+    // cancel mask was never asserted for it. This is the post-drop/late-
+    // arrival case that the !sb_live_i kill check covers.
+    sb_live[14] = 0;  // tid 14 slot is dead before the store arrives
+    dtlb_hit = 1;     // translation hits so the store would normally proceed
+    offer_store(14, 64'h0000_0000_8000_0000);
+    tick(); tick(); tick();
+    check(pushes == 3, "STQ_DEAD_TID_NOT_PUSHED");
+    check(wbs == 5, "STQ_DEAD_TID_NO_WB");
+    check(byp_cnt_s == 0 && dut.state_q == 2'd0, "STQ_DEAD_TID_POPPED");
+    sb_live[14] = 1;  // restore for any subsequent tests
+
     if (negative) $fatal(1, "ORACLE_NEGATIVE forced");
     $display("PASS tb_g6lc_stq_cancel_ptw checked=%0d", checked);
     $finish;

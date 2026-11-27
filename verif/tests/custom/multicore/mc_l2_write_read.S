@@ -45,6 +45,24 @@ _start:
   csrr s8, 0xB05
 #endif
 
+#ifdef PMU_L1
+  // Publish architectural PMU L1 D$ access/miss deltas and integer hit percent
+  // to pmu_out{0,1,2}. Events 5/2/6 are the legacy load-access, L1 D$ miss,
+  // and store-access events (core/perf_counters.sv). The recovery path is
+  // the same RVFI mem-store slot mechanism as PMU_G1; no RTL or tohost protocol
+  // change is needed. Off by default, so normal directed runs are unchanged.
+  csrw 0x320, zero             // mcountinhibit: let the hpm counters run
+  li   t0, 5
+  csrw 0x323, t0               // mhpmevent3 = legacy idx5: load accesses
+  li   t0, 2
+  csrw 0x324, t0               // mhpmevent4 = legacy idx2: L1 D$ misses
+  li   t0, 6
+  csrw 0x325, t0               // mhpmevent5 = legacy idx6: store accesses
+  csrr s6, 0xB03               // mhpmcounter3 baseline: loads
+  csrr s7, 0xB04               // mhpmcounter4 baseline: misses
+  csrr s8, 0xB05               // mhpmcounter5 baseline: stores
+#endif
+
   li   s0, BUF_BASE            // buffer base
   li   s1, BUF_BYTES           // footprint in bytes
   li   s5, 0                   // iter
@@ -85,7 +103,28 @@ iter:
   sd   s7, 0x18(t0)            // pmu_out1: rename/ROB backpressure delta
   sd   s8, 0x20(t0)            // pmu_out2: IQ/issue-stall delta
 #endif
+#ifdef PMU_L1
+  csrr t0, 0xB03
+  sub  s6, t0, s6              // access delta
+  csrr t0, 0xB04
+  sub  s7, t0, s7              // miss delta
+  csrr t0, 0xB05
+  sub  s8, t0, s8              // store delta
+  sub  t1, s6, s7              // load hits = load accesses - misses
+  li   t2, 100
+  mul  t1, t1, t2
+  divu t1, t1, s6              // integer hit percent (div-by-zero -> all ones)
+  la   t0, tohost
+  sd   s6, 0x10(t0)            // pmu_out0: load-access delta
+  sd   s7, 0x18(t0)            // pmu_out1: L1 D$ miss delta
+  sd   s8, 0x20(t0)            // pmu_out2: store accesses
+  slli t1, t1, 1               // fast no-RVFI channel: tohost=(pct<<1)|1,
+  ori  t1, t1, 1               // so tracer program-exit bits carry the percent
+#endif
   li   a0, 1
+#ifdef PMU_L1
+  slli a0, t1, 0               // PMU_L1 overrides the pass token above
+#endif
   j    done
 mismatch:
 #ifdef ORACLE_NEGATIVE

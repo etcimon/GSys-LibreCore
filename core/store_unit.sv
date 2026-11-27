@@ -268,7 +268,8 @@ module store_unit
   assign st_cancelled = 1'b0;
 `else
   assign st_cancelled = CVA6Cfg.OoOEn && valid_i &&
-                        (lsu_ctrl_i.is_speculative_load_miss || cancelled_mask_i[lsu_ctrl_i.trans_id]);
+                        (lsu_ctrl_i.is_speculative_load_miss || cancelled_mask_i[lsu_ctrl_i.trans_id] ||
+                         !sb_live_i[lsu_ctrl_i.trans_id]);
 `endif
 
   always_comb begin : store_control

@@ -421,7 +421,8 @@ assign result_o = lsu_ctrl_i.data;
   assign st_cancelled = 1'b0;
 `else
   assign st_cancelled = G6LCCfg.OoOEn && valid_i &&
-                        (lsu_ctrl_i.is_speculative_load_miss || cancelled_mask_i[lsu_ctrl_i.trans_id]);
+                        (lsu_ctrl_i.is_speculative_load_miss || cancelled_mask_i[lsu_ctrl_i.trans_id] ||
+                         !sb_live_i[lsu_ctrl_i.trans_id]);
 `endif
 
   // r62: the request at the bypass head is an AMO whose OWN entry already
